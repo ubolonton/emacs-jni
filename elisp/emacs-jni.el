@@ -32,12 +32,21 @@ Same first-start-only caveat as `jvm-classpath'.")
 (defvar jvm--filter-buffer ""
   "Accumulates partial output from `jvm--pipe-process' between newlines.")
 
+(defvar jvm--pending-load-jar nil
+  "Alist of request-id -> callback for in-flight `jvm-load-jar' calls.")
+
 (defun jvm--dispatch-message (sexp)
   "Handle one parsed message SEXP from the JVM worker thread."
   (pcase sexp
     (`(status ,state ,_msg)
      (setq jvm--status state)
      (run-hook-with-args 'jvm-status-hook state))
+    (`(log ,level ,msg)
+     (message "emacs-jni [%s]: %s" level msg))
+    (`(load-jar-done ,id ,ok ,err)
+     (when-let ((callback (alist-get id jvm--pending-load-jar)))
+       (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
+       (funcall callback ok err)))
     (_ (message "emacs-jni: unrecognized channel message: %S" sexp))))
 
 (defun jvm--process-filter (_proc data)
@@ -144,6 +153,28 @@ before this call, so it doesn't get stuck at `stopping'."
         (when (> (float-time) deadline)
           (signal 'jvm-timeout (list 'jvm-stop-sync))))))
   (jvm-status))
+
+(defun jvm-load-jar (path &optional callback)
+  "Load the jar at PATH into the shared classloader asynchronously.
+Returns a request id immediately. If CALLBACK is given, it is called as
+\(CALLBACK OK ERR) once loading finishes."
+  (let ((id (jvm--load-jar path)))
+    (when callback
+      (push (cons id callback) jvm--pending-load-jar))
+    id))
+
+(defun jvm-load-jar-sync (path &optional timeout)
+  "Like `jvm-load-jar', but blocks until it finishes or TIMEOUT (default 30s).
+Returns a cons (OK . ERR); signals `jvm-timeout' if TIMEOUT elapses first."
+  (let* ((result :pending)
+         (id (jvm-load-jar path (lambda (ok err) (setq result (cons ok err)))))
+         (deadline (+ (float-time) (or timeout 30))))
+    (while (eq result :pending)
+      (unless (accept-process-output jvm--pipe-process 0.1)
+        (when (> (float-time) deadline)
+          (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
+          (signal 'jvm-timeout (list 'jvm-load-jar-sync path)))))
+    result))
 
 (provide 'emacs-jni)
 ;;; emacs-jni.el ends here

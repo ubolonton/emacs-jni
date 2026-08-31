@@ -10,6 +10,11 @@ if [ -z "${JAVA_HOME:-}" ] && command -v mise >/dev/null 2>&1; then
     export JAVA_HOME="$(mise where java)"
 fi
 
+mkdir -p target/test-fixtures
+javac -d target/test-fixtures test/fixtures/Greeter.java
+jar cf target/test-fixtures/greeter.jar -C target/test-fixtures Greeter.class
+export EMACS_JNI_GREETER_JAR="$(pwd)/target/test-fixtures/greeter.jar"
+
 CARGO_FEATURES="${EMACS_JNI_TEST_FEATURES:-}"
 if [ -n "$CARGO_FEATURES" ]; then
     cargo build --features "$CARGO_FEATURES"

@@ -20,7 +20,7 @@ fn jvm_ping() -> Result<bool> {
     Ok(true)
 }
 
-use crate::status::STATUS;
+use crate::status::{Status, STATUS};
 
 emacs::define_errors! {
     jvm_illegal_transition "JVM operation not allowed in the current state"
@@ -61,6 +61,18 @@ fn jvm_stop(env: &Env) -> Result<()> {
             Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
         },
         Err(current) => env.signal(jvm_illegal_transition, (current.as_tag(),)),
+    }
+}
+
+#[defun(mod_in_name = false, name = "jvm--load-jar")]
+fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
+    if STATUS.get() != Status::Ready {
+        return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
+    }
+    let id = worker::next_request_id();
+    match worker::send_command(commands::Cmd::LoadJar { id, path }) {
+        Ok(()) => Ok(id),
+        Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
     }
 }
 
