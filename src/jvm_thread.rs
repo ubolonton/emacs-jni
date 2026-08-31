@@ -30,8 +30,12 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
         match cmd {
             Cmd::Resume => handle_resume(&vm),
             Cmd::Pause => handle_pause(&vm),
-            // Handled starting in Task 6, 7 respectively.
-            Cmd::Stop | Cmd::LoadJar { .. } => {}
+            Cmd::Stop => {
+                handle_stop(vm);
+                break;
+            }
+            // Handled starting in Task 7.
+            Cmd::LoadJar { .. } => {}
         }
     }
 }
@@ -66,6 +70,26 @@ fn handle_pause(vm: &JavaVM) {
             ));
         }
     }
+}
+
+fn handle_stop(vm: JavaVM) {
+    // Safety: `destroy` requires no Java methods on the calling thread's
+    // stack (true here — we're between command handlers) and that the
+    // JavaVM isn't used again afterward except to drop it, which is
+    // exactly what follows.
+    let result = unsafe { vm.destroy() };
+    std::mem::drop(vm);
+    match result {
+        Ok(()) => {
+            STATUS.finish(Status::Stopped);
+            channel::send(&protocol::status_message(Status::Stopped, None));
+        }
+        Err(e) => {
+            STATUS.finish(Status::StopFailed);
+            channel::send(&protocol::status_message(Status::StopFailed, Some(&e.to_string())));
+        }
+    }
+    worker::clear_sender();
 }
 
 fn handle_resume(vm: &JavaVM) {

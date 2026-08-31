@@ -118,5 +118,32 @@ before this call, so it doesn't get stuck at `pausing'."
           (signal 'jvm-timeout (list 'jvm-pause-sync))))))
   (jvm-status))
 
+(defun jvm-stop ()
+  "Attempt to fully tear down the JVM asynchronously. Experimental: this
+relies on JNI_DestroyJavaVM, which some JVM builds handle unreliably (see
+the design spec's Risks section). `jvm-start' afterward is best-effort.
+If the `jvm--stop' primitive signals an error (e.g. because the current
+status doesn't allow stopping), `jvm--status' is reverted to what it was
+before this call, so it doesn't get stuck at `stopping'."
+  (let ((previous-status jvm--status))
+    (setq jvm--status 'stopping)
+    (run-hook-with-args 'jvm-status-hook 'stopping)
+    (condition-case err
+        (jvm--stop)
+      (error
+       (setq jvm--status previous-status)
+       (run-hook-with-args 'jvm-status-hook previous-status)
+       (signal (car err) (cdr err))))))
+
+(defun jvm-stop-sync (&optional timeout)
+  "Like `jvm-stop', but blocks until stopped/stop-failed or TIMEOUT (default 30s)."
+  (jvm-stop)
+  (let ((deadline (+ (float-time) (or timeout 30))))
+    (while (eq (jvm-status) 'stopping)
+      (unless (accept-process-output jvm--pipe-process 0.1)
+        (when (> (float-time) deadline)
+          (signal 'jvm-timeout (list 'jvm-stop-sync))))))
+  (jvm-status))
+
 (provide 'emacs-jni)
 ;;; emacs-jni.el ends here
