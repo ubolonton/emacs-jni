@@ -1,7 +1,11 @@
 use emacs::{defun, Env, Result, Value};
 
-mod status;
+mod channel;
+mod commands;
+mod jvm_thread;
 mod protocol;
+mod status;
+mod worker;
 
 emacs::plugin_is_GPL_compatible!();
 
@@ -14,4 +18,42 @@ fn init(env: &Env) -> Result<Value<'_>> {
 #[defun(mod_in_name = false, name = "jvm-ping")]
 fn jvm_ping() -> Result<bool> {
     Ok(true)
+}
+
+use crate::status::STATUS;
+
+emacs::define_errors! {
+    jvm_illegal_transition "JVM operation not allowed in the current state"
+}
+
+#[defun(mod_in_name = false, name = "jvm--init-channel")]
+fn jvm_init_channel(env: &Env, process: Value) -> Result<()> {
+    channel::init(env, process)
+}
+
+#[defun(mod_in_name = false, name = "jvm--start")]
+fn jvm_start(env: &Env, classpath: Value, options: Value) -> Result<()> {
+    match STATUS.begin_start() {
+        Ok(()) => {
+            worker::start_or_resume(string_list(classpath)?, string_list(options)?);
+            Ok(())
+        }
+        Err(current) => env.signal(jvm_illegal_transition, (current.as_tag(),)),
+    }
+}
+
+/// Converts a Lisp list of strings into a `Vec<String>` by walking its cons
+/// cells. `emacs` 0.21 has no `FromLisp` impl for `Vec<T>` (`#[defun]`
+/// parameters must be scalar `FromLisp` types, `&Env`, or `Value`/its
+/// sub-types like `Vector` — verified against the compiler's own error and
+/// the crate source, which lists only scalar/`Value`/`Vector`/`GlobalRef`
+/// impls), so `classpath`/`options` are received as raw `Value` and
+/// converted here instead of directly as `Vec<String>` parameters.
+fn string_list(mut list: Value) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    while list.is_not_nil() {
+        out.push(list.car()?);
+        list = list.cdr()?;
+    }
+    Ok(out)
 }

@@ -3,6 +3,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# jni-rs's `invocation` feature locates libjvm.so via JAVA_HOME (or `java`
+# on PATH) at runtime. Export it here so tests that create a real JVM don't
+# depend on every invoking shell already having it set.
+if [ -z "${JAVA_HOME:-}" ] && command -v mise >/dev/null 2>&1; then
+    export JAVA_HOME="$(mise where java)"
+fi
+
 CARGO_FEATURES="${EMACS_JNI_TEST_FEATURES:-}"
 if [ -n "$CARGO_FEATURES" ]; then
     cargo build --features "$CARGO_FEATURES"
