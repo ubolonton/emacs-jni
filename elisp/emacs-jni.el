@@ -93,5 +93,30 @@ before this call, so it doesn't get stuck at `starting'."
           (signal 'jvm-timeout (list 'jvm-start-sync))))))
   (jvm-status))
 
+(defun jvm-pause ()
+  "Pause the JVM asynchronously (detaches the worker thread; JVM state is retained).
+If the `jvm--pause' primitive signals an error (e.g. because the current
+status doesn't allow pausing), `jvm--status' is reverted to what it was
+before this call, so it doesn't get stuck at `pausing'."
+  (let ((previous-status jvm--status))
+    (setq jvm--status 'pausing)
+    (run-hook-with-args 'jvm-status-hook 'pausing)
+    (condition-case err
+        (jvm--pause)
+      (error
+       (setq jvm--status previous-status)
+       (run-hook-with-args 'jvm-status-hook previous-status)
+       (signal (car err) (cdr err))))))
+
+(defun jvm-pause-sync (&optional timeout)
+  "Like `jvm-pause', but blocks until paused or TIMEOUT (default 30s) elapses."
+  (jvm-pause)
+  (let ((deadline (+ (float-time) (or timeout 30))))
+    (while (eq (jvm-status) 'pausing)
+      (unless (accept-process-output jvm--pipe-process 0.1)
+        (when (> (float-time) deadline)
+          (signal 'jvm-timeout (list 'jvm-pause-sync))))))
+  (jvm-status))
+
 (provide 'emacs-jni)
 ;;; emacs-jni.el ends here

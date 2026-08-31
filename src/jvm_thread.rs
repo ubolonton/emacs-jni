@@ -29,11 +29,9 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
     for cmd in receiver {
         match cmd {
             Cmd::Resume => handle_resume(&vm),
-            // Handled starting in Task 5, 6, 7 respectively. This
-            // catch-all keeps the match exhaustive in the meantime; each
-            // task that adds real handling replaces the corresponding
-            // line here (see that task's Step for the exact diff).
-            Cmd::Pause | Cmd::Stop | Cmd::LoadJar { .. } => {}
+            Cmd::Pause => handle_pause(&vm),
+            // Handled starting in Task 6, 7 respectively.
+            Cmd::Stop | Cmd::LoadJar { .. } => {}
         }
     }
 }
@@ -48,6 +46,26 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     }
     let init_args = builder.build().map_err(|e| e.to_string())?;
     JavaVM::new(init_args).map_err(|e| e.to_string())
+}
+
+fn handle_pause(vm: &JavaVM) {
+    match vm.detach_current_thread() {
+        Ok(()) => {
+            STATUS.finish(Status::Paused);
+            channel::send(&protocol::status_message(Status::Paused, None));
+        }
+        Err(e) => {
+            // Detach failing is unexpected; stay in `pausing` rather than
+            // claiming success we can't back up, and surface it as a log
+            // line rather than a status (there's no `pause-failed` state
+            // in the spec's state machine, so pausing simply never
+            // completes — the caller's `-sync` wrapper times out).
+            channel::send(&protocol::log_message(
+                "error",
+                &format!("jvm-pause: detach_current_thread failed: {e}"),
+            ));
+        }
+    }
 }
 
 fn handle_resume(vm: &JavaVM) {
