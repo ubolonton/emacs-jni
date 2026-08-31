@@ -1,5 +1,7 @@
 use emacs::{defun, Env, Result, Value};
 
+mod status;
+
 emacs::plugin_is_GPL_compatible!();
 
 #[emacs::module(defun_prefix = "", separator = "")]
