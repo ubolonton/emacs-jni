@@ -1,0 +1,15 @@
+[package]
+name = "emacs-jni"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "emacs_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+emacs = { version = "0.21", features = ["emacs-28"] }
+jni = { version = "0.22", features = ["invocation"] }
+
+[features]
+test-support = []
