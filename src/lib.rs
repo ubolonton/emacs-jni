@@ -1,6 +1,7 @@
 use emacs::{defun, Env, Result, Value};
 
 mod status;
+mod protocol;
 
 emacs::plugin_is_GPL_compatible!();
 
