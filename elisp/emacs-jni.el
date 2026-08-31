@@ -66,11 +66,20 @@ Same first-start-only caveat as `jvm-classpath'.")
 
 (defun jvm-start (&optional classpath options)
   "Start (or resume) the JVM asynchronously.
-CLASSPATH and OPTIONS default to `jvm-classpath' and `jvm-options'."
+CLASSPATH and OPTIONS default to `jvm-classpath' and `jvm-options'.
+If the `jvm--start' primitive signals an error (e.g. because the current
+status doesn't allow starting), `jvm--status' is reverted to what it was
+before this call, so it doesn't get stuck at `starting'."
   (jvm--ensure-pipe-process)
-  (setq jvm--status 'starting)
-  (run-hook-with-args 'jvm-status-hook 'starting)
-  (jvm--start (or classpath jvm-classpath) (or options jvm-options)))
+  (let ((previous-status jvm--status))
+    (setq jvm--status 'starting)
+    (run-hook-with-args 'jvm-status-hook 'starting)
+    (condition-case err
+        (jvm--start (or classpath jvm-classpath) (or options jvm-options))
+      (error
+       (setq jvm--status previous-status)
+       (run-hook-with-args 'jvm-status-hook previous-status)
+       (signal (car err) (cdr err))))))
 
 (define-error 'jvm-timeout "Timed out waiting for the JVM")
 
