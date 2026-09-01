@@ -8,4 +8,6 @@ pub enum Cmd {
     Pause,
     Stop,
     LoadJar { id: u64, path: String },
+    #[cfg(feature = "test-support")]
+    TestPanic,
 }

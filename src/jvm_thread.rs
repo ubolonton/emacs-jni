@@ -31,14 +31,41 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
     let mut loader: Option<jni::refs::Global<jni::objects::JObject<'static>>> = None;
 
     for cmd in receiver {
-        match cmd {
-            Cmd::Resume => handle_resume(&vm),
-            Cmd::Pause => handle_pause(&vm),
-            Cmd::Stop => {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd {
+            Cmd::Resume => {
+                handle_resume(&vm);
+                false
+            }
+            Cmd::Pause => {
+                handle_pause(&vm);
+                false
+            }
+            Cmd::Stop => true, // signal "stop after this iteration" below
+            Cmd::LoadJar { id, path } => {
+                handle_load_jar(&vm, &mut loader, id, path);
+                false
+            }
+            #[cfg(feature = "test-support")]
+            Cmd::TestPanic => panic!("jvm--test-panic: deliberate panic for crash-handling tests"),
+        }));
+
+        match outcome {
+            Ok(true) => {
+                // Cmd::Stop: `vm` needs to move into handle_stop, which
+                // catch_unwind's closure can't do (AssertUnwindSafe wraps
+                // a Fn-like closure, not a one-shot move of `vm` itself).
+                // Call it here, outside the closure, then break.
                 handle_stop(vm);
                 break;
             }
-            Cmd::LoadJar { id, path } => handle_load_jar(&vm, &mut loader, id, path),
+            Ok(false) => {}
+            Err(payload) => {
+                let message = panic_message(&payload);
+                STATUS.finish(Status::Crashed);
+                channel::send(&protocol::status_message(Status::Crashed, Some(&message)));
+                worker::clear_sender();
+                return;
+            }
         }
     }
 }
@@ -53,6 +80,16 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     }
     let init_args = builder.build().map_err(|e| e.to_string())?;
     JavaVM::new(init_args).map_err(|e| e.to_string())
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 fn handle_pause(vm: &JavaVM) {

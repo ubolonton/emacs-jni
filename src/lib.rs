@@ -76,6 +76,15 @@ fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
     }
 }
 
+#[cfg(feature = "test-support")]
+#[defun(mod_in_name = false, name = "jvm--test-panic")]
+fn jvm_test_panic(env: &Env) -> Result<()> {
+    match worker::send_command(commands::Cmd::TestPanic) {
+        Ok(()) => Ok(()),
+        Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
+    }
+}
+
 /// Converts a Lisp list of strings into a `Vec<String>` by walking its cons
 /// cells. `emacs` 0.21 has no `FromLisp` impl for `Vec<T>` (`#[defun]`
 /// parameters must be scalar `FromLisp` types, `&Env`, or `Value`/its
