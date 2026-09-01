@@ -79,6 +79,96 @@ fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
     }
 }
 
+#[defun(mod_in_name = false, name = "jvm--call")]
+fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64> {
+    if STATUS.get() != Status::Ready {
+        return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
+    }
+    let target = if let Ok(class_name) = target.into_rust::<String>() {
+        commands::CallTarget::ClassName(class_name)
+    } else {
+        // `JvmHandle` only has a `FromLisp` impl for `&JvmHandle` (the
+        // `emacs` crate's blanket `user-ptr` impl is `impl<'e, T: Transfer>
+        // FromLisp<'e> for &'e T`, not for a bare `T` — verified against
+        // the vendored emacs-0.21.0 source, `src/types/user_ptr.rs`), so
+        // this must ask for a reference, not an owned value.
+        let h: &handles::JvmHandle = target.into_rust()?;
+        commands::CallTarget::Object(h.0)
+    };
+    let args = lisp_list_to_args(args)?;
+    let id = worker::next_request_id();
+    match worker::send_command(commands::Cmd::Call { id, target, member, args }) {
+        Ok(()) => Ok(id),
+        Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
+    }
+}
+
+/// Constructs a `JvmHandle` `user-ptr` from a raw handle integer received
+/// over the wire (in a `(jvm-handle N)` tag — see `marshal::lisp_arg_to_sexp`).
+/// The Rust-side handle table entry itself already exists by the time this
+/// runs (it was populated by `marshal::jvm_value_to_lisp_arg` when the
+/// value first crossed from Java to Lisp); this just gives Lisp a
+/// `user-ptr` wrapper for the handle number it already received.
+#[defun(mod_in_name = false, name = "jvm--wrap-handle")]
+fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
+    Ok(Box::new(handles::JvmHandle(handle)))
+}
+
+/// Walks a Lisp list of arguments (as raw `Value`s, same pattern as the
+/// existing `string_list` helper) converting each to a `LispArg` by
+/// runtime type. Symbols other than `t`/`nil`, or any Lisp value not
+/// covered by the spec's marshalling table, is treated as `LispArg::True`
+/// rather than a signalled error — see `lisp_value_to_arg`'s doc comment.
+fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::LispArg>> {
+    let mut out = Vec::new();
+    while list.is_not_nil() {
+        let item: Value = list.car()?;
+        out.push(lisp_value_to_arg(item)?);
+        list = list.cdr()?;
+    }
+    Ok(out)
+}
+
+/// Converts a single Lisp value to a `LispArg` by runtime type, trying
+/// each marshallable Lisp type in turn.
+fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
+    if !v.is_not_nil() {
+        return Ok(commands::LispArg::Nil);
+    }
+    if let Ok(n) = v.into_rust::<i64>() {
+        return Ok(commands::LispArg::Int(n));
+    }
+    // A Lisp integer (fixnum or bignum) that didn't fit in i64 above is a
+    // bignum too large for a 64-bit register — this must be routed
+    // through `LispArg::BigInt` via its exact decimal string, not the
+    // `f64` attempt below. `extract_float` (which backs `into_rust::<f64>`)
+    // coerces any Lisp number, including bignums, so skipping this check
+    // would silently accept a bignum as a lossy `LispArg::Float` instead of
+    // erroring or round-tripping exactly — the same "don't silently
+    // misrepresent" concern `marshal::jvm_value_to_lisp_arg` (Task 4)
+    // already applies on the Java-to-Lisp direction for boxed Long/Integer.
+    if v.env.call("integerp", (v,))?.is_not_nil() {
+        let digits: String = v.env.call("number-to-string", (v,))?.into_rust()?;
+        return Ok(commands::LispArg::BigInt(digits));
+    }
+    if let Ok(f) = v.into_rust::<f64>() {
+        return Ok(commands::LispArg::Float(f));
+    }
+    if let Ok(s) = v.into_rust::<String>() {
+        return Ok(commands::LispArg::Str(s));
+    }
+    if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
+        return Ok(commands::LispArg::Object(h.0));
+    }
+    // `t` and Lisp functions are the remaining cases: `t` has no useful
+    // into_rust::<T>() scalar conversion, and functions are Task 6's
+    // territory (auto-wrap-as-LispFunction, which needs Lisp-side function-
+    // table bookkeeping this module doesn't have). Both fall through to
+    // `LispArg::True` for now — Task 6 replaces this fallback with real
+    // function-handling.
+    Ok(commands::LispArg::True)
+}
+
 #[cfg(feature = "test-support")]
 #[defun(mod_in_name = false, name = "jvm--test-panic")]
 fn jvm_test_panic(env: &Env) -> Result<()> {

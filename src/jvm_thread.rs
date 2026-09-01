@@ -1,9 +1,11 @@
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 
 use jni::vm::{InitArgsBuilder, JavaVM};
 use jni::JNIVersion;
 
 use crate::commands::Cmd;
+use crate::marshal::marshal_error;
 use crate::protocol;
 use crate::status::{Status, STATUS};
 use crate::{channel, worker};
@@ -27,8 +29,12 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
     };
 
     // Lazily created on the first LoadJar command, then reused so every
-    // loaded jar shares one classloader (see spec: "Jar loading").
-    let mut loader: Option<jni::refs::Global<jni::objects::JObject<'static>>> = None;
+    // loaded jar shares one classloader (see spec: "Jar loading"). `Arc`-
+    // wrapped (not a bare `Global`, which has no `Clone` impl in jni 0.22 —
+    // same reasoning as `handles::TABLE`) so `Cmd::Call`'s per-call thread
+    // (Task 5) can cheaply clone out a reference to it without needing a
+    // live `Env` on this thread.
+    let mut loader: Option<Arc<jni::refs::Global<jni::objects::JObject<'static>>>> = None;
 
     for cmd in receiver {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd {
@@ -45,7 +51,17 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 handle_load_jar(&vm, &mut loader, id, path);
                 false
             }
-            Cmd::Call { .. } | Cmd::InvokeReply { .. } | Cmd::ReleaseRef { .. } => false,
+            Cmd::Call { id, target, member, args } => {
+                // Never handled inline here — see `handle_call`'s doc
+                // comment: an arbitrary Java call can take a long time for
+                // reasons unrelated to callbacks, and must not stall other
+                // pending commands on this dispatch loop.
+                let vm = vm.clone();
+                let loader = loader.clone();
+                std::thread::spawn(move || handle_call(&vm, loader, id, target, member, args));
+                false
+            }
+            Cmd::InvokeReply { .. } | Cmd::ReleaseRef { .. } => false,
             #[cfg(feature = "test-support")]
             Cmd::TestPanic => panic!("jvm--test-panic: deliberate panic for crash-handling tests"),
         }));
@@ -160,7 +176,7 @@ fn handle_resume(vm: &JavaVM) {
 
 fn handle_load_jar(
     vm: &JavaVM,
-    loader: &mut Option<jni::refs::Global<jni::objects::JObject<'static>>>,
+    loader: &mut Option<Arc<jni::refs::Global<jni::objects::JObject<'static>>>>,
     id: u64,
     path: String,
 ) {
@@ -182,7 +198,7 @@ fn handle_load_jar(
 
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
         if loader.is_none() {
-            *loader = Some(create_shared_classloader(env)?);
+            *loader = Some(Arc::new(create_shared_classloader(env)?));
         }
         let loader_local = env.new_local_ref(loader.as_ref().unwrap().as_obj())?;
         add_jar_url(env, &loader_local, &path)
@@ -286,6 +302,235 @@ fn add_jar_url(
     )?;
 
     Ok(())
+}
+
+/// Handles a `Cmd::Call`: resolves TARGET.MEMBER reflectively and invokes
+/// it with ARGS, then sends a `call-done` message with the result. Runs on
+/// its own short-lived thread (spawned by `run`'s `Cmd::Call` arm above) —
+/// never inline on the worker's dispatch loop, per spec "Worker thread
+/// role": an arbitrary Java call can take a long time for reasons unrelated
+/// to callbacks, and must not stall other pending commands.
+fn handle_call(
+    vm: &JavaVM,
+    loader: Option<Arc<jni::refs::Global<jni::objects::JObject<'static>>>>,
+    id: u64,
+    target: crate::commands::CallTarget,
+    member: String,
+    args: Vec<crate::commands::LispArg>,
+) {
+    let result: jni::errors::Result<crate::commands::LispArg> = vm.attach_current_thread(|env| {
+        let (class, instance): (jni::objects::JClass, Option<jni::objects::JObject>) = match &target {
+            crate::commands::CallTarget::ClassName(name) => {
+                let class = match &loader {
+                    // A jar has been loaded at least once: classes it
+                    // provides only live in *this* classloader's URL list,
+                    // not on the default `FindClass` search path (verified
+                    // empirically in Task 7 — see `add_jar_url`'s own test,
+                    // which resolves `Greeter` the same way, via
+                    // `loadClass`, not `find_class`). Routing every
+                    // class-name lookup through the shared loader once it
+                    // exists still finds plain JDK classes too, since
+                    // `URLClassLoader#loadClass` delegates to its parent
+                    // (the platform loader) before consulting its own URLs.
+                    Some(global) => {
+                        let loader_local = env.new_local_ref(global.as_obj())?;
+                        resolve_class_via_loader(env, &loader_local, name)?
+                    }
+                    // No jar ever loaded: fall back to a plain `FindClass`,
+                    // which covers plain JDK classes (e.g. "java.lang.Math")
+                    // without needing a classloader object at all.
+                    None => {
+                        let internal_name = name.replace('.', "/");
+                        env.find_class(jni::strings::JNIString::from(internal_name))?
+                    }
+                };
+                (class, None)
+            }
+            crate::commands::CallTarget::Object(handle) => {
+                let global = crate::handles::resolve(*handle)
+                    .ok_or_else(|| marshal_error(&format!("unknown JVM object handle {handle}")))?;
+                let local = env.new_local_ref(global.as_obj())?;
+                (env.get_object_class(&local)?, Some(local))
+            }
+        };
+
+        if member == "<init>" {
+            invoke_constructor(env, &class, &args)
+        } else {
+            invoke_method(env, &class, instance.as_ref(), &member, &args)
+        }
+    });
+
+    match result {
+        Ok(value) => {
+            let sexp = crate::marshal::lisp_arg_to_sexp(&value);
+            channel::send(&protocol::call_done_message(id, true, Some(&sexp), None));
+        }
+        Err(e) => channel::send(&protocol::call_done_message(id, false, None, Some(&e.to_string()))),
+    }
+}
+
+/// Resolves NAME (a dotted binary class name, e.g. `"java.lang.String"` or
+/// `"Calc"`) to a `Class` object via LOADER's public `loadClass` method —
+/// the same approach `add_jar_url`'s own test already uses to prove a
+/// jar-loaded class is reachable through this loader.
+fn resolve_class_via_loader<'local>(
+    env: &mut jni::Env<'local>,
+    loader: &jni::objects::JObject<'_>,
+    name: &str,
+) -> jni::errors::Result<jni::objects::JClass<'local>> {
+    let jname = env.new_string(name)?;
+    let class_obj = env
+        .call_method(
+            loader,
+            jni::jni_str!("loadClass"),
+            jni::jni_sig!((name: java.lang.String) -> java.lang.Class),
+            &[jni::objects::JValue::Object(&jname.into())],
+        )?
+        .l()?;
+    env.cast_local::<jni::objects::JClass>(class_obj)
+}
+
+/// Finds an overload of METHOD_NAME on CLASS whose parameter count matches
+/// ARGS, invokes it, and marshals the result. Ambiguous overloads (same
+/// arg count, multiple candidates) resolve to the first match from
+/// `getMethods()` — acceptable for a prototype; a real overload-resolution
+/// algorithm (assignability-based scoring) is future work if this proves
+/// too coarse in practice.
+fn invoke_method(
+    env: &mut jni::Env<'_>,
+    class: &jni::objects::JClass,
+    instance: Option<&jni::objects::JObject>,
+    method_name: &str,
+    args: &[crate::commands::LispArg],
+) -> jni::errors::Result<crate::commands::LispArg> {
+    let methods = env
+        .call_method(
+            class,
+            jni::jni_str!("getMethods"),
+            jni::jni_sig!(() -> [java.lang.reflect.Method]),
+            &[],
+        )?
+        .l()?;
+    let methods = env.cast_local::<jni::objects::JObjectArray>(methods)?;
+    let count = methods.len(env)?;
+
+    let null_receiver = jni::objects::JObject::null();
+    let receiver = instance.unwrap_or(&null_receiver);
+
+    for i in 0..count {
+        let candidate = methods.get_element(env, i)?;
+        let name = env
+            .call_method(&candidate, jni::jni_str!("getName"), jni::jni_sig!(() -> java.lang.String), &[])?
+            .l()?;
+        let name = env.cast_local::<jni::objects::JString>(name)?.to_string();
+        if name != method_name {
+            continue;
+        }
+        let param_types = env
+            .call_method(
+                &candidate,
+                jni::jni_str!("getParameterTypes"),
+                jni::jni_sig!(() -> [java.lang.Class]),
+                &[],
+            )?
+            .l()?;
+        let param_types = env.cast_local::<jni::objects::JObjectArray>(param_types)?;
+        if param_types.len(env)? != args.len() {
+            continue;
+        }
+
+        let invoke_args = build_invoke_args(env, &param_types, args)?;
+
+        let result = env
+            .call_method(
+                &candidate,
+                jni::jni_str!("invoke"),
+                jni::jni_sig!((obj: java.lang.Object, args: [java.lang.Object]) -> java.lang.Object),
+                &[
+                    jni::objects::JValue::Object(receiver),
+                    jni::objects::JValue::Object(&invoke_args),
+                ],
+            )?
+            .l()?;
+        return crate::marshal::jvm_value_to_lisp_arg(env, jni::objects::JValueOwned::Object(result));
+    }
+
+    Err(marshal_error(&format!(
+        "no method {method_name} with {} argument(s) found",
+        args.len()
+    )))
+}
+
+fn invoke_constructor(
+    env: &mut jni::Env<'_>,
+    class: &jni::objects::JClass,
+    args: &[crate::commands::LispArg],
+) -> jni::errors::Result<crate::commands::LispArg> {
+    let constructors = env
+        .call_method(
+            class,
+            jni::jni_str!("getConstructors"),
+            jni::jni_sig!(() -> [java.lang.reflect.Constructor]),
+            &[],
+        )?
+        .l()?;
+    let constructors = env.cast_local::<jni::objects::JObjectArray>(constructors)?;
+    let count = constructors.len(env)?;
+
+    for i in 0..count {
+        let candidate = constructors.get_element(env, i)?;
+        let param_types = env
+            .call_method(
+                &candidate,
+                jni::jni_str!("getParameterTypes"),
+                jni::jni_sig!(() -> [java.lang.Class]),
+                &[],
+            )?
+            .l()?;
+        let param_types = env.cast_local::<jni::objects::JObjectArray>(param_types)?;
+        if param_types.len(env)? != args.len() {
+            continue;
+        }
+
+        let invoke_args = build_invoke_args(env, &param_types, args)?;
+
+        let instance = env
+            .call_method(
+                &candidate,
+                jni::jni_str!("newInstance"),
+                jni::jni_sig!((args: [java.lang.Object]) -> java.lang.Object),
+                &[jni::objects::JValue::Object(&invoke_args)],
+            )?
+            .l()?;
+        return crate::marshal::jvm_value_to_lisp_arg(env, jni::objects::JValueOwned::Object(instance));
+    }
+
+    Err(marshal_error(&format!(
+        "no constructor with {} argument(s) found",
+        args.len()
+    )))
+}
+
+/// Shared by `invoke_method`/`invoke_constructor`: marshals ARGS against
+/// PARAM_TYPES's declared types (in that order — `lisp_arg_to_jvalue` is
+/// type-directed) and boxes any primitive result, since `Method.invoke`/
+/// `Constructor.newInstance` both take a plain `Object[]`.
+fn build_invoke_args<'local>(
+    env: &mut jni::Env<'local>,
+    param_types: &jni::objects::JObjectArray<'local>,
+    args: &[crate::commands::LispArg],
+) -> jni::errors::Result<jni::objects::JObjectArray<'local>> {
+    let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
+    let invoke_args = env.new_object_array(args.len() as i32, &object_class, jni::objects::JObject::null())?;
+    for (i, arg) in args.iter().enumerate() {
+        let param_type_obj = param_types.get_element(env, i)?;
+        let param_type = env.cast_local::<jni::objects::JClass>(param_type_obj)?;
+        let jvalue = crate::marshal::lisp_arg_to_jvalue(env, arg, &param_type)?;
+        let boxed = crate::marshal::box_if_primitive(env, jvalue)?;
+        invoke_args.set_element(env, i, boxed)?;
+    }
+    Ok(invoke_args)
 }
 
 #[cfg(test)]

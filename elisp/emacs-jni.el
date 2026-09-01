@@ -48,6 +48,9 @@ HANDOFF.md).")
 (defvar jvm--pending-load-jar nil
   "Alist of request-id -> callback for in-flight `jvm-load-jar' calls.")
 
+(defvar jvm--pending-call nil
+  "Alist of request-id -> callback for in-flight `jvm-call'/`jvm-new' calls.")
+
 (defvar jvm--log-buffer-name "*jvm-log*"
   "Name of the buffer that accumulates JVM log and status-failure messages.")
 
@@ -72,7 +75,18 @@ HANDOFF.md).")
      (when-let ((callback (alist-get id jvm--pending-load-jar)))
        (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
        (funcall callback ok err)))
+    (`(call-done ,id ,ok ,result ,err)
+     (when-let ((callback (alist-get id jvm--pending-call)))
+       (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
+       (funcall callback ok (jvm--resolve-sexp-result result) err)))
     (_ (message "emacs-jni: unrecognized channel message: %S" sexp))))
+
+(defun jvm--resolve-sexp-result (result)
+  "Convert RESULT as parsed from the wire (may contain `(jvm-handle N)')
+into its final Lisp-visible form."
+  (pcase result
+    (`(jvm-handle ,n) (jvm--wrap-handle n))
+    (_ result)))
 
 (defun jvm--process-filter (_proc data)
   "Accumulate DATA and dispatch each complete newline-terminated S-expression."
@@ -92,6 +106,11 @@ HANDOFF.md).")
            :name "emacs-jni-channel"
            :filter #'jvm--process-filter
            :noquery t))
+    ;; Multiple Lisp threads may independently call a `-sync' wrapper;
+    ;; without this, any thread other than whichever one created the
+    ;; process hard-errors on its first `accept-process-output' (verified
+    ;; empirically — see .probe/lisp-thread-filter-probe/).
+    (set-process-thread jvm--pipe-process nil)
     (jvm--init-channel jvm--pipe-process)))
 
 (defun jvm-status ()
@@ -200,6 +219,42 @@ Returns a cons (OK . ERR); signals `jvm-timeout' if TIMEOUT elapses first."
           (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
           (signal 'jvm-timeout (list 'jvm-load-jar-sync path)))))
     result))
+
+(defun jvm-call (target member args &optional callback)
+  "Call TARGET.MEMBER(ARGS...) on the JVM asynchronously.
+TARGET is a class-name string (static call) or a wrapped JVM object
+\(instance call). ARGS is a list. Returns a request id immediately. If
+CALLBACK is given, it is called as (CALLBACK OK RESULT ERR) once the call
+finishes."
+  (let ((id (jvm--call target member args)))
+    (when callback
+      (push (cons id callback) jvm--pending-call))
+    id))
+
+(defun jvm-call-sync (target member args &optional timeout)
+  "Like `jvm-call', but blocks until it finishes or TIMEOUT (default 30s).
+Returns (OK RESULT ERR) as a 3-element list; signals `jvm-timeout' if
+TIMEOUT elapses first."
+  (let* ((result :pending)
+         (id (jvm-call target member args
+                        (lambda (ok res err) (setq result (list ok res err)))))
+         (deadline (+ (float-time) (or timeout 30))))
+    (while (eq result :pending)
+      (unless (accept-process-output jvm--pipe-process 0.1)
+        (when (> (float-time) deadline)
+          (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
+          (signal 'jvm-timeout (list 'jvm-call-sync target member)))))
+    result))
+
+(defun jvm-new (class-name args &optional callback)
+  "Construct a new CLASS-NAME(ARGS...) instance on the JVM asynchronously.
+Sugar over `jvm-call' with MEMBER set to the constructor's actual internal
+JVM bytecode name, `\"<init>\"'."
+  (jvm-call class-name "<init>" args callback))
+
+(defun jvm-new-sync (class-name args &optional timeout)
+  "Like `jvm-new', but blocks. See `jvm-call-sync'."
+  (jvm-call-sync class-name "<init>" args timeout))
 
 (provide 'emacs-jni)
 ;;; emacs-jni.el ends here

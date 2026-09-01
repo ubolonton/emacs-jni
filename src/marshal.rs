@@ -118,8 +118,98 @@ fn class_name(env: &mut jni::Env<'_>, class: &JClass<'_>) -> jni::errors::Result
 /// label mismatch (these aren't parse failures), but it's the closest fit
 /// available without widening this task's scope into inventing new error
 /// infrastructure.
-fn marshal_error(msg: &str) -> jni::errors::Error {
+// `pub(crate)` rather than private: Task 5's `jvm_thread.rs` needs the exact
+// same "wrap an owned message as a jni::errors::Error" behavior for its own
+// application-level errors (unknown handle, no matching overload, etc.) —
+// none of those are marshalling failures either, so the name is already a
+// bit of a misnomer even here, but introducing a second, identically-bodied
+// helper in `jvm_thread.rs` would just be duplication for duplication's
+// sake. Reusing this one directly keeps there being exactly one "make an
+// ad hoc jni::errors::Error" function in the crate.
+pub(crate) fn marshal_error(msg: &str) -> jni::errors::Error {
     jni::errors::Error::ParseFailed(msg.to_string())
+}
+
+/// `Method.invoke`/`Constructor.newInstance` always want an `Object[]`,
+/// even for parameters whose declared type is primitive — so any
+/// primitive `JValueOwned` `lisp_arg_to_jvalue` produced must be boxed
+/// before going into that array. Object values (including `null`) pass
+/// through unchanged.
+pub fn box_if_primitive<'local>(
+    env: &mut jni::Env<'local>,
+    value: JValueOwned<'local>,
+) -> jni::errors::Result<JObject<'local>> {
+    match value {
+        JValueOwned::Object(o) => Ok(o),
+        JValueOwned::Bool(b) => box_via_value_of(
+            env,
+            jni::jni_str!("java/lang/Boolean"),
+            jni::jni_sig!((v: boolean) -> java.lang.Boolean),
+            JValueOwned::Bool(b),
+        ),
+        JValueOwned::Byte(n) => box_via_value_of(
+            env,
+            jni::jni_str!("java/lang/Byte"),
+            jni::jni_sig!((v: byte) -> java.lang.Byte),
+            JValueOwned::Byte(n),
+        ),
+        JValueOwned::Short(n) => box_via_value_of(
+            env,
+            jni::jni_str!("java/lang/Short"),
+            jni::jni_sig!((v: short) -> java.lang.Short),
+            JValueOwned::Short(n),
+        ),
+        JValueOwned::Int(n) => box_via_value_of(
+            env,
+            jni::jni_str!("java/lang/Integer"),
+            jni::jni_sig!((v: int) -> java.lang.Integer),
+            JValueOwned::Int(n),
+        ),
+        JValueOwned::Long(n) => box_via_value_of(
+            env,
+            jni::jni_str!("java/lang/Long"),
+            jni::jni_sig!((v: long) -> java.lang.Long),
+            JValueOwned::Long(n),
+        ),
+        JValueOwned::Float(f) => box_via_value_of(
+            env,
+            jni::jni_str!("java/lang/Float"),
+            jni::jni_sig!((v: float) -> java.lang.Float),
+            JValueOwned::Float(f),
+        ),
+        JValueOwned::Double(f) => box_via_value_of(
+            env,
+            jni::jni_str!("java/lang/Double"),
+            jni::jni_sig!((v: double) -> java.lang.Double),
+            JValueOwned::Double(f),
+        ),
+        JValueOwned::Char(c) => box_via_value_of(
+            env,
+            jni::jni_str!("java/lang/Character"),
+            jni::jni_sig!((v: char) -> java.lang.Character),
+            JValueOwned::Char(c),
+        ),
+        JValueOwned::Void => Ok(JObject::null()),
+    }
+}
+
+/// Calls `<CLASS_NAME>.valueOf(value)` to box a single primitive
+/// `JValueOwned` into its wrapper-class `JObject`. Generic over the
+/// signature type `S` (rather than a concrete `&str`, which is not what
+/// `jni::jni_sig!` actually expands to — verified against the compiler)
+/// so that each call site can just forward whatever `jni::jni_sig!`
+/// produces, matching `Env::call_static_method`'s own bound.
+fn box_via_value_of<'local, 'sig, 'sig_args, S>(
+    env: &mut jni::Env<'local>,
+    class_name: impl AsRef<jni::strings::JNIStr>,
+    sig: S,
+    value: JValueOwned<'local>,
+) -> jni::errors::Result<JObject<'local>>
+where
+    S: AsRef<jni::signature::MethodSignature<'sig, 'sig_args>>,
+{
+    let class = env.find_class(class_name)?;
+    env.call_static_method(&class, jni::jni_str!("valueOf"), sig, &[value.borrow()])?.l()
 }
 
 /// Converts a JNI return value back to a `LispArg`. Non-scalar returns
