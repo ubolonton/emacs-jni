@@ -38,5 +38,12 @@ independently able to reach a ready JVM with the fixture jar loaded."
   (let ((big (* (expt 2 62) (expt 2 62)))) ; exceeds i64/long range, forces bignum
     (should (equal (jvm-call-sync "Calc" "addBig" (list big 1)) (list t (1+ big) nil)))))
 
+(ert-deftest emacs-jni-jvm-call-test/unsupported-argument-value-signals-instead-of-silently-becoming-t ()
+  "A Lisp value with no marshalling rule (e.g. a vector) must signal
+`jvm-invalid-argument' rather than silently being sent to Java as `true'."
+  (jvm-call-test--ensure-ready)
+  (should-error (jvm-call-sync "Calc" "addLong" (list [1 2 3] 3))
+                :type 'jvm-invalid-argument))
+
 (provide 'jvm-call-test)
 ;;; jvm-call-test.el ends here

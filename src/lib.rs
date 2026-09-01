@@ -27,6 +27,7 @@ use crate::status::{Status, STATUS};
 
 emacs::define_errors! {
     jvm_illegal_transition "JVM operation not allowed in the current state"
+    jvm_invalid_argument "Unsupported Lisp value for a JVM call argument"
 }
 
 #[defun(mod_in_name = false, name = "jvm--init-channel")]
@@ -160,13 +161,25 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
         return Ok(commands::LispArg::Object(h.0));
     }
-    // `t` and Lisp functions are the remaining cases: `t` has no useful
-    // into_rust::<T>() scalar conversion, and functions are Task 6's
-    // territory (auto-wrap-as-LispFunction, which needs Lisp-side function-
-    // table bookkeeping this module doesn't have). Both fall through to
-    // `LispArg::True` for now — Task 6 replaces this fallback with real
-    // function-handling.
-    Ok(commands::LispArg::True)
+    // `t` has no useful into_rust::<T>() scalar conversion (there's no
+    // `FromLisp` impl for `bool` — Emacs Lisp has no dedicated boolean
+    // type), so it's checked explicitly here via `eq` against the
+    // interned `t` symbol, matching Lisp's own notion of "is this
+    // literally `t`" rather than "is this any non-nil symbol".
+    //
+    // Anything else reaching this point (a vector, keyword, hash-table,
+    // or any symbol other than `t`) is not a value this bridge knows how
+    // to marshal. Earlier code silently treated it as `LispArg::True`,
+    // which could mask real caller bugs (e.g. accidentally passing a
+    // vector where a number was intended would silently become Java
+    // `true`) -- signal a clear error instead. Lisp functions are Task
+    // 6's territory (auto-wrap-as-LispFunction, which needs Lisp-side
+    // function-table bookkeeping this module doesn't have yet) and will
+    // get their own branch here, before this fallback, once Task 6 lands.
+    if v == v.env.intern("t")? {
+        return Ok(commands::LispArg::True);
+    }
+    v.env.signal(jvm_invalid_argument, (v,))
 }
 
 #[cfg(feature = "test-support")]
