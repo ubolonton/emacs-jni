@@ -4,6 +4,7 @@ mod channel;
 mod commands;
 mod jvm_thread;
 mod protocol;
+mod shim;
 mod status;
 mod worker;
 

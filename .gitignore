@@ -1,2 +1,3 @@
 .probe/
 /target
+/target/emacs-jni-shim-classes/
