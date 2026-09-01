@@ -35,13 +35,25 @@ Same first-start-only caveat as `jvm-classpath'.")
 (defvar jvm--pending-load-jar nil
   "Alist of request-id -> callback for in-flight `jvm-load-jar' calls.")
 
+(defvar jvm--log-buffer-name "*jvm-log*"
+  "Name of the buffer that accumulates JVM log and status-failure messages.")
+
+(defun jvm--log (format-string &rest args)
+  "Append a line to the `*jvm-log*' buffer, formatted like `format'."
+  (with-current-buffer (get-buffer-create jvm--log-buffer-name)
+    (goto-char (point-max))
+    (insert (apply #'format format-string args) "\n")))
+
 (defun jvm--dispatch-message (sexp)
   "Handle one parsed message SEXP from the JVM worker thread."
   (pcase sexp
-    (`(status ,state ,_msg)
+    (`(status ,state ,msg)
      (setq jvm--status state)
+     (when msg
+       (jvm--log "[status] %s: %s" state msg))
      (run-hook-with-args 'jvm-status-hook state))
     (`(log ,level ,msg)
+     (jvm--log "[%s] %s" level msg)
      (message "emacs-jni [%s]: %s" level msg))
     (`(load-jar-done ,id ,ok ,err)
      (when-let ((callback (alist-get id jvm--pending-load-jar)))

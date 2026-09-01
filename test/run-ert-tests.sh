@@ -27,6 +27,22 @@ export EMACS_JNI_MODULE_PATH="$(pwd)/target/debug/libemacs_jni.so"
 TEST_FILES=("$@")
 if [ ${#TEST_FILES[@]} -eq 0 ]; then
     TEST_FILES=(test/*.el)
+    # test/jvm-crash-test.el calls `jvm--test-panic', which only exists when
+    # built with `--features test-support'. Without that feature the default
+    # build lacks the defun, so auto-discovery would always fail on this one
+    # file with an opaque void-function error; skip it here instead, with a
+    # note on how to run it explicitly.
+    if ! [[ "$CARGO_FEATURES" =~ (^|[,[:space:]])test-support($|[,[:space:]]) ]]; then
+        FILTERED_TEST_FILES=()
+        for f in "${TEST_FILES[@]}"; do
+            if [ "$f" = "test/jvm-crash-test.el" ]; then
+                echo "Skipping test/jvm-crash-test.el (needs --features test-support); run: EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh test/jvm-crash-test.el"
+            else
+                FILTERED_TEST_FILES+=("$f")
+            fi
+        done
+        TEST_FILES=("${FILTERED_TEST_FILES[@]}")
+    fi
 fi
 
 # Each test file gets its own `emacs --batch` process: the embedded JVM and

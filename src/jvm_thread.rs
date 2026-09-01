@@ -70,6 +70,14 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
     }
 }
 
+// Restart-after-crash/-failure works even though `run` drops its `vm` above
+// and no handle is retained anywhere in this codebase: jni-rs 0.22.4 caches
+// the raw JavaVM pointer in a process-global `OnceLock` internally
+// (`JAVA_VM_SINGLETON` / `impl_with_libjvm` in `jni-0.22.4/src/vm/java_vm.rs`),
+// so a later `JavaVM::new()` call here transparently re-attaches to the same
+// underlying VM instead of re-bootstrapping it. There's no real "attach to
+// the retained `JavaVM` handle" hand-off happening, contrary to the design
+// spec's more literal wording — this comment is that clarification.
 fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String> {
     let mut builder = InitArgsBuilder::new().version(JNIVersion::V1_8);
     if !classpath.is_empty() {
@@ -82,7 +90,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     JavaVM::new(init_args).map_err(|e| e.to_string())
 }
 
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
