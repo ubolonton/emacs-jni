@@ -20,9 +20,15 @@ pub fn lisp_arg_to_jvalue<'local>(
         }
         (LispArg::Nil, _) => Ok(JValueOwned::Object(JObject::null())),
         (LispArg::True, _) => Ok(JValueOwned::Bool(true)),
-        (LispArg::Int(n), "int") => Ok(JValueOwned::Int(*n as i32)),
-        (LispArg::Int(n), "short") => Ok(JValueOwned::Short(*n as i16)),
-        (LispArg::Int(n), "byte") => Ok(JValueOwned::Byte(*n as i8)),
+        (LispArg::Int(n), "int") => i32::try_from(*n)
+            .map(JValueOwned::Int)
+            .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type int"))),
+        (LispArg::Int(n), "short") => i16::try_from(*n)
+            .map(JValueOwned::Short)
+            .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type short"))),
+        (LispArg::Int(n), "byte") => i8::try_from(*n)
+            .map(JValueOwned::Byte)
+            .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type byte"))),
         (LispArg::Int(n), "long") => Ok(JValueOwned::Long(*n)),
         (LispArg::Int(n), "float") => Ok(JValueOwned::Float(*n as f32)),
         (LispArg::Int(n), "double") => Ok(JValueOwned::Double(*n as f64)),
@@ -151,6 +157,18 @@ fn object_to_lisp_arg<'local>(
     let string_class = env.find_class(jni::jni_str!("java/lang/String"))?;
     let boolean_class = env.find_class(jni::jni_str!("java/lang/Boolean"))?;
     let big_integer_class = env.find_class(jni::jni_str!("java/math/BigInteger"))?;
+    // Boxed integral wrapper types must be checked (and routed through
+    // `longValue()` into `LispArg::Int`) *before* the generic `Number`
+    // fallback below — `Method.invoke` auto-boxes every primitive return
+    // value into one of these, so this is the dominant numeric-return
+    // path, not a corner case. Routing them through the generic
+    // `Number`/`doubleValue()`/`LispArg::Float` fallback instead would
+    // silently misrepresent the value's type (and lose precision for
+    // `Long`s beyond 2^53).
+    let integer_class = env.find_class(jni::jni_str!("java/lang/Integer"))?;
+    let long_class = env.find_class(jni::jni_str!("java/lang/Long"))?;
+    let short_class = env.find_class(jni::jni_str!("java/lang/Short"))?;
+    let byte_class = env.find_class(jni::jni_str!("java/lang/Byte"))?;
     let number_class = env.find_class(jni::jni_str!("java/lang/Number"))?;
 
     if env.is_instance_of(&obj, &string_class)? {
@@ -169,6 +187,16 @@ fn object_to_lisp_arg<'local>(
             .l()?;
         let s = env.cast_local::<jni::objects::JString>(s)?;
         return Ok(LispArg::BigInt(s.to_string()));
+    }
+    if env.is_instance_of(&obj, &integer_class)?
+        || env.is_instance_of(&obj, &long_class)?
+        || env.is_instance_of(&obj, &short_class)?
+        || env.is_instance_of(&obj, &byte_class)?
+    {
+        let n = env
+            .call_method(&obj, jni::jni_str!("longValue"), jni::jni_sig!(() -> long), &[])?
+            .j()?;
+        return Ok(LispArg::Int(n));
     }
     if env.is_instance_of(&obj, &number_class)? {
         let d = env
@@ -324,6 +352,17 @@ mod jvm_tests {
                 )?
                 .l()?;
             let result_arg = object_to_lisp_arg(env, result)?;
+            // Checks the actual variant, not just the rendered string:
+            // `lisp_arg_to_sexp`'s `Float` arm renders a whole-number
+            // `f64` without a trailing `.0` (Rust's `Display` for `f64`),
+            // so `LispArg::Int(42)` and `LispArg::Float(42.0)` render
+            // identically as `"42"` — a string-only assertion here
+            // couldn't have caught a boxed `Long` return being
+            // misrouted into `LispArg::Float` instead of `LispArg::Int`.
+            assert!(
+                matches!(result_arg, LispArg::Int(42)),
+                "expected LispArg::Int(42), got {result_arg:?}"
+            );
             assert_eq!(lisp_arg_to_sexp(&result_arg), "42");
             Ok(())
         })
