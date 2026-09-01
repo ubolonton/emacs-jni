@@ -16,9 +16,22 @@ Only honored on a genuinely fresh `jvm-start' (from `not-started',
 `paused' reuses the already-running JVM and ignores this variable, since
 JVM options cannot change after the JVM is created.")
 
-(defvar jvm-options nil
+(defvar jvm-options '("-Xrs")
   "List of JVM flag strings (e.g. \"-Xmx512m\") passed at `jvm-start' time.
-Same first-start-only caveat as `jvm-classpath'.")
+Same first-start-only caveat as `jvm-classpath'.
+
+Defaults to `(\"-Xrs\")': without it, the JVM installs its own handlers for
+SIGINT/SIGTERM/SIGHUP/SIGQUIT (to support `Runtime.addShutdownHook' and a
+SIGQUIT thread dump), which — since the JVM shares Emacs's process — means
+`C-g' can terminate Emacs outright instead of just interrupting Emacs.
+`-Xrs' stops the JVM from installing those handlers at all, leaving
+whatever Emacs itself does with those signals untouched; this has no
+downside for this module, since `jvm-stop' always tears the JVM down via
+the JNI API (`JavaVM::destroy'), not via a signal, and shutdown hooks still
+run on that path with or without `-Xrs'. If you override this variable,
+keep \"-Xrs\" in the list unless you specifically want the JVM's signal
+handlers installed (e.g. to use `kill -QUIT' for a thread dump — see
+HANDOFF.md).")
 
 (defvar jvm--status 'not-started
   "Current JVM lifecycle status. See `jvm-status'.")

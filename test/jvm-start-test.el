@@ -6,6 +6,16 @@
 (ert-deftest emacs-jni-jvm-start-test/reaches-ready ()
   (should (eq (jvm-start-sync) 'ready)))
 
+(ert-deftest emacs-jni-jvm-start-test/default-options-include-xrs ()
+  "`jvm-options' must default to include \"-Xrs\", which stops the JVM from
+installing its own SIGINT/SIGTERM/SIGHUP/SIGQUIT handlers — without it,
+since the JVM shares Emacs's process, `C-g' can terminate Emacs outright
+instead of just interrupting it (empirically verified with a `sigaction'
+probe during development; see HANDOFF.md). This only guards the default
+Elisp value doesn't silently regress — it doesn't re-verify the OS-level
+signal-handler effect itself, which isn't practical to assert from Elisp."
+  (should (member "-Xrs" jvm-options)))
+
 (ert-deftest emacs-jni-jvm-start-test/status-not-stuck-after-illegal-transition ()
   "An illegal `jvm-start' while already `ready' must not leave
 `jvm--status' stuck at `starting' — it should revert to the prior status

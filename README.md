@@ -164,7 +164,12 @@ Config variables (`defvar`, not `defcustom` — set them with `setq` before
 your first `jvm-start`):
 
 - `jvm-classpath` — list of strings, additional classpath entries.
-- `jvm-options` — list of strings, JVM flags (e.g. `"-Xmx512m"`).
+- `jvm-options` — list of strings, JVM flags (e.g. `"-Xmx512m"`). Defaults
+  to `("-Xrs")`, which stops the JVM from installing its own
+  SIGINT/SIGTERM/SIGHUP/SIGQUIT handlers — without it, since the JVM shares
+  Emacs's process, `C-g` can terminate Emacs outright rather than just
+  interrupting it. Keep `"-Xrs"` in the list if you override it, unless you
+  specifically want those handlers installed (see `HANDOFF.md`).
 
 Observability:
 

@@ -54,6 +54,58 @@ Working conventions for this repo:
   Phase 1 started — nobody has decided whether to commit them. Ask before
   changing that.
 
+## Signal handling and stdio (investigated 2026-09-01)
+
+The embedded JVM shares Emacs's process, which has two consequences worth
+knowing about before Phase 2 touches either of these areas:
+
+**Signals.** By default HotSpot installs its own handlers for
+SIGINT/SIGTERM/SIGHUP/SIGQUIT (to support `Runtime.addShutdownHook` and a
+SIGQUIT-triggered thread dump) — since we're embedded, not a subprocess,
+this **replaces** whatever Emacs itself does with those signals, which is
+why `C-g` used to terminate Emacs outright. Fixed: `jvm-options` now
+defaults to `("-Xrs")`, which stops the JVM from installing handlers for
+that whole group of four signals — verified empirically (not just from
+docs) with a `sigaction`-based probe during development: `SIGINT`'s handler
+address changed from `0x0` to a real function pointer without `-Xrs`, and
+stayed `0x0` with it. No downside for us: `jvm-stop` always tears down via
+the JNI API (`JavaVM::destroy`), never via a signal, and shutdown hooks
+still run on that path regardless of `-Xrs`.
+
+Two things that follow from this, relevant if Phase 2 (or anyone) wants
+"send a signal to the JVM" or a SIGQUIT-style thread dump:
+- `-Xrs` disables the *whole group* of four signals together — there's no
+  documented way (as of this investigation) to keep just SIGQUIT's
+  thread-dump handler while still protecting SIGINT. You can't have both
+  "`C-g` is safe" and "`kill -QUIT`-style thread dump via a raw signal"
+  at the same time with `-Xrs` alone.
+- Since the JVM is in-process, `raise()`/`kill(getpid(), ...)` from Rust is
+  process-wide — it would signal Emacs too, not just "the JVM". The
+  embedded-appropriate way to get signal-like effects (thread dump, GC,
+  shutdown) is calling the actual Java API directly (`Thread.getAllStackTraces()`,
+  `System.gc()`, `System.exit()`) via JNI, once Phase 2's "Lisp calls a JVM
+  method" machinery exists — not reaching for OS signals at all.
+
+**stdio.** `System.out`/`System.err` are just `PrintStream`s wrapping fds
+1/2 — the *same* file descriptors Emacs already has open, not a takeover.
+JVM-internal native diagnostics (startup banners, a SIGQUIT thread dump)
+write straight to those fds too, not just Java-level `System.out`. So
+everything currently interleaves on whatever Emacs's own stdout/stderr
+already point to. Two ways to get Lisp-side control, if this ever matters:
+- `System.setOut`/`System.setErr` — Java-level only, misses native/JVM
+  output. Needs a custom `PrintStream`/`OutputStream` Java object whose
+  `write()` calls back into Rust — i.e. a Lisp-callback wrapped as a JVM
+  object, which is literally one of Phase 2's own deliverables ("wrap a
+  Lisp value as a JVM object"), so this falls out naturally once that
+  exists rather than needing its own design.
+- OS-level `dup2` on fd 1/2 before `JavaVM::new()` — catches everything
+  including native output, and would extend the exact `open_channel`
+  pipe-process pattern Phase 1 already built (a `*jvm-stdout*`/
+  `*jvm-stderr*` buffer). The catch: `dup2` on fd 1/2 is process-wide, so
+  it would also swallow Emacs's *own* stdout/stderr, not just the JVM's —
+  don't build this without scoping it carefully (stderr-only and opt-in
+  is the safer starting point, not a default).
+
 ## What's next
 
 **Phase 2: bidirectional JVM ↔ Lisp interop.** Per the original project
