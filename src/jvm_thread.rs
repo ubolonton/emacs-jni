@@ -45,6 +45,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 handle_load_jar(&vm, &mut loader, id, path);
                 false
             }
+            Cmd::Call { .. } | Cmd::InvokeReply { .. } | Cmd::ReleaseRef { .. } => false,
             #[cfg(feature = "test-support")]
             Cmd::TestPanic => panic!("jvm--test-panic: deliberate panic for crash-handling tests"),
         }));
