@@ -96,19 +96,39 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
 // underlying VM instead of re-bootstrapping it. There's no real "attach to
 // the retained `JavaVM` handle" hand-off happening, contrary to the design
 // spec's more literal wording — this comment is that clarification.
-// Tracks whether `create_jvm` has ever been *attempted* before in this
-// process (regardless of whether that attempt succeeded, failed, or its
-// shim-loading step in particular failed) — set unconditionally at the top
-// of `create_jvm`, before any fallible work happens, via `swap`, so the
-// very first call sees `false` (and thus knows it's "the first attempt")
-// and every call after that — a restart following `jvm-stop`/a crash —
-// sees `true`. Used below to decide whether a `shim::define_classes`
-// failure should be fatal to `create_jvm` or merely logged; see that
-// call site's doc comment for why the distinction matters. Worker threads
-// never run `create_jvm` concurrently with each other (a new one is only
-// spawned after the previous one has fully torn down — see
-// `worker::start_or_resume`/`clear_sender`), so a single `swap` at entry,
-// with no separate check-then-set race window, is sufficient.
+// Tracks whether `create_jvm` has ever *reached the shim-loading step*
+// before in this process (regardless of whether shim loading itself then
+// succeeded or failed) — swapped right before that step, only once a live
+// `JavaVM` actually exists (see the swap's call site below), so the very
+// first call to reach that point sees `false` (and thus knows it's "the
+// first attempt") and every call after that — a restart following
+// `jvm-stop`/a crash, or a retry of `jvm-start` following an *earlier*,
+// shim-unrelated `create_jvm` failure — sees `true`. Used below to decide
+// whether a `shim::define_classes` failure should be fatal to `create_jvm`
+// or merely logged; see that call site's doc comment for why the
+// distinction matters.
+//
+// Deliberately swapped just before shim loading, not at `create_jvm`'s
+// entry: an earlier `create_jvm` call can fail before ever reaching a live
+// JVM (bad init args, `JavaVM::new` itself failing) for reasons that have
+// nothing to do with the shim, and `jvm-start` is an explicitly supported
+// retry target from `start-failed` (`status.rs`'s `begin_start` legal-from
+// list includes `Status::StartFailed`). If the flag were consumed at
+// `create_jvm`'s entry, that kind of failed-then-retried call would burn
+// the "first attempt" slot on a call that never even tried to load the
+// shim, so the *real* first successful boot (the retry) would be
+// misclassified as "subsequent" and a genuinely broken shim on it would
+// be silently swallowed instead of surfacing as `start-failed` --
+// reproducing the exact bug this flag exists to fix, just one retry later.
+// Swapping here instead means only calls that produce a live JVM (and
+// therefore actually attempt shim loading) ever consume the slot,
+// regardless of how many earlier calls failed for unrelated reasons.
+//
+// Worker threads never run `create_jvm` concurrently with each other (a
+// new one is only spawned after the previous one has fully torn down —
+// see `worker::start_or_resume`/`clear_sender`), so a single `swap` right
+// before shim loading, with no separate check-then-set race window, is
+// sufficient.
 static JVM_CREATE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 /// Returns whether this call is the first ever call against FLAG — `true`
@@ -123,8 +143,6 @@ fn is_first_attempt(flag: &AtomicBool) -> bool {
 }
 
 fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String> {
-    let is_first_attempt = is_first_attempt(&JVM_CREATE_ATTEMPTED);
-
     let mut builder = InitArgsBuilder::new().version(JNIVersion::V1_8);
     if !classpath.is_empty() {
         builder = builder.option(format!("-Djava.class.path={}", classpath.join(":")));
@@ -148,9 +166,11 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     // `find_class` would throw `ClassNotFoundException` against a real
     // JVM started via `jvm-start`.
     //
-    // Fatal on the *first* `create_jvm` attempt in this process, but
-    // log-and-continue on any attempt after that — see
-    // `JVM_CREATE_ATTEMPTED`'s doc comment for how "first" is determined.
+    // Fatal on the first attempt to reach this point (a live JVM) in this
+    // process, but log-and-continue on any attempt after that — see
+    // `JVM_CREATE_ATTEMPTED`'s doc comment for how "first" is determined
+    // (deliberately *not* "the first call to `create_jvm`", which is a
+    // subtly different, wrong condition — see that comment).
     // The two cases need different handling because they mean different
     // things:
     //
@@ -182,6 +202,12 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     //   the first successful boot regardless. Logging and returning the
     //   VM as usual keeps `jvm-start`'s success/failure semantics exactly
     //   what they were before this task in the zombie-VM case.
+    //
+    // The flag is swapped here, not at `create_jvm`'s entry, specifically
+    // so an earlier call that failed before ever reaching a live JVM (bad
+    // init args, etc.) doesn't consume the "first attempt" slot — see
+    // `JVM_CREATE_ATTEMPTED`'s doc comment.
+    let is_first_attempt = is_first_attempt(&JVM_CREATE_ATTEMPTED);
     let result: jni::errors::Result<()> = vm.attach_current_thread(crate::shim::define_classes);
     match result {
         Ok(()) => {}
