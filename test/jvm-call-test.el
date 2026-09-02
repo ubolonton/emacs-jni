@@ -38,6 +38,16 @@ independently able to reach a ready JVM with the fixture jar loaded."
   (let ((big (* (expt 2 62) (expt 2 62)))) ; exceeds i64/long range, forces bignum
     (should (equal (jvm-call-sync "Calc" "addBig" (list big 1)) (list t (1+ big) nil)))))
 
+(ert-deftest emacs-jni-jvm-call-test/overload-resolution-falls-through-to-the-matching-candidate ()
+  "Regression test for Finding 2 of the Phase 2 whole-branch review:
+`Calc' declares two same-name, same-arity overloads --
+`pick(long)' and `pick(String)' -- so `invoke_method' must try more than
+just whichever candidate `getMethods()' happens to return first for a
+given call to actually succeed, whichever it is."
+  (jvm-call-test--ensure-ready)
+  (should (equal (jvm-call-sync "Calc" "pick" '("hello")) '(t "string" nil)))
+  (should (equal (jvm-call-sync "Calc" "pick" '(42)) '(t "long" nil))))
+
 (ert-deftest emacs-jni-jvm-call-test/unsupported-argument-value-signals-instead-of-silently-becoming-t ()
   "A Lisp value with no marshalling rule (e.g. a vector) must signal
 `jvm-invalid-argument' rather than silently being sent to Java as `true'."

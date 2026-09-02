@@ -82,17 +82,23 @@ HANDOFF.md).")
     (`(invoke ,id ,handle ,args)
      ;; A JVM-initiated call into a previously wrapped Lisp function (see
      ;; `jvm--register-callback'): look it up by HANDLE, funcall it with
-     ;; ARGS (already a plain Lisp list -- the wire form's ARGS never
-     ;; contains a `(jvm-handle N)' tag in this plan's scope, since that
-     ;; would require a Lisp value to have crossed into Java and back
-     ;; first, which nothing here does), and reply with the result (or a
-     ;; formatted error) via `jvm--invoke-reply', which resolves the
-     ;; `CompletableFuture' on the Rust/Java side.
+     ;; ARGS, and reply with the result (or a formatted error) via
+     ;; `jvm--invoke-reply', which resolves the `CompletableFuture' on the
+     ;; Rust/Java side.
+     ;;
+     ;; ARGS can contain a `(jvm-handle N)' tag, exactly like a `call-done'
+     ;; RESULT can: any real Java object passed as one of the call's
+     ;; arguments (not just an object that started out as a Lisp value and
+     ;; crossed into Java earlier) renders this way -- see
+     ;; `marshal::jvm_value_to_lisp_arg' and `shim.rs''s
+     ;; `jobject_array_to_sexp'. So each argument must go through
+     ;; `jvm--resolve-sexp-result' first, the same as `call-done' does,
+     ;; to turn any such tag into a real `user-ptr' before FN sees it.
      (let ((fn (gethash handle jvm--lisp-callbacks)))
        (if (null fn)
            (jvm--invoke-reply id nil (format "no such callback handle %s" handle))
          (condition-case err
-             (jvm--invoke-reply id t (apply fn args))
+             (jvm--invoke-reply id t (apply fn (mapcar #'jvm--resolve-sexp-result args)))
            (error
             (jvm--invoke-reply id nil (format "%S" err)))))))
     (`(release ,handle)

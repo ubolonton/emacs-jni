@@ -671,10 +671,16 @@ fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
 
 /// Finds an overload of METHOD_NAME on CLASS whose parameter count matches
 /// ARGS, invokes it, and marshals the result. Ambiguous overloads (same
-/// arg count, multiple candidates) resolve to the first match from
-/// `getMethods()` — acceptable for a prototype; a real overload-resolution
-/// algorithm (assignability-based scoring) is future work if this proves
-/// too coarse in practice.
+/// name, same arg count, multiple candidates) are tried in whatever order
+/// `getMethods()` returns them: if marshalling ARGS against a candidate's
+/// declared parameter types fails (e.g. `foo(int)` and `foo(String)` both
+/// match on name and arity, but the actual argument is a string), that
+/// candidate is skipped and the next same-name/arity candidate is tried,
+/// rather than giving up immediately — see Finding 2 of the Phase 2
+/// whole-branch review. This is a fall-through, not a real overload-
+/// resolution algorithm (no assignability-based scoring of which candidate
+/// is the *best* fit) — acceptable for a prototype; a real algorithm is
+/// future work if this proves too coarse in practice.
 fn invoke_method(
     env: &mut jni::Env<'_>,
     class: &jni::objects::JClass,
@@ -718,7 +724,16 @@ fn invoke_method(
             continue;
         }
 
-        let invoke_args = build_invoke_args(env, &param_types, args)?;
+        // A same-name/arity candidate whose declared parameter types ARGS
+        // doesn't actually fit (e.g. `foo(int)` vs. `foo(String)`) isn't a
+        // hard failure yet — another overload further down `getMethods()`'s
+        // list might still match. Move on to it instead of giving up here;
+        // only exhausting every same-name/arity candidate (the loop falling
+        // through below) is a real "no method found".
+        let invoke_args = match build_invoke_args(env, &param_types, args) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
 
         let result = match env.call_method(
             &candidate,
@@ -776,7 +791,13 @@ fn invoke_constructor(
             continue;
         }
 
-        let invoke_args = build_invoke_args(env, &param_types, args)?;
+        // See `invoke_method`'s matching comment: try the next same-arity
+        // constructor overload rather than giving up on the first one whose
+        // declared parameter types ARGS doesn't actually fit.
+        let invoke_args = match build_invoke_args(env, &param_types, args) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
 
         let instance = match env.call_method(
             &candidate,

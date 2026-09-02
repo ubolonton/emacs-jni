@@ -20,5 +20,22 @@
     (should (eq (nth 0 result) nil))
     (should (string-match-p "boom" (nth 2 result)))))
 
+(ert-deftest emacs-jni-jvm-invoke-test/java-calls-lisp-with-a-real-object-argument ()
+  "Regression test for Finding 1 of the Phase 2 whole-branch review: a
+JVM-initiated call whose argument is a real Java object (not a primitive)
+must arrive at the Lisp callback as a genuine `user-ptr', not as the raw
+wire tag `(jvm-handle N)'. Before the fix, `jvm--dispatch-message''s
+`invoke' case applied the callback directly to the unresolved wire ARGS, so
+OBJ below would have been the 2-element list `(jvm-handle N)' and
+`user-ptrp' would have returned nil."
+  (should (eq (jvm-status) 'ready))
+  (should (equal (jvm-load-jar-sync jvm-invoke-test--calc-jar) '(t)))
+  (let ((obj (nth 1 (jvm-new-sync "Calc" '(7)))))
+    (should (user-ptrp obj))
+    (should (equal (jvm-call-sync obj "callWithSelf"
+                                    (list (lambda (received)
+                                            (if (user-ptrp received) "yes" "no"))))
+                    '(t "yes" nil)))))
+
 (provide 'jvm-invoke-test)
 ;;; jvm-invoke-test.el ends here
