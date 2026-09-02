@@ -3,13 +3,19 @@
 An Emacs dynamic module (Rust, using the [`emacs`](https://github.com/ubolonton/emacs-module-rs)
 crate) that embeds a JVM via [`jni`](https://github.com/jni-rs/jni-rs).
 
-**Status: Phase 1 only.** This gives you JVM lifecycle control
-(start/pause/stop/status) and jar loading from Emacs Lisp. It does **not**
-yet let you call a JVM method or wrap a Lisp value as a JVM object from
-Lisp — that's Phase 2 (not started; see [Roadmap](#roadmap)).
+**Status: Phase 1 and 2 done.** JVM lifecycle control
+(start/pause/stop/status), jar loading, and bidirectional JVM ↔ Lisp
+interop: call a JVM method or constructor from Lisp (`jvm-call`/
+`jvm-new`), pass a Lisp function as an argument (the JVM side calls it
+back and gets a real result), and full error propagation both directions.
+Phase 3 (Clojure eval, nREPL server) is not started; see
+[Roadmap](#roadmap).
 
 Full architecture and design rationale:
-[`docs/superpowers/specs/2026-08-31-jvm-lifecycle-design.md`](docs/superpowers/specs/2026-08-31-jvm-lifecycle-design.md).
+[`docs/superpowers/specs/2026-08-31-jvm-lifecycle-design.md`](docs/superpowers/specs/2026-08-31-jvm-lifecycle-design.md)
+(Phase 1) and
+[`docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md`](docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md)
+(Phase 2).
 
 ## Prerequisites
 
@@ -87,10 +93,12 @@ puts `elisp/emacs-jni.el` on `load-path`.)
 ;;    (the exact path is wherever `expand-file-name' resolves it in your checkout)
 ```
 
-At this point `Greeter` is loaded into the JVM's shared classloader. There
-is currently no Lisp-facing way to call `Greeter.greet()` — invoking JVM
-methods from Lisp is Phase 2. If you want to confirm the class is really
-loadable and callable end-to-end today, that's what
+At this point `Greeter` is loaded into the JVM's shared classloader. This
+walkthrough stops at jar loading; see [Interop example](#interop-example)
+below for calling a method (`(jvm-call-sync "Greeter" "greet" nil)` works
+here too, returning `(t "hello from Greeter" nil)`). If you just want to
+confirm the class is really loadable and callable end-to-end without
+Lisp, that's what
 `cargo test --lib jvm_thread::tests::add_jar_url_makes_the_jars_class_loadable_and_callable`
 does on the Rust side (it reflectively calls `Greeter.greet()` and asserts
 the returned string).
@@ -143,6 +151,59 @@ as in step 3 above). The underlying JVM's own diagnostic (e.g.
 `Unrecognized option: -Xnotarealoption`) goes to Emacs's stderr from the
 JVM process itself, not into this Lisp-visible string — `*jvm-log*` tells
 you *that* it failed, not always *why* in detail.
+
+## Interop example
+
+Calling a JVM method from Lisp, including passing a Lisp function as an
+argument the JVM calls back into.
+
+**1. Build a small fixture class and jar.** `test/fixtures/Calc.java` is
+already in this repo. It needs the shim classes on its classpath, which
+`cargo build` produces at `target/emacs-jni-shim-classes` (via `build.rs`):
+
+```sh
+cargo build
+mkdir -p target/test-fixtures
+javac -cp target/emacs-jni-shim-classes -d target/test-fixtures test/fixtures/Calc.java
+jar cf target/test-fixtures/calc.jar -C target/test-fixtures Calc.class
+```
+
+**2. Launch Emacs, same as the Quickstart above:**
+
+```sh
+emacs -Q -L elisp
+```
+
+**3. In `*scratch*`, evaluate one form at a time:**
+
+```elisp
+(require 'emacs-jni)
+
+(jvm-start-sync)
+;; => ready
+
+(jvm-load-jar-sync (expand-file-name "target/test-fixtures/calc.jar"))
+;; => (t)
+
+(jvm-call-sync "Calc" "addLong" (list 2 3))
+;; => (t 5 nil)   -- a static call; result is (OK RESULT ERR)
+
+(jvm-call-sync "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
+;; => (t 40 nil)  -- the lambda is auto-wrapped as a real JVM object (a
+;;    LispCallable); Calc.callWithArg calls it from Java and waits for
+;;    the result
+```
+
+`jvm-call`/`jvm-call-sync` (and `jvm-new`/`jvm-new-sync`, for
+constructors) reflectively dispatch on a class name, method name, and a
+list of Lisp argument values. Numbers, bignums, strings, `nil`/`t`,
+wrapped JVM objects (returned from an earlier `jvm-call`/`jvm-new`), and
+Lisp functions all marshal automatically — a Lisp function argument
+becomes a real async `LispCallable` the JVM side can call, and a JVM
+object the JVM passes back into a Lisp callback arrives as a wrapped
+Lisp value, not a raw handle. Errors on either side propagate to the
+other as a real error, not a silent failure. Full design:
+[`docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md`](docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md).
 
 ## API reference
 
@@ -214,10 +275,11 @@ JVM is a per-process singleton, so test files can't safely share one).
 
 ## Roadmap
 
-- **Phase 1 (this repo, done):** JVM lifecycle + jar loading.
-- **Phase 2 (not started):** Bidirectional JVM ↔ Lisp interop — wrap a Lisp
-  value as a JVM object, wrap a JVM object as a Lisp value, JVM calls a
-  Lisp function, Lisp calls a JVM method.
+- **Phase 1 (done):** JVM lifecycle + jar loading.
+- **Phase 2 (done):** Bidirectional JVM ↔ Lisp interop — wrap a Lisp value
+  as a JVM object, wrap a JVM object as a Lisp value, JVM calls a Lisp
+  function, Lisp calls a JVM method. See [Interop example](#interop-example)
+  above.
 - **Phase 3 (not started):** Clojure evaluation, nREPL server.
 
 See [`HANDOFF.md`](HANDOFF.md) for the current state in more detail and
