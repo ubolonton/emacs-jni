@@ -3,19 +3,21 @@
 An Emacs dynamic module (Rust, using the [`emacs`](https://github.com/ubolonton/emacs-module-rs)
 crate) that embeds a JVM via [`jni`](https://github.com/jni-rs/jni-rs).
 
-**Status: Phase 1 and 2 done.** JVM lifecycle control
-(start/pause/stop/status), jar loading, and bidirectional JVM ↔ Lisp
+**Status: Phase 1, 2, and 3 done.** JVM lifecycle control
+(start/pause/stop/status), jar loading, bidirectional JVM ↔ Lisp
 interop: call a JVM method or constructor from Lisp (`jvm-call`/
 `jvm-new`), pass a Lisp function as an argument (the JVM side calls it
-back and gets a real result), and full error propagation both directions.
-Phase 3 (Clojure eval, nREPL server) is not started; see
-[Roadmap](#roadmap).
+back and gets a real result), full error propagation both directions,
+Clojure evaluation, and a real nREPL server other processes can connect
+to. See [Roadmap](#roadmap).
 
 Full architecture and design rationale:
 [`docs/superpowers/specs/2026-08-31-jvm-lifecycle-design.md`](docs/superpowers/specs/2026-08-31-jvm-lifecycle-design.md)
-(Phase 1) and
+(Phase 1),
 [`docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md`](docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md)
-(Phase 2).
+(Phase 2), and
+[`docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md`](docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md)
+(Phase 3).
 
 ## Prerequisites
 
@@ -205,6 +207,83 @@ Lisp value, not a raw handle. Errors on either side propagate to the
 other as a real error, not a silent failure. Full design:
 [`docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md`](docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md).
 
+## Clojure & nREPL
+
+Evaluate Clojure code, and run a real nREPL server other processes can
+connect to — both built entirely on the `jvm-call`/`jvm-new` primitives
+above; no new Rust code, no new wire messages. Full design:
+[`docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md`](docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md).
+
+**1. Fetch the Clojure + nREPL jars** (not bundled — same policy as the
+JDK itself; see [Prerequisites](#prerequisites)):
+
+```sh
+./test/fetch-clojure-jars.sh
+```
+
+This downloads `clojure-1.12.0.jar`, `spec.alpha-0.5.238.jar`,
+`core.specs.alpha-0.4.74.jar` (Maven Central), and `nrepl-1.7.0.jar`
+(**Clojars**, not Maven Central — nREPL isn't published there) into
+`target/clojure-jars/`.
+
+**2. Launch Emacs, same as the Quickstart above:**
+
+```sh
+cargo build
+EMACS_JNI_CLOJURE_JARS_DIR="$(pwd)/target/clojure-jars" emacs -Q -L elisp
+```
+
+**3. In `*scratch*`, evaluate one form at a time:**
+
+```elisp
+(require 'emacs-jni)
+
+(jvm-start-sync)
+;; => ready
+
+(dolist (jar (directory-files (getenv "EMACS_JNI_CLOJURE_JARS_DIR") t "\\.jar\\'"))
+  (jvm-load-jar-sync jar))
+
+(jvm-clojure-eval-string "(+ 40 (* 2 1))")
+;; => (t 42 nil)   -- (OK RESULT ERR), same shape as `jvm-call-sync'
+
+(setq my-nrepl (jvm-nrepl-start 7888))
+;; => (t (7888 . #<user-ptr ...>) nil)   -- (OK (ACTUAL-PORT . SERVER) ERR)
+```
+
+**4. Connect a real nREPL client to `localhost:7888`** — any
+bencode-speaking client works (`lein repl :connect localhost:7888`, an
+editor's nREPL client, etc.). Verified with `nc` as a real separate OS
+process:
+
+```sh
+code='(+ 100 23)'
+len=${#code}
+printf 'd2:op4:eval4:code%d:%s2:id1:1e' "$len" "$code" | nc 127.0.0.1 7888
+```
+
+This returns a real bencode response containing `5:value3:123` and
+`6:statusl4:donee` — a genuine nREPL eval round trip, not a canned reply.
+
+**5. Stop the server:**
+
+```elisp
+(jvm-nrepl-stop (cdr (nth 1 my-nrepl)))
+;; => (t nil nil)
+```
+
+Two things worth knowing before relying on this:
+
+- `*ns*` set by one `jvm-clojure-eval-string` call does **not** persist
+  to the next one — each call may dispatch to a different underlying JVM
+  thread (Phase 2's per-call model). Fold `(in-ns ...)` into the same
+  eval string when it matters. This does not affect the nREPL server
+  itself, which manages its own per-session namespace state correctly.
+- Non-scalar results (keywords, vectors, maps, lazy seqs) come back as
+  an opaque wrapped JVM object, same limitation as any other non-scalar
+  `jvm-call` result — call `.toString()` or `pr-str` via another
+  `jvm-call` for a printable form.
+
 ## API reference
 
 All functions are async by default (return immediately; the JVM worker
@@ -273,6 +352,16 @@ EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh   # + crash-recover
 Each `test/*.el` file runs in its own `emacs --batch` process (the embedded
 JVM is a per-process singleton, so test files can't safely share one).
 
+The 5 Clojure/nREPL tests in `test/jvm-clojure-test.el` are gated behind
+`EMACS_JNI_CLOJURE_JARS_DIR` (see [Clojure & nREPL](#clojure--nrepl)
+above) — they skip cleanly, not fail, when it's unset, so the rest of
+the suite stays runnable with no network access:
+
+```sh
+./test/fetch-clojure-jars.sh
+EMACS_JNI_CLOJURE_JARS_DIR="$(pwd)/target/clojure-jars" EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh
+```
+
 ## Roadmap
 
 - **Phase 1 (done):** JVM lifecycle + jar loading.
@@ -280,7 +369,9 @@ JVM is a per-process singleton, so test files can't safely share one).
   as a JVM object, wrap a JVM object as a Lisp value, JVM calls a Lisp
   function, Lisp calls a JVM method. See [Interop example](#interop-example)
   above.
-- **Phase 3 (not started):** Clojure evaluation, nREPL server.
+- **Phase 3 (done):** Clojure evaluation, a real nREPL server other
+  processes can connect to. See [Clojure & nREPL](#clojure--nrepl)
+  above.
 
 See [`HANDOFF.md`](HANDOFF.md) for the current state in more detail and
 what a next session should do.
