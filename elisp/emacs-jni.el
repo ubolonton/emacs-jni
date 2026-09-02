@@ -343,5 +343,34 @@ come back as an opaque wrapped JVM object, same limitation as any other
 non-scalar `jvm-call' result."
   (jvm-clojure--invoke-with-form "clojure.core" "eval" code timeout))
 
+(defun jvm-nrepl-start (&optional port timeout)
+  "Start an nREPL server (requiring `nrepl.server' first if needed).
+PORT defaults to 0, letting the OS pick a free port. Returns
+\(OK RESULT ERR); if OK, RESULT is (cons ACTUAL-PORT SERVER) -- the real
+bound port and a wrapped JVM object `jvm-nrepl-stop' needs later."
+  (catch 'jvm-nrepl-start
+    (let ((required (jvm-clojure-require "nrepl.server" timeout)))
+      (unless (car required) (throw 'jvm-nrepl-start required))
+      (let ((start-fn (jvm-clojure--var "nrepl.server" "start-server")))
+        (unless (car start-fn) (throw 'jvm-nrepl-start start-fn))
+        (let ((port-kw (jvm-clojure--read ":port")))
+          (unless (car port-kw) (throw 'jvm-nrepl-start port-kw))
+          (let ((server (jvm-call-sync (nth 1 start-fn) "invoke"
+                                        (list (nth 1 port-kw) (or port 0))
+                                        timeout)))
+            (unless (car server) (throw 'jvm-nrepl-start server))
+            (let ((bound-port (jvm-call-sync (nth 1 port-kw) "invoke"
+                                              (list (nth 1 server)) timeout)))
+              (unless (car bound-port) (throw 'jvm-nrepl-start bound-port))
+              (list t (cons (nth 1 bound-port) (nth 1 server)) nil))))))))
+
+(defun jvm-nrepl-stop (server &optional timeout)
+  "Stop SERVER (the cdr of `jvm-nrepl-start''s RESULT). Returns
+\(OK RESULT ERR), same shape as `jvm-call-sync'."
+  (let ((stop-fn (jvm-clojure--var "nrepl.server" "stop-server")))
+    (if (not (car stop-fn))
+        stop-fn
+      (jvm-call-sync (nth 1 stop-fn) "invoke" (list server) timeout))))
+
 (provide 'emacs-jni)
 ;;; emacs-jni.el ends here
