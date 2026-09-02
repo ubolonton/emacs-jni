@@ -300,5 +300,48 @@ HANDLE)' that the corresponding proxy was garbage collected.")
     (puthash handle fn jvm--lisp-callbacks)
     handle))
 
+(defun jvm-clojure--var (ns name)
+  "Resolve the wrapped IFn for NS/NAME via `clojure.java.api.Clojure/var'.
+Returns (OK IFN ERR), same shape as `jvm-call-sync'."
+  (jvm-call-sync "clojure.java.api.Clojure" "var" (list ns name)))
+
+(defun jvm-clojure--read (form-string)
+  "Parse FORM-STRING as Clojure data via `clojure.java.api.Clojure/read'.
+Returns (OK DATA ERR), same shape as `jvm-call-sync'."
+  (jvm-call-sync "clojure.java.api.Clojure" "read" (list form-string)))
+
+(defun jvm-clojure--invoke-with-form (var-ns var-name form-string &optional timeout)
+  "Resolve VAR-NS/VAR-NAME, read FORM-STRING as Clojure data, and invoke
+the resolved IFn with it as its sole argument. Returns (OK RESULT ERR) --
+whichever step fails first short-circuits the rest. Shared plumbing for
+`jvm-clojure-require' and `jvm-clojure-eval-string', both of which are
+\"resolve a var, read one form, invoke\"."
+  (let ((fn (jvm-clojure--var var-ns var-name)))
+    (if (not (car fn))
+        fn
+      (let ((form (jvm-clojure--read form-string)))
+        (if (not (car form))
+            form
+          (jvm-call-sync (nth 1 fn) "invoke" (list (nth 1 form)) timeout))))))
+
+(defun jvm-clojure-require (namespace &optional timeout)
+  "Require the Clojure NAMESPACE (a string, e.g. \"clojure.set\").
+Returns (OK RESULT ERR), same shape as `jvm-call-sync'."
+  (jvm-clojure--invoke-with-form "clojure.core" "require" namespace timeout))
+
+(defun jvm-clojure-eval-string (code &optional timeout)
+  "Evaluate CODE (a string of Clojure source) and return its result.
+Returns (OK RESULT ERR), same shape as `jvm-call-sync'.
+
+Each call may run on a different underlying JVM thread (Phase 2's
+per-call dispatch model), so `*ns*' set by a previous call (e.g. via
+`in-ns') does not persist to the next one -- fold namespace switches into
+CODE itself when it matters. See
+docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md, \"Known
+limitation\". Non-scalar Clojure return values (keywords, vectors, maps)
+come back as an opaque wrapped JVM object, same limitation as any other
+non-scalar `jvm-call' result."
+  (jvm-clojure--invoke-with-form "clojure.core" "eval" code timeout))
+
 (provide 'emacs-jni)
 ;;; emacs-jni.el ends here

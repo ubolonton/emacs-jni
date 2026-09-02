@@ -40,5 +40,19 @@ ExceptionInInitializerError the first time Clojure's runtime is touched
       (should (eq (nth 0 sym-result) t))
       (should (equal (jvm-call-sync require-fn "invoke" (list (nth 1 sym-result))) '(t nil nil))))))
 
+(ert-deftest emacs-jni-jvm-clojure-test/require-a-namespace ()
+  (jvm-clojure-test--ensure-ready)
+  (should (equal (jvm-clojure-require "clojure.set") '(t nil nil))))
+
+(ert-deftest emacs-jni-jvm-clojure-test/eval-string-returns-marshalled-scalar ()
+  (jvm-clojure-test--ensure-ready)
+  (should (equal (jvm-clojure-eval-string "(+ 40 (* 2 1))") '(t 42 nil))))
+
+(ert-deftest emacs-jni-jvm-clojure-test/eval-string-propagates-clojure-error ()
+  (jvm-clojure-test--ensure-ready)
+  (let ((result (jvm-clojure-eval-string "(/ 1 0)")))
+    (should (eq (nth 0 result) nil))
+    (should (string-match-p "Divide by zero" (nth 2 result)))))
+
 (provide 'jvm-clojure-test)
 ;;; jvm-clojure-test.el ends here
