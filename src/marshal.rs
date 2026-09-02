@@ -96,9 +96,71 @@ pub fn lisp_arg_to_jvalue<'local>(
                 jni::jni_sig!((handle: long) -> void),
                 &[JValueOwned::Long(*handle as i64).borrow()],
             )?;
+            register_release_on_gc(env, &obj, *handle)?;
             Ok(JValueOwned::Object(obj))
         }
     }
+}
+
+/// Registers a `java.lang.ref.Cleaner` action on OBJ (a freshly constructed
+/// `LispFunction` proxy) that, when OBJ becomes phantom-reachable, sends
+/// `(release HANDLE)` on the worker-to-Lisp channel — the JVM-side half of
+/// the spec's "Identity and lifetime" GC-notification loop, mirroring
+/// `handles::JvmHandle::Drop` on the Rust side. The cleaner runs on a
+/// JVM-managed background thread at some point after OBJ is collected, not
+/// synchronously — this is standard `Cleaner` behavior, not a bug, and
+/// exactly why this task has no dedicated automated test asserting the
+/// message actually arrives (forcing GC in a test is inherently flaky).
+///
+/// Done here in Rust, via reflection, rather than as Java-side `Cleaner`
+/// code inside `LispFunction` itself: the `Runnable` action passed to
+/// `Cleaner#register` needs its own native callback into Rust, and
+/// registering a *second* native method just for that (on top of `call`)
+/// would be pure duplication of `register_lisp_function_native`'s dance —
+/// simpler to reuse a small dedicated shim class (`ReleaseNotifier`,
+/// registered by `shim::define_classes` alongside the other three) and
+/// drive its construction/registration from here instead.
+fn register_release_on_gc<'local>(
+    env: &mut jni::Env<'local>,
+    obj: &JObject<'local>,
+    handle: u64,
+) -> jni::errors::Result<()> {
+    let notifier_class = env.find_class(jni::jni_str!("emacs_jni/ReleaseNotifier"))?;
+    let notifier = env.new_object(
+        &notifier_class,
+        jni::jni_sig!((handle: long) -> void),
+        &[JValueOwned::Long(handle as i64).borrow()],
+    )?;
+
+    let cleaner_class = env.find_class(jni::jni_str!("java/lang/ref/Cleaner"))?;
+    // `java.lang.ref.Cleaner`/`Cleaner$Cleanable` can't use `jni_sig!`'s
+    // unquoted dotted-path syntax (`java.lang.ref.Cleaner`) -- `ref` is a
+    // Rust keyword, so the parser can't accept it as a bare path segment.
+    // The quoted string-literal form (also documented by `jni_sig!`)
+    // sidesteps that; that form's separator for a nested class is `$`, not
+    // `::`, hence `Cleaner$Cleanable` below.
+    let cleaner = env
+        .call_static_method(
+            &cleaner_class,
+            jni::jni_str!("create"),
+            jni::jni_sig!(() -> "java.lang.ref.Cleaner"),
+            &[],
+        )?
+        .l()?;
+    // `JValue::Object` (unlike `JValueOwned::Object`) takes a *borrowed*
+    // `&JObject` directly, so both arguments here can reference their
+    // owning locals (OBJ, a caller-owned reference; `notifier`, owned
+    // above) without needing a fresh `new_local_ref` duplicate of either —
+    // sidesteps borrowing `env` mutably twice at once (once to build this
+    // very argument list, once inside a nested `new_local_ref` call),
+    // which an earlier draft of this function ran into.
+    env.call_method(
+        &cleaner,
+        jni::jni_str!("register"),
+        jni::jni_sig!((obj: java.lang.Object, action: java.lang.Runnable) -> "java.lang.ref.Cleaner$Cleanable"),
+        &[jni::objects::JValue::Object(obj), jni::objects::JValue::Object(&notifier)],
+    )?;
+    Ok(())
 }
 
 fn big_integer_from_str<'local>(

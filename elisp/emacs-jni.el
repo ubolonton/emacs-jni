@@ -95,6 +95,13 @@ HANDOFF.md).")
              (jvm--invoke-reply id t (apply fn args))
            (error
             (jvm--invoke-reply id nil (format "%S" err)))))))
+    (`(release ,handle)
+     ;; The JVM-side LispFunction proxy for HANDLE was garbage collected
+     ;; (see `ReleaseNotifier' in java/emacs_jni and its native `run',
+     ;; registered from `marshal.rs''s `register_release_on_gc'): drop our
+     ;; own function-table entry so it doesn't outlive the proxy that
+     ;; referenced it. A no-op if HANDLE is already gone.
+     (remhash handle jvm--lisp-callbacks))
     (_ (message "emacs-jni: unrecognized channel message: %S" sexp))))
 
 (defun jvm--resolve-sexp-result (result)

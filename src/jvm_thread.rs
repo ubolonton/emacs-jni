@@ -69,7 +69,20 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 handle_invoke_reply(&vm, id, ok, result);
                 false
             }
-            Cmd::ReleaseRef { .. } => false,
+            // Handled inline, like `Cmd::InvokeReply` — dropping a
+            // `GlobalRef` is a single cheap JNI call (`DeleteGlobalRef`),
+            // not an arbitrary user method, so it doesn't need its own
+            // thread (spec "Worker thread role"). This is the other half
+            // of `handles::JvmHandle::Drop`'s round trip: Lisp's GC
+            // collected a `user-ptr` wrapping a JVM object, which posted
+            // this command instead of releasing the ref directly (that
+            // `Drop` may run on a thread with no JNI attachment at all —
+            // see its own doc comment), and now the worker thread (which
+            // *is* attached) actually drops it.
+            Cmd::ReleaseRef { handle } => {
+                crate::handles::release(handle);
+                false
+            }
             #[cfg(feature = "test-support")]
             Cmd::TestPanic => panic!("jvm--test-panic: deliberate panic for crash-handling tests"),
         }));

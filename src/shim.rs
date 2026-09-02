@@ -6,9 +6,14 @@ const LISP_FUNCTION_CLASS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispFunction.class"));
 const LISP_ERROR_CLASS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispError.class"));
+const RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/ReleaseNotifier.class"
+));
 
-/// Defines the `emacs_jni.{LispCallable,LispFunction,LispError}` shim
-/// classes into the currently-attached JVM, using the *platform* classloader
+/// Defines the `emacs_jni.{LispCallable,LispFunction,LispError,
+/// ReleaseNotifier}` shim classes into the currently-attached JVM, using
+/// the *platform* classloader
 /// (not the system/application classloader, despite this file's original
 /// Task 1 comment saying otherwise — see below) so they're visible both
 /// to `find_class` calls made with no Java frames on the stack (which JNI
@@ -62,18 +67,22 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
 
     // LispCallable must be defined before LispFunction (which implements
     // it) for the JVM's verifier to resolve the interface reference.
-    // LispError has no dependency and can go anywhere.
+    // LispError and ReleaseNotifier have no such dependency and can go
+    // anywhere.
     define_if_absent(env, &platform_loader, "emacs_jni/LispCallable", LISP_CALLABLE_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/LispFunction", LISP_FUNCTION_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/LispError", LISP_ERROR_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/ReleaseNotifier", RELEASE_NOTIFIER_CLASS)?;
 
     // Sanity check: confirm find_class can see what was just defined, the
     // same way every later task will look these classes up.
     env.find_class(jni::jni_str!("emacs_jni/LispCallable"))?;
     env.find_class(jni::jni_str!("emacs_jni/LispFunction"))?;
     env.find_class(jni::jni_str!("emacs_jni/LispError"))?;
+    env.find_class(jni::jni_str!("emacs_jni/ReleaseNotifier"))?;
 
     register_lisp_function_native(env)?;
+    register_release_notifier_native(env)?;
 
     Ok(())
 }
@@ -158,10 +167,55 @@ fn lisp_function_call<'local>(
     Ok(future)
 }
 
-/// Reads `LispFunction`'s private `handle` field directly via JNI field
-/// access, which (unlike ordinary Java code) is not subject to Java-level
-/// access control -- native code reading a private field of the very class
-/// that declares the native method is exactly what JNI field access is for.
+/// Registers the native implementation of `ReleaseNotifier.run` — the
+/// JVM-side mirror of `register_lisp_function_native` above, following the
+/// exact same `native_method!` pattern (see that function's doc comment for
+/// why this crate version needs the macro rather than a hand-rolled
+/// `extern "system" fn` + manual `RegisterNatives` call). `run` takes no
+/// arguments and returns `void`, per `Runnable#run`'s own signature.
+fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<()> {
+    let class = env.find_class(jni::jni_str!("emacs_jni/ReleaseNotifier"))?;
+    const RUN_METHOD: jni::NativeMethod = jni::native_method! {
+        name = "run",
+        fn release_notifier_run() -> void,
+    };
+    // Safety: same reasoning as `register_lisp_function_native`'s own
+    // safety comment -- `native_method!` compile-time-checks
+    // `release_notifier_run`'s signature against `RUN_METHOD`'s encoded
+    // JNI signature, and `run` is a genuine non-static instance method on
+    // `ReleaseNotifier`.
+    unsafe { env.register_native_methods(&class, &[RUN_METHOD]) }
+}
+
+/// The actual implementation behind `ReleaseNotifier.run`: the opposite
+/// direction from `jvm_thread`'s `Cmd::ReleaseRef` handling (Lisp's
+/// `user-ptr` GC'd -> tell Rust to drop a `GlobalRef`, over the Lisp-to-
+/// worker `Cmd` channel). Here, the JVM-side `LispFunction` proxy this
+/// notifier was registered against (via `marshal::register_release_on_gc`)
+/// was collected, so Lisp needs telling -- over the worker-to-Lisp
+/// `channel::send` wire, not a `Cmd` -- to drop its own function-table
+/// entry for the same handle. Runs on a `Cleaner`-managed background
+/// thread, not the worker thread, but that's fine: `get_handle_field` is
+/// plain JNI field access (needs only the `Env` this native call itself
+/// provides) and `channel::send` just writes to a process-global pipe
+/// writer, neither of which cares which thread calls them.
+///
+/// Registered (not called directly) via `register_release_notifier_native`
+/// above.
+fn release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
+    let handle = get_handle_field(env, &this)?;
+    crate::channel::send(&crate::protocol::release_message(handle));
+    Ok(())
+}
+
+/// Reads a private `handle` field directly via JNI field access, which
+/// (unlike ordinary Java code) is not subject to Java-level access control
+/// -- native code reading a private field of the very class that declares
+/// the native method is exactly what JNI field access is for. Shared by
+/// both `lisp_function_call` (THIS is a `LispFunction`) and
+/// `release_notifier_run` (THIS is a `ReleaseNotifier`) -- both shim
+/// classes declare their handle field identically (`private final long
+/// handle`), so one reflective accessor covers both.
 fn get_handle_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Result<u64> {
     let value = env.get_field(this, jni::jni_str!("handle"), jni::jni_sig!(long))?.j()?;
     Ok(value as u64)
@@ -223,9 +277,15 @@ mod tests {
     }
 
     #[test]
-    fn defines_all_three_shim_classes_and_they_are_findable() {
+    fn defines_all_four_shim_classes_and_they_are_findable() {
         let vm = create_test_jvm();
         vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            // `define_classes` itself already `find_class`es all four shim
+            // classes as its own internal sanity check, so this `?` alone
+            // would already fail the test if `ReleaseNotifier` (or its
+            // native `run` registration) were broken -- the extra
+            // assignability checks below go further, confirming actual
+            // interface relationships, not just "the class exists".
             define_classes(env)?;
             // Confirm LispFunction really implements LispCallable, not
             // just that both classes independently exist.
@@ -233,6 +293,12 @@ mod tests {
             let lisp_callable_class = env.find_class(jni::jni_str!("emacs_jni/LispCallable"))?;
             let is_assignable = env.is_assignable_from(&lisp_function_class, &lisp_callable_class)?;
             assert!(is_assignable, "LispFunction should implement LispCallable");
+            // Same shape of check for the new fourth class: confirm
+            // ReleaseNotifier really implements Runnable.
+            let release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/ReleaseNotifier"))?;
+            let runnable_class = env.find_class(jni::jni_str!("java/lang/Runnable"))?;
+            let is_runnable = env.is_assignable_from(&release_notifier_class, &runnable_class)?;
+            assert!(is_runnable, "ReleaseNotifier should implement Runnable");
             Ok(())
         })
         .expect("defining shim classes into a fresh JVM should succeed");

@@ -67,12 +67,8 @@ impl Drop for JvmHandle {
         // Lisp's GC may run this `Drop` on a thread that was never
         // JNI-attached, so the actual `GlobalRef` drop (which needs a
         // live JNI attachment) happens on the worker thread instead, via
-        // Task 8's `Cmd::ReleaseRef` handling (`handles::release`, called
-        // from there). Until Task 8 lands, Task 2's catch-all silently
-        // no-ops this — meaning dropped handles' table entries aren't
-        // actually cleaned up between Tasks 3 and 8, which is fine (no
-        // test in that window exercises cleanup) and self-resolves once
-        // Task 8 ships.
+        // `Cmd::ReleaseRef`'s handling in `jvm_thread::run` (Task 8),
+        // which calls `handles::release` directly.
         let _ = crate::worker::send_command(crate::commands::Cmd::ReleaseRef { handle: self.0 });
     }
 }
