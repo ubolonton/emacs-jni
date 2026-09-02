@@ -1,4 +1,4 @@
-use jni::objects::JClassLoader;
+use jni::objects::{JClassLoader, JObject, JObjectArray, JValueOwned};
 
 const LISP_CALLABLE_CLASS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispCallable.class"));
@@ -73,7 +73,115 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     env.find_class(jni::jni_str!("emacs_jni/LispFunction"))?;
     env.find_class(jni::jni_str!("emacs_jni/LispError"))?;
 
+    register_lisp_function_native(env)?;
+
     Ok(())
+}
+
+/// Registers the native implementation of `LispFunction.call` (Task 7's
+/// half of "the full JVM-calls-Lisp round trip" — see `lisp_function_call`'s
+/// own doc comment for what it actually does).
+///
+/// Uses jni-rs 0.22.4's `native_method!` macro (verified against the
+/// vendored `jni-macros-0.22.4` crate source and
+/// `jni-0.22.4/docs/macros/native_method.md`) to generate the ABI-correct
+/// `extern "system"` wrapper together with the `NativeMethod` descriptor,
+/// compile-time type-checked against `lisp_function_call`'s real
+/// signature. This plan's original sketch (a hand-rolled
+/// `extern "system" fn(env: jni::Env, ...) -> jni::sys::jobject` plus a
+/// `NativeMethod { name, sig, fn_ptr }` struct literal) does not match
+/// this crate version's actual API: `NativeMethod`'s fields are private,
+/// constructible only via the `unsafe fn from_raw_parts` associated
+/// function (not a struct literal), and a native method's real first
+/// parameter must be `jni::EnvUnowned<'local>` (an as-yet-unattached
+/// wrapper around the raw `JNIEnv` pointer the JVM hands a native method,
+/// upgraded to a real `Env` via `.with_env(...)`), not a plain
+/// `jni::Env<'local>` directly. `native_method!`'s non-`raw` mode builds
+/// exactly that `EnvUnowned`-taking wrapper for us, along with panic
+/// catching and `ThrowRuntimeExAndDefault` error handling (any
+/// `jni::errors::Error` `lisp_function_call` returns becomes a thrown
+/// `java.lang.RuntimeException`, synchronously, on the Java caller's own
+/// `call()` invocation -- appropriate here, since a failure at this stage
+/// means the round trip never even started, e.g. because posting to the
+/// channel failed, as opposed to a failure that happens after a Lisp
+/// callback runs, which instead completes the future exceptionally via
+/// `LispError`, see `jvm_thread::handle_invoke_reply`).
+fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> {
+    let class = env.find_class(jni::jni_str!("emacs_jni/LispFunction"))?;
+    const CALL_METHOD: jni::NativeMethod = jni::native_method! {
+        name = "call",
+        fn lisp_function_call(args: [java.lang.Object]) -> java.util.concurrent.CompletableFuture,
+    };
+    // Safety: `native_method!` above compile-time-checks that
+    // `lisp_function_call`'s Rust signature matches the JNI signature it
+    // also encodes into `CALL_METHOD`, and `call` is a genuine non-static
+    // instance method on `LispFunction` (matching `register_native_methods`'s
+    // own extra safety requirement -- beyond what `NativeMethod` itself
+    // checks -- that the second parameter's static/instance-ness agrees
+    // with how the method is actually declared in Java; `native_method!`'s
+    // generated wrapper also runs a runtime ABI check confirming this on
+    // first call, so a mismatch here would fail loudly rather than
+    // corrupt memory).
+    unsafe { env.register_native_methods(&class, &[CALL_METHOD]) }
+}
+
+/// The actual implementation behind `LispFunction.call`: allocates a fresh
+/// correlation id, constructs a (still-incomplete) `CompletableFuture`,
+/// registers it in `pending`, posts `(invoke ID HANDLE ARGS)` on the
+/// channel, and returns the future immediately — the concrete realization
+/// of the design spec's "Java shim" section. Never blocks: everything here
+/// is either process-local bookkeeping or a non-blocking channel write; the
+/// actual Lisp call happens later, off this thread entirely (on Emacs's
+/// own main thread, via `jvm--dispatch-message`'s `invoke` case), and its
+/// result arrives back asynchronously via `Cmd::InvokeReply`
+/// (`jvm_thread::handle_invoke_reply`).
+///
+/// Registered (not called directly) via `register_lisp_function_native`
+/// above -- see that function's doc comment for the actual native-method
+/// ABI this must satisfy, which `native_method!` enforces at compile time.
+fn lisp_function_call<'local>(
+    env: &mut jni::Env<'local>,
+    this: JObject<'local>,
+    args: JObjectArray<'local>,
+) -> jni::errors::Result<JObject<'local>> {
+    let handle = get_handle_field(env, &this)?;
+    let id = crate::pending::next_id();
+
+    let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
+    let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
+    let future_global = env.new_global_ref(&future)?;
+    crate::pending::register(id, future_global);
+
+    let args_sexp = jobject_array_to_sexp(env, &args)?;
+    crate::channel::send(&crate::protocol::invoke_message(id, handle, &args_sexp));
+
+    Ok(future)
+}
+
+/// Reads `LispFunction`'s private `handle` field directly via JNI field
+/// access, which (unlike ordinary Java code) is not subject to Java-level
+/// access control -- native code reading a private field of the very class
+/// that declares the native method is exactly what JNI field access is for.
+fn get_handle_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Result<u64> {
+    let value = env.get_field(this, jni::jni_str!("handle"), jni::jni_sig!(long))?.j()?;
+    Ok(value as u64)
+}
+
+/// Renders an `Object[]` of `call`'s actual varargs arguments back into the
+/// S-expression list fragment `protocol::invoke_message` embeds — the
+/// reverse direction of what `jvm_thread::handle_call` (Task 5) does for
+/// its own return values, reused here since a JVM-initiated call's
+/// arguments need the exact same Java-object -> `LispArg` -> sexp pipeline
+/// as any other value crossing from Java to Lisp.
+fn jobject_array_to_sexp(env: &mut jni::Env<'_>, args: &JObjectArray<'_>) -> jni::errors::Result<String> {
+    let len = args.len(env)?;
+    let mut parts = Vec::with_capacity(len);
+    for i in 0..len {
+        let obj = args.get_element(env, i)?;
+        let arg = crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(obj))?;
+        parts.push(crate::marshal::lisp_arg_to_sexp(&arg));
+    }
+    Ok(format!("({})", parts.join(" ")))
 }
 
 fn define_if_absent(

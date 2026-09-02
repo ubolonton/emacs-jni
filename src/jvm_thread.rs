@@ -62,7 +62,14 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 std::thread::spawn(move || handle_call(&vm, loader, id, target, member, args));
                 false
             }
-            Cmd::InvokeReply { .. } | Cmd::ReleaseRef { .. } => false,
+            Cmd::InvokeReply { id, ok, result } => {
+                // Handled inline, unlike `Cmd::Call` — see `handle_invoke_reply`'s
+                // own doc comment for why completing an already-existing
+                // `CompletableFuture` doesn't need its own thread.
+                handle_invoke_reply(&vm, id, ok, result);
+                false
+            }
+            Cmd::ReleaseRef { .. } => false,
             #[cfg(feature = "test-support")]
             Cmd::TestPanic => panic!("jvm--test-panic: deliberate panic for crash-handling tests"),
         }));
@@ -420,6 +427,77 @@ fn add_jar_url(
     Ok(())
 }
 
+/// Resolves the pending `CompletableFuture` for ID — inline, cheaply, on
+/// the worker thread's own persistent JNI attachment, per spec "Worker
+/// thread role": unlike `Cmd::Call`, this never spawns a thread, since
+/// completing a future is not itself a slow operation (it's a single JNI
+/// call to `CompletableFuture#complete`/`#completeExceptionally`, not an
+/// arbitrary user method that might block for arbitrary reasons). This is
+/// the other half of the round trip `shim::lisp_function_call` starts:
+/// that function posts `(invoke ID HANDLE ARGS)` and returns immediately;
+/// this function runs once Lisp's `jvm--invoke-reply` sends back
+/// `Cmd::InvokeReply` with the Lisp function's result (or error).
+fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::LispArg) {
+    let Some(future) = crate::pending::take(id) else {
+        channel::send(&protocol::log_message("error", &format!("invoke-reply for unknown id {id}")));
+        return;
+    };
+    let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
+        let future_local = env.new_local_ref(future.as_obj())?;
+        if ok {
+            // `LispCallable#call` is declared to return `CompletableFuture<Object>`
+            // -- `Object` is the only param type `lisp_arg_to_jvalue` ever
+            // needs to marshal against here, matching how `Method.invoke`'s
+            // own `Object[]` args array (Task 5's `build_invoke_args`) does
+            // the same "unknown declared type, box everything" thing.
+            let param_type = env.find_class(jni::jni_str!("java/lang/Object"))?;
+            let jvalue = crate::marshal::lisp_arg_to_jvalue(env, &result, &param_type)?;
+            let boxed = crate::marshal::box_if_primitive(env, jvalue)?;
+            env.call_method(
+                &future_local,
+                jni::jni_str!("complete"),
+                jni::jni_sig!((v: java.lang.Object) -> boolean),
+                &[jni::objects::JValueOwned::Object(boxed).borrow()],
+            )?;
+        } else {
+            // The Lisp side (`jvm--invoke-reply`) always sends a formatted
+            // error message as a plain string for a failed callback (see
+            // `jvm_invoke_reply` in `lib.rs`) -- any other shape here would
+            // mean a protocol-level bug, not a normal application error, so
+            // there's nothing sensible to complete the future with; just
+            // leave it pending rather than fabricate a result.
+            let crate::commands::LispArg::Str(message) = result else {
+                return Ok(());
+            };
+            let lisp_error_class = env.find_class(jni::jni_str!("emacs_jni/LispError"))?;
+            let jmessage = env.new_string(&message)?;
+            let error = env.new_object(
+                &lisp_error_class,
+                jni::jni_sig!((message: java.lang.String) -> void),
+                &[jni::objects::JValueOwned::Object(jmessage.into()).borrow()],
+            )?;
+            env.call_method(
+                &future_local,
+                jni::jni_str!("completeExceptionally"),
+                jni::jni_sig!((ex: java.lang.Throwable) -> boolean),
+                &[jni::objects::JValueOwned::Object(error).borrow()],
+            )?;
+        }
+        Ok(())
+    });
+    if let Err(e) = result {
+        // The future is already removed from `pending` by this point (via
+        // `take` above) and there's no other channel to report this
+        // through -- the Java side just sees its future hang until its own
+        // wait times out. Logging here at least makes the failure visible
+        // in `*jvm-log*` rather than disappearing silently.
+        channel::send(&protocol::log_message(
+            "error",
+            &format!("invoke-reply for id {id}: failed to complete the pending future: {e}"),
+        ));
+    }
+}
+
 /// Handles a `Cmd::Call`: resolves TARGET.MEMBER reflectively and invokes
 /// it with ARGS, then sends a `call-done` message with the result. Runs on
 /// its own short-lived thread (spawned by `run`'s `Cmd::Call` arm above) —
@@ -507,6 +585,77 @@ fn resolve_class_via_loader<'local>(
     env.cast_local::<jni::objects::JClass>(class_obj)
 }
 
+/// Renders a pending Java exception (after a reflective `Method.invoke`/
+/// `Constructor.newInstance` call reports `Error::JavaException`) as a
+/// readable message that includes the whole `getCause()` chain, not just
+/// the outermost exception.
+///
+/// This matters specifically for `Method.invoke`/`Constructor.newInstance`:
+/// both always wrap whatever the *target* code actually threw in an
+/// `InvocationTargetException`, whose own `getMessage()` is normally
+/// `null` and whose own stack trace is just the two reflection frames
+/// where it was constructed — the actually useful information (e.g. a
+/// `LispError`'s message, for Task 7's callback round trip: `Calc.
+/// callWithArg`'s `future.get(...)` throws `ExecutionException`, itself
+/// wrapping the `LispError` `handle_invoke_reply` built) is one or more
+/// `getCause()` hops further down. Left to `JavaVM::attach_current_thread`'s
+/// own default exception handling (which auto-converts a still-pending
+/// exception into `Error::CaughtJavaException` using exactly that shallow
+/// info, once the whole `attach_current_thread` closure returns without
+/// having cleared it), the caller only ever sees something like `"<NULL>
+/// \nStack trace:\n0: ...DirectMethodHandleAccessor.invoke...\n1: ...
+/// Method.invoke...\n"` — true, but useless for diagnosing what actually
+/// went wrong (found empirically running this task's own ERT test: see
+/// task-7-report.md). Catching and describing the exception here instead,
+/// immediately after the failing reflective call and before it can escape
+/// this function, lets the message include the real cause.
+fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
+    let caught = match env.exception_catch() {
+        Err(e) => e,
+        Ok(()) => {
+            return marshal_error("expected a pending Java exception (Error::JavaException) but found none")
+        }
+    };
+    let jni::errors::Error::CaughtJavaException { name, msg, exception, .. } = caught else {
+        // `exception_catch` itself failed in some unexpected way (e.g.
+        // couldn't query the throwable's class/message) -- surface that
+        // failure as-is rather than losing it.
+        return caught;
+    };
+
+    let mut lines = vec![format!("{name}: {msg}")];
+    if let Ok(local) = env.new_local_ref(exception.as_obj()) {
+        if let Ok(mut current) = env.cast_local::<jni::objects::JThrowable>(local) {
+            // Bounded, not unconditional: ordinary `Throwable` construction
+            // can't produce a `getCause()` cycle (`initCause` rejects
+            // `cause == this`), but nothing guarantees some hostile/
+            // reflective subclass can't -- this is diagnostic code, not
+            // worth an unbounded loop over.
+            for _ in 0..10 {
+                let cause = match current.get_cause(env) {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                if cause.is_null() {
+                    break;
+                }
+                let cause_name = env
+                    .get_object_class(&cause)
+                    .and_then(|c| c.get_name(env))
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| "<unknown>".to_string());
+                let cause_msg = cause
+                    .get_message(env)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| "<NULL>".to_string());
+                lines.push(format!("Caused by: {cause_name}: {cause_msg}"));
+                current = cause;
+            }
+        }
+    }
+    marshal_error(&lines.join("\n"))
+}
+
 /// Finds an overload of METHOD_NAME on CLASS whose parameter count matches
 /// ARGS, invokes it, and marshals the result. Ambiguous overloads (same
 /// arg count, multiple candidates) resolve to the first match from
@@ -558,17 +707,22 @@ fn invoke_method(
 
         let invoke_args = build_invoke_args(env, &param_types, args)?;
 
-        let result = env
-            .call_method(
-                &candidate,
-                jni::jni_str!("invoke"),
-                jni::jni_sig!((obj: java.lang.Object, args: [java.lang.Object]) -> java.lang.Object),
-                &[
-                    jni::objects::JValue::Object(receiver),
-                    jni::objects::JValue::Object(&invoke_args),
-                ],
-            )?
-            .l()?;
+        let result = match env.call_method(
+            &candidate,
+            jni::jni_str!("invoke"),
+            jni::jni_sig!((obj: java.lang.Object, args: [java.lang.Object]) -> java.lang.Object),
+            &[
+                jni::objects::JValue::Object(receiver),
+                jni::objects::JValue::Object(&invoke_args),
+            ],
+        ) {
+            Ok(v) => v.l()?,
+            // See `describe_pending_java_exception`'s doc comment: without
+            // this, the caller only ever learns "a Java exception was
+            // thrown", not what it actually said.
+            Err(jni::errors::Error::JavaException) => return Err(describe_pending_java_exception(env)),
+            Err(e) => return Err(e),
+        };
         return crate::marshal::jvm_value_to_lisp_arg(env, jni::objects::JValueOwned::Object(result));
     }
 
@@ -611,14 +765,16 @@ fn invoke_constructor(
 
         let invoke_args = build_invoke_args(env, &param_types, args)?;
 
-        let instance = env
-            .call_method(
-                &candidate,
-                jni::jni_str!("newInstance"),
-                jni::jni_sig!((args: [java.lang.Object]) -> java.lang.Object),
-                &[jni::objects::JValue::Object(&invoke_args)],
-            )?
-            .l()?;
+        let instance = match env.call_method(
+            &candidate,
+            jni::jni_str!("newInstance"),
+            jni::jni_sig!((args: [java.lang.Object]) -> java.lang.Object),
+            &[jni::objects::JValue::Object(&invoke_args)],
+        ) {
+            Ok(v) => v.l()?,
+            Err(jni::errors::Error::JavaException) => return Err(describe_pending_java_exception(env)),
+            Err(e) => return Err(e),
+        };
         return crate::marshal::jvm_value_to_lisp_arg(env, jni::objects::JValueOwned::Object(instance));
     }
 

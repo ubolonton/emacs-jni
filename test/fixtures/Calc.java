@@ -24,4 +24,13 @@ public class Calc {
     public static boolean isLispCallable(Object obj) {
         return obj instanceof emacs_jni.LispCallable;
     }
+
+    public static Object callWithArg(emacs_jni.LispCallable fn, long n) throws Exception {
+        // A synchronous-looking wait is fine INSIDE A TEST FIXTURE (not
+        // inside the shim or any real interop path) -- this just proves
+        // the round trip completes with the right value; production Java
+        // code calling a LispCallable would normally chain
+        // .thenAccept(...) instead of blocking.
+        return fn.call(n).get(10, java.util.concurrent.TimeUnit.SECONDS);
+    }
 }

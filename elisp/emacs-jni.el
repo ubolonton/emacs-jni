@@ -79,6 +79,22 @@ HANDOFF.md).")
      (when-let ((callback (alist-get id jvm--pending-call)))
        (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
        (funcall callback ok (jvm--resolve-sexp-result result) err)))
+    (`(invoke ,id ,handle ,args)
+     ;; A JVM-initiated call into a previously wrapped Lisp function (see
+     ;; `jvm--register-callback'): look it up by HANDLE, funcall it with
+     ;; ARGS (already a plain Lisp list -- the wire form's ARGS never
+     ;; contains a `(jvm-handle N)' tag in this plan's scope, since that
+     ;; would require a Lisp value to have crossed into Java and back
+     ;; first, which nothing here does), and reply with the result (or a
+     ;; formatted error) via `jvm--invoke-reply', which resolves the
+     ;; `CompletableFuture' on the Rust/Java side.
+     (let ((fn (gethash handle jvm--lisp-callbacks)))
+       (if (null fn)
+           (jvm--invoke-reply id nil (format "no such callback handle %s" handle))
+         (condition-case err
+             (jvm--invoke-reply id t (apply fn args))
+           (error
+            (jvm--invoke-reply id nil (format "%S" err)))))))
     (_ (message "emacs-jni: unrecognized channel message: %S" sexp))))
 
 (defun jvm--resolve-sexp-result (result)

@@ -29,7 +29,22 @@ pub fn lisp_arg_to_jvalue<'local>(
         (LispArg::Int(n), "byte") => i8::try_from(*n)
             .map(JValueOwned::Byte)
             .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type byte"))),
-        (LispArg::Int(n), "long") => Ok(JValueOwned::Long(*n)),
+        // The "java.lang.Object" arms below matter beyond Task 5's own
+        // `Method.invoke`/`Constructor.newInstance` callers (where a
+        // declared parameter type of plain `Object` is just one possible
+        // overload among others): Task 7's `handle_invoke_reply` always
+        // marshals a Lisp callback's return value against exactly
+        // `java.lang.Object`, since that's `CompletableFuture<Object>
+        // #complete`'s own declared parameter type — with no arm for it, a
+        // Lisp function simply returning an integer or float back to Java
+        // (the common case) would always fail marshalling here rather than
+        // completing the future at all. `long`/`double`/`BigInteger` are
+        // the same choices `object_to_lisp_arg` (the reverse direction,
+        // below) already treats as canonical for "an arbitrary boxed
+        // number", so a value that crosses Java -> Lisp -> Java this way
+        // round-trips through the same representation rather than
+        // silently narrowing.
+        (LispArg::Int(n), "long") | (LispArg::Int(n), "java.lang.Object") => Ok(JValueOwned::Long(*n)),
         (LispArg::Int(n), "float") => Ok(JValueOwned::Float(*n as f32)),
         (LispArg::Int(n), "double") => Ok(JValueOwned::Double(*n as f64)),
         (LispArg::Int(n), "java.math.BigInteger") => big_integer_from_str(env, &n.to_string()),
@@ -37,11 +52,13 @@ pub fn lisp_arg_to_jvalue<'local>(
             "integer argument doesn't fit parameter type {other}"
         ))),
         (LispArg::Float(f), "float") => Ok(JValueOwned::Float(*f as f32)),
-        (LispArg::Float(f), "double") => Ok(JValueOwned::Double(*f)),
+        (LispArg::Float(f), "double") | (LispArg::Float(f), "java.lang.Object") => Ok(JValueOwned::Double(*f)),
         (LispArg::Float(_), other) => Err(marshal_error(&format!(
             "float argument doesn't fit parameter type {other}"
         ))),
-        (LispArg::BigInt(digits), "java.math.BigInteger") => big_integer_from_str(env, digits),
+        (LispArg::BigInt(digits), "java.math.BigInteger") | (LispArg::BigInt(digits), "java.lang.Object") => {
+            big_integer_from_str(env, digits)
+        }
         (LispArg::BigInt(_), other) => Err(marshal_error(&format!(
             "bignum argument too large for parameter type {other}"
         ))),
