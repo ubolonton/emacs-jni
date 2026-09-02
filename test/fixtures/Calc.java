@@ -20,4 +20,8 @@ public class Calc {
     public static String describe(boolean flag) {
         return flag ? "yes" : "no";
     }
+
+    public static boolean isLispCallable(Object obj) {
+        return obj instanceof emacs_jni.LispCallable;
+    }
 }

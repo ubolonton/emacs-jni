@@ -62,14 +62,24 @@ pub fn lisp_arg_to_jvalue<'local>(
             }
             None => Err(marshal_error(&format!("unknown JVM object handle {handle}"))),
         },
-        // A Callback arg reaching this function unconverted is a bug in
-        // the caller — Task 6 must have already turned it into a
-        // LispArg::Object(handle) (the freshly-registered LispFunction
-        // proxy) before calling this function, since constructing that
-        // proxy needs Lisp-side bookkeeping (Task 6's function table) that
-        // this JVM-facing module has no access to.
-        (LispArg::Callback(_), _) => {
-            Err(marshal_error("internal error: raw Callback LispArg reached lisp_arg_to_jvalue"))
+        // The handle here already denotes a live entry in Lisp's own
+        // `jvm--lisp-callbacks' table (`lisp_value_to_arg` in `lib.rs`
+        // registered it there before this `LispArg` was ever built —
+        // this module has no access to that table itself, only the
+        // handle number). Wrapping it as a `LispFunction' here is what
+        // makes "a Lisp function crosses into Java as a real object" a
+        // reality: `LispFunction`'s single constructor just stores the
+        // handle (see `java/emacs_jni/LispFunction.java`), for later
+        // `invoke`/`InvokeReply` round-tripping (Task 7) to call back
+        // into Lisp by that handle.
+        (LispArg::Callback(handle), _) => {
+            let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/LispFunction"))?;
+            let obj = env.new_object(
+                &lisp_function_class,
+                jni::jni_sig!((handle: long) -> void),
+                &[JValueOwned::Long(*handle as i64).borrow()],
+            )?;
+            Ok(JValueOwned::Object(obj))
         }
     }
 }

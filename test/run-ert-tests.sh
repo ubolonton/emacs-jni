@@ -15,15 +15,22 @@ javac -d target/test-fixtures test/fixtures/Greeter.java
 jar cf target/test-fixtures/greeter.jar -C target/test-fixtures Greeter.class
 export EMACS_JNI_GREETER_JAR="$(pwd)/target/test-fixtures/greeter.jar"
 
-javac -d target/test-fixtures test/fixtures/Calc.java
-jar cf target/test-fixtures/calc.jar -C target/test-fixtures Calc.class
-
+# `cargo build` (via build.rs) compiles the emacs_jni.{LispCallable,
+# LispFunction,LispError} shim classes into target/emacs-jni-shim-classes.
+# Calc.java references emacs_jni.LispCallable (isLispCallable, added in
+# Task 6), so it must be compiled against that output — meaning this must
+# run before compiling Calc.java, not after, and Calc's javac invocation
+# needs that directory on its classpath explicitly (rather than relying on
+# javac's default classpath, which wouldn't include it).
 CARGO_FEATURES="${EMACS_JNI_TEST_FEATURES:-}"
 if [ -n "$CARGO_FEATURES" ]; then
     cargo build --features "$CARGO_FEATURES"
 else
     cargo build
 fi
+
+javac -cp target/emacs-jni-shim-classes -d target/test-fixtures test/fixtures/Calc.java
+jar cf target/test-fixtures/calc.jar -C target/test-fixtures Calc.class
 
 export EMACS_JNI_MODULE_PATH="$(pwd)/target/debug/libemacs_jni.so"
 

@@ -104,7 +104,51 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
         builder = builder.option(opt.clone());
     }
     let init_args = builder.build().map_err(|e| e.to_string())?;
-    JavaVM::new(init_args).map_err(|e| e.to_string())
+    let vm = JavaVM::new(init_args).map_err(|e| e.to_string())?;
+
+    // Defines the `emacs_jni.{LispCallable,LispFunction,LispError}` shim
+    // classes (Task 1) into this JVM, per `shim::define_classes`'s own doc
+    // comment: "must be called once, right after the JVM is created,
+    // before anything else in this crate references those classes." No
+    // caller actually did this at runtime before Task 6 (only
+    // `shim.rs`'s own unit test, against its own throwaway JVM) — Task 6
+    // is the first thing that references a shim class outside that test
+    // (`marshal::lisp_arg_to_jvalue`'s `LispArg::Callback` arm calls
+    // `find_class(emacs_jni/LispFunction)` on every `jvm-call` argument
+    // that turns out to be a Lisp function), so without this, that
+    // `find_class` would throw `ClassNotFoundException` against a real
+    // JVM started via `jvm-start`.
+    //
+    // Deliberately non-fatal to `create_jvm` itself (log-and-continue,
+    // not `?`): on a genuinely fresh JVM this should never fail, but on a
+    // *restart* after a real `jvm-stop` (`JNI_DestroyJavaVM`), the
+    // underlying VM can come back as a non-functional "zombie" that
+    // accepts `JavaVM::new`/attach calls but fails any subsequent real
+    // JNI work — a pre-existing, already-documented risk (`jvm-stop`'s
+    // own doc comment: "relies on JNI_DestroyJavaVM, which some JVM
+    // builds handle unreliably ... jvm-start afterward is best-effort"),
+    // confirmed independently of this change (a plain `jvm-load-jar`/
+    // `jvm-call` on such a VM already fails the same way, with the same
+    // "JNI call failed" message — this task found that while chasing a
+    // `jvm-stop-test.el` regression `?` caused here). Propagating this
+    // particular failure up through `create_jvm` would make `jvm-start`
+    // itself report `start-failed` in that scenario, where before this
+    // task it reported `ready` (with the *next* real operation failing
+    // instead) — a behavior change with no upside, since the VM is
+    // equally unusable either way. Logging and returning the VM as usual
+    // keeps `jvm-start`'s success/failure semantics exactly what they
+    // were before this task in the zombie-VM case, while still making
+    // the shim classes available whenever the VM the caller ends up with
+    // actually works.
+    let result: jni::errors::Result<()> = vm.attach_current_thread(crate::shim::define_classes);
+    if let Err(e) = result {
+        channel::send(&protocol::log_message(
+            "error",
+            &format!("failed to define emacs_jni shim classes: {e}"),
+        ));
+    }
+
+    Ok(vm)
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {

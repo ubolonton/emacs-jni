@@ -42,17 +42,37 @@ pub fn log_message(level: &str, message: &str) -> String {
 }
 
 /// Renders a Rust string as an Emacs Lisp string literal: wraps in double
-/// quotes and escapes backslashes and double quotes. This only needs to
-/// cover what our own messages ever contain (plain error/log text), not
-/// full Lisp reader syntax.
+/// quotes and escapes backslashes, double quotes, and raw newlines/carriage
+/// returns. This only needs to cover what our own messages ever contain
+/// (plain error/log text), not full Lisp reader syntax.
+///
+/// Escaping `\n`/`\r` (not just `"`/`\`) matters because the wire protocol
+/// is newline-delimited: `jvm--process-filter` (elisp/emacs-jni.el) splits
+/// incoming bytes into one message per literal `\n` *before* calling `read`
+/// on each line. A raw newline embedded inside a quoted string here — e.g.
+/// a multi-line Java exception's `to_string()`, which a `CaughtJavaException`
+/// stack trace genuinely can produce (found via Task 6's callback-wrapping
+/// test, whose triggering `InvocationTargetException` rendered several
+/// `\n`-separated stack frames into what `call_done_message` sends) — would
+/// fracture one wire message into multiple malformed fragments, each
+/// failing `read` with "End of file during parsing". Emacs Lisp's string
+/// reader recognizes `\n`/`\r` as the corresponding control character (the
+/// same escape syntax as C), so emitting the two-character escape sequence
+/// here keeps the wire single-line while still round-tripping correctly
+/// into the original multi-line string on the Lisp side.
 fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
-        if c == '"' || c == '\\' {
-            out.push('\\');
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
         }
-        out.push(c);
     }
     out.push('"');
     out
@@ -81,6 +101,22 @@ mod tests {
             status_message(Status::Crashed, Some("bad \"quote\" and \\slash")),
             "(status crashed \"bad \\\"quote\\\" and \\\\slash\")\n"
         );
+    }
+
+    #[test]
+    fn escapes_embedded_newlines_and_carriage_returns_so_the_wire_stays_one_line() {
+        // A raw '\n' in the rendered message would be mistaken by
+        // `jvm--process-filter`'s line-splitting for the end of the wire
+        // message itself -- see `quote`'s doc comment. The whole point of
+        // this test is that the *rendered string* contains no raw '\n' or
+        // '\r' byte anywhere, not just that it round-trips semantically.
+        let rendered = status_message(Status::Crashed, Some("line one\nline two\rline three"));
+        assert_eq!(rendered, "(status crashed \"line one\\nline two\\rline three\")\n");
+        // Exactly one '\n' in the whole rendered message: the trailing
+        // message terminator `call_done_message`/`status_message` always
+        // append, not any newline from the original content.
+        assert_eq!(rendered.matches('\n').count(), 1);
+        assert!(!rendered.contains('\r'));
     }
 
     #[test]

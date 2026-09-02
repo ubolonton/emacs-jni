@@ -117,9 +117,9 @@ fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
 
 /// Walks a Lisp list of arguments (as raw `Value`s, same pattern as the
 /// existing `string_list` helper) converting each to a `LispArg` by
-/// runtime type. Symbols other than `t`/`nil`, or any Lisp value not
-/// covered by the spec's marshalling table, is treated as `LispArg::True`
-/// rather than a signalled error — see `lisp_value_to_arg`'s doc comment.
+/// runtime type — see `lisp_value_to_arg`'s doc comment for what each
+/// Lisp type maps to, and what happens to a value this bridge doesn't
+/// recognize.
 fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::LispArg>> {
     let mut out = Vec::new();
     while list.is_not_nil() {
@@ -166,19 +166,34 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     // type), so it's checked explicitly here via `eq` against the
     // interned `t` symbol, matching Lisp's own notion of "is this
     // literally `t`" rather than "is this any non-nil symbol".
+    if v == v.env.intern("t")? {
+        return Ok(commands::LispArg::True);
+    }
+    // A Lisp function (symbol with a function cell, lambda, closure,
+    // subr, or byte-compiled object) is registered Lisp-side in
+    // `jvm--lisp-callbacks' rather than tracked here — this module never
+    // holds a reference to the function itself, only its handle. See
+    // spec "Identity and lifetime": Lisp owns that table, since Rust has
+    // no stable way to hold onto an arbitrary Lisp function value across
+    // calls. `marshal::lisp_arg_to_jvalue` later turns this handle into
+    // a real `LispFunction' proxy object when the argument actually
+    // crosses into Java.
     //
+    // The `emacs` crate (0.21.0, checked against its vendored source —
+    // `env.rs`/`value.rs`/`call.rs`) has no `Value::is_function` or
+    // similar native predicate, so this calls Lisp's own `functionp'
+    // via `env.call`, the same "call back into Lisp for a predicate the
+    // crate doesn't expose" pattern already used above for `integerp'.
+    if v.env.call("functionp", (v,))?.is_not_nil() {
+        let handle: u64 = v.env.call("jvm--register-callback", (v,))?.into_rust()?;
+        return Ok(commands::LispArg::Callback(handle));
+    }
     // Anything else reaching this point (a vector, keyword, hash-table,
     // or any symbol other than `t`) is not a value this bridge knows how
     // to marshal. Earlier code silently treated it as `LispArg::True`,
     // which could mask real caller bugs (e.g. accidentally passing a
     // vector where a number was intended would silently become Java
-    // `true`) -- signal a clear error instead. Lisp functions are Task
-    // 6's territory (auto-wrap-as-LispFunction, which needs Lisp-side
-    // function-table bookkeeping this module doesn't have yet) and will
-    // get their own branch here, before this fallback, once Task 6 lands.
-    if v == v.env.intern("t")? {
-        return Ok(commands::LispArg::True);
-    }
+    // `true`) -- signal a clear error instead.
     v.env.signal(jvm_invalid_argument, (v,))
 }
 

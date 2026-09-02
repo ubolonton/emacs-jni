@@ -256,5 +256,20 @@ JVM bytecode name, `\"<init>\"'."
   "Like `jvm-new', but blocks. See `jvm-call-sync'."
   (jvm-call-sync class-name "<init>" args timeout))
 
+(defvar jvm--lisp-callbacks (make-hash-table :test 'eql)
+  "Handle -> Lisp function, for functions wrapped as JVM LispFunction
+proxies. Entries are removed when the JVM notifies us via `(release
+HANDLE)' that the corresponding proxy was garbage collected.")
+
+(defvar jvm--next-callback-handle 1
+  "Monotonic counter for `jvm--lisp-callbacks' keys.")
+
+(defun jvm--register-callback (fn)
+  "Register FN in `jvm--lisp-callbacks', returning its fresh handle."
+  (let ((handle jvm--next-callback-handle))
+    (setq jvm--next-callback-handle (1+ jvm--next-callback-handle))
+    (puthash handle fn jvm--lisp-callbacks)
+    handle))
+
 (provide 'emacs-jni)
 ;;; emacs-jni.el ends here
