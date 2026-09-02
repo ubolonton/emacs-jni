@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
@@ -95,7 +96,35 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
 // underlying VM instead of re-bootstrapping it. There's no real "attach to
 // the retained `JavaVM` handle" hand-off happening, contrary to the design
 // spec's more literal wording — this comment is that clarification.
+// Tracks whether `create_jvm` has ever been *attempted* before in this
+// process (regardless of whether that attempt succeeded, failed, or its
+// shim-loading step in particular failed) — set unconditionally at the top
+// of `create_jvm`, before any fallible work happens, via `swap`, so the
+// very first call sees `false` (and thus knows it's "the first attempt")
+// and every call after that — a restart following `jvm-stop`/a crash —
+// sees `true`. Used below to decide whether a `shim::define_classes`
+// failure should be fatal to `create_jvm` or merely logged; see that
+// call site's doc comment for why the distinction matters. Worker threads
+// never run `create_jvm` concurrently with each other (a new one is only
+// spawned after the previous one has fully torn down — see
+// `worker::start_or_resume`/`clear_sender`), so a single `swap` at entry,
+// with no separate check-then-set race window, is sufficient.
+static JVM_CREATE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+/// Returns whether this call is the first ever call against FLAG — `true`
+/// exactly once per flag, `false` on every call after that. Factored out
+/// of `create_jvm` as its own function (taking the flag as a parameter,
+/// rather than reading `JVM_CREATE_ATTEMPTED` directly) purely so the swap
+/// semantics it relies on are unit-testable in isolation, without needing
+/// a real `JavaVM` — see the test below. `create_jvm` itself always calls
+/// this with `&JVM_CREATE_ATTEMPTED`.
+fn is_first_attempt(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::SeqCst)
+}
+
 fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String> {
+    let is_first_attempt = is_first_attempt(&JVM_CREATE_ATTEMPTED);
+
     let mut builder = InitArgsBuilder::new().version(JNIVersion::V1_8);
     if !classpath.is_empty() {
         builder = builder.option(format!("-Djava.class.path={}", classpath.join(":")));
@@ -119,33 +148,50 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     // `find_class` would throw `ClassNotFoundException` against a real
     // JVM started via `jvm-start`.
     //
-    // Deliberately non-fatal to `create_jvm` itself (log-and-continue,
-    // not `?`): on a genuinely fresh JVM this should never fail, but on a
-    // *restart* after a real `jvm-stop` (`JNI_DestroyJavaVM`), the
-    // underlying VM can come back as a non-functional "zombie" that
-    // accepts `JavaVM::new`/attach calls but fails any subsequent real
-    // JNI work — a pre-existing, already-documented risk (`jvm-stop`'s
-    // own doc comment: "relies on JNI_DestroyJavaVM, which some JVM
-    // builds handle unreliably ... jvm-start afterward is best-effort"),
-    // confirmed independently of this change (a plain `jvm-load-jar`/
-    // `jvm-call` on such a VM already fails the same way, with the same
-    // "JNI call failed" message — this task found that while chasing a
-    // `jvm-stop-test.el` regression `?` caused here). Propagating this
-    // particular failure up through `create_jvm` would make `jvm-start`
-    // itself report `start-failed` in that scenario, where before this
-    // task it reported `ready` (with the *next* real operation failing
-    // instead) — a behavior change with no upside, since the VM is
-    // equally unusable either way. Logging and returning the VM as usual
-    // keeps `jvm-start`'s success/failure semantics exactly what they
-    // were before this task in the zombie-VM case, while still making
-    // the shim classes available whenever the VM the caller ends up with
-    // actually works.
+    // Fatal on the *first* `create_jvm` attempt in this process, but
+    // log-and-continue on any attempt after that — see
+    // `JVM_CREATE_ATTEMPTED`'s doc comment for how "first" is determined.
+    // The two cases need different handling because they mean different
+    // things:
+    //
+    // - First attempt: this is a genuinely fresh JVM. `define_classes`
+    //   failing here means the shim itself is broken (missing/corrupt
+    //   `.class` bytes, a `javac`/JDK mismatch, etc.) — a real problem
+    //   that should surface immediately and clearly as `jvm-start`
+    //   reporting `start-failed`, not be swallowed only to resurface
+    //   later as a confusing `ClassNotFoundException`/marshal error deep
+    //   inside some unrelated `jvm-call` that happens to pass a Lisp
+    //   function argument, with no obvious link back to "the shim never
+    //   loaded".
+    // - Subsequent attempt: a *restart* after a real `jvm-stop`
+    //   (`JNI_DestroyJavaVM`) or a crash. The underlying VM can come back
+    //   as a non-functional "zombie" that accepts `JavaVM::new`/attach
+    //   calls but fails any subsequent real JNI work — a pre-existing,
+    //   already-documented risk (`jvm-stop`'s own doc comment: "relies on
+    //   JNI_DestroyJavaVM, which some JVM builds handle unreliably ...
+    //   jvm-start afterward is best-effort"), confirmed independently of
+    //   this change (a plain `jvm-load-jar`/`jvm-call` on such a VM
+    //   already fails the same way, with the same "JNI call failed"
+    //   message). Propagating a `define_classes` failure here through
+    //   `create_jvm` would make `jvm-start` itself report `start-failed`
+    //   in that scenario, where before this task it reported `ready`
+    //   (with only the *next* real operation failing instead) — a
+    //   behavior change with no upside, since the VM is equally unusable
+    //   either way, and (per `shim::define_classes`'s own idempotency
+    //   doc comment) the shim classes are typically already loaded from
+    //   the first successful boot regardless. Logging and returning the
+    //   VM as usual keeps `jvm-start`'s success/failure semantics exactly
+    //   what they were before this task in the zombie-VM case.
     let result: jni::errors::Result<()> = vm.attach_current_thread(crate::shim::define_classes);
-    if let Err(e) = result {
-        channel::send(&protocol::log_message(
-            "error",
-            &format!("failed to define emacs_jni shim classes: {e}"),
-        ));
+    match result {
+        Ok(()) => {}
+        Err(e) if is_first_attempt => return Err(e.to_string()),
+        Err(e) => {
+            channel::send(&protocol::log_message(
+                "error",
+                &format!("failed to define emacs_jni shim classes: {e}"),
+            ));
+        }
     }
 
     Ok(vm)
@@ -582,6 +628,24 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::process::Command;
+
+    /// Covers the exact swap semantics `create_jvm` relies on to decide
+    /// whether a `shim::define_classes` failure is fatal (first attempt)
+    /// or merely logged (a restart) — see `JVM_CREATE_ATTEMPTED`'s and
+    /// `is_first_attempt`'s doc comments. Uses its own local flag rather
+    /// than the module's shared `JVM_CREATE_ATTEMPTED` static, since that
+    /// static is process-global and other tests in this binary (run with
+    /// `--test-threads=1`, so sharing one process) may have already
+    /// flipped it by the time this test runs -- this test is about the
+    /// swap mechanism itself, not about `JVM_CREATE_ATTEMPTED`'s
+    /// particular state at some point in the suite.
+    #[test]
+    fn is_first_attempt_is_true_exactly_once() {
+        let flag = AtomicBool::new(false);
+        assert!(is_first_attempt(&flag), "the very first call must report true");
+        assert!(!is_first_attempt(&flag), "a second call must report false");
+        assert!(!is_first_attempt(&flag), "every call after that must keep reporting false");
+    }
 
     /// Compiles and jars up `test/fixtures/Greeter.java` into
     /// `target/test-fixtures/greeter.jar`, mirroring what
