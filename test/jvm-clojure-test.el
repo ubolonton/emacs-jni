@@ -79,6 +79,10 @@ section)."
       ;; the exact response shape observed during the design spike, not a
       ;; guess.
       (should (string-match-p "5:value2:42" response))
+      ;; No `unwind-protect': a failing `should' above leaves this
+      ;; server thread running for the rest of this batch process. Low
+      ;; impact (the process exits right after), but a real gap if this
+      ;; test is extended.
       (jvm-nrepl-stop server))))
 
 (provide 'jvm-clojure-test)

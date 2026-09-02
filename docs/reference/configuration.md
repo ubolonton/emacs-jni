@@ -28,7 +28,7 @@ the [Lisp API reference](lisp-api.md#variables).
 |---|---|
 | Emacs | 28 or later. This module needs `Env::open_channel`, added in Emacs 28. Exercised against Emacs 30.1. |
 | Rust | A stable toolchain. `cargo build` uses whatever is on `PATH`. |
-| A JDK | Located via `JAVA_HOME`, or `java` on `PATH`, at runtime. This repository pins JDK 26 through [mise](https://mise.jdx.dev/) (`mise.toml`, currently untracked). |
+| A JDK | Located via `JAVA_HOME`, or `java` on `PATH`, at runtime. This repository pins JDK 26 through [mise](https://mise.jdx.dev/) (`mise.toml`/`mise.lock`). Both files are currently untracked in this repository's git history — nobody has decided whether to commit them, so check with the maintainer before adding them. |
 | Operating system | Linux only. macOS and Windows are out of scope. |
 | `jni` crate version | Pinned to 0.22.4 in `Cargo.toml`. |
 

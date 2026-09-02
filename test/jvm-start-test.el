@@ -11,9 +11,10 @@
 installing its own SIGINT/SIGTERM/SIGHUP/SIGQUIT handlers — without it,
 since the JVM shares Emacs's process, `C-g' can terminate Emacs outright
 instead of just interrupting it (empirically verified with a `sigaction'
-probe during development; see HANDOFF.md). This only guards the default
-Elisp value doesn't silently regress — it doesn't re-verify the OS-level
-signal-handler effect itself, which isn't practical to assert from Elisp."
+probe during development; see docs/explanation/architecture.md). This
+only guards the default Elisp value doesn't silently regress — it
+doesn't re-verify the OS-level signal-handler effect itself, which
+isn't practical to assert from Elisp."
   (should (member "-Xrs" jvm-options)))
 
 (ert-deftest emacs-jni-jvm-start-test/status-not-stuck-after-illegal-transition ()

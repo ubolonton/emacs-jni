@@ -2,8 +2,8 @@
 
 This page discusses why emacs-jni's known limitations exist, and what
 each one costs. For the bare facts, see the
-[Lisp API reference](../reference/lisp-api.md) and `HANDOFF.md`. For
-workarounds, see the relevant how-to guide.
+[Lisp API reference](../reference/lisp-api.md). For workarounds, see
+the relevant how-to guide.
 
 ## `jvm-stop` is best-effort
 

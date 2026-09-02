@@ -31,7 +31,7 @@ the JNI API (`JavaVM::destroy'), not via a signal, and shutdown hooks still
 run on that path with or without `-Xrs'. If you override this variable,
 keep \"-Xrs\" in the list unless you specifically want the JVM's signal
 handlers installed (e.g. to use `kill -QUIT' for a thread dump — see
-HANDOFF.md).")
+docs/explanation/architecture.md).")
 
 (defvar jvm--status 'not-started
   "Current JVM lifecycle status. See `jvm-status'.")

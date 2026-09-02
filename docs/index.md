@@ -49,8 +49,6 @@ Background and design reasoning.
 ## Outside this documentation
 
 - [`README.md`](../README.md) — build instructions and prerequisites.
-- [`HANDOFF.md`](../HANDOFF.md) — current project state, for whoever
-  picks up the project next.
 - [`docs/superpowers/`](superpowers/) — the specs and plans written
   during development. These are historical design records, not user
   documentation.
