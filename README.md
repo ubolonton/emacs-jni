@@ -11,7 +11,10 @@ back and gets a real result), full error propagation both directions,
 Clojure evaluation, and a real nREPL server other processes can connect
 to. See [Roadmap](#roadmap).
 
-Full architecture and design rationale:
+**Full documentation, in tutorial, how-to, reference, and explanation
+form:** [`docs/index.md`](docs/index.md).
+
+Design rationale from development itself:
 [`docs/superpowers/specs/2026-08-31-jvm-lifecycle-design.md`](docs/superpowers/specs/2026-08-31-jvm-lifecycle-design.md)
 (Phase 1),
 [`docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md`](docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md)
