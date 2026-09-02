@@ -526,6 +526,32 @@ fn handle_call(
     args: Vec<crate::commands::LispArg>,
 ) {
     let result: jni::errors::Result<crate::commands::LispArg> = vm.attach_current_thread(|env| {
+        // A freshly attached thread's context classloader is null. Plain
+        // JNI class resolution (find_class/loadClass, used just below)
+        // doesn't need it, but Clojure's own namespace loader
+        // (clojure.lang.RT, used internally by `require`) does: it loads
+        // .clj source files as classpath *resources*, not classes, and
+        // that resolution path falls back through
+        // Thread.currentThread().getContextClassLoader(). Left null, the
+        // first touch of Clojure's runtime throws
+        // ExceptionInInitializerError before clojure.core even finishes
+        // loading — verified empirically during Phase 3's design spike
+        // (see docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md,
+        // "Feasibility"). Harmless for calls that never touch Clojure.
+        if let Some(global) = &loader {
+            let loader_local = env.new_local_ref(global.as_obj())?;
+            let thread_class = env.find_class(jni::jni_str!("java/lang/Thread"))?;
+            let current_thread = env
+                .call_static_method(&thread_class, jni::jni_str!("currentThread"), jni::jni_sig!(() -> java.lang.Thread), &[])?
+                .l()?;
+            env.call_method(
+                &current_thread,
+                jni::jni_str!("setContextClassLoader"),
+                jni::jni_sig!((cl: java.lang.ClassLoader) -> void),
+                &[jni::objects::JValue::Object(&loader_local)],
+            )?;
+        }
+
         let (class, instance): (jni::objects::JClass, Option<jni::objects::JObject>) = match &target {
             crate::commands::CallTarget::ClassName(name) => {
                 let class = match &loader {
