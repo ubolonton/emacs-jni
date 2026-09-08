@@ -10,9 +10,13 @@ import java.util.concurrent.CompletableFuture;
 public final class Lisp {
     private Lisp() {}
 
-    public static native LispObject intern(String name);
-    public static native LispObject typeOf(LispObject v);
-    public static native boolean isNotNil(LispObject v);
-    public static native boolean eq(LispObject a, LispObject b);
-    public static native CompletableFuture<LispObject> applyAsync(LispObject f, Object[] args);
+    // Returns/accepts Object, not LispObject: a symbol or keyword comes
+    // through as a LispSymbol marker (the dev.ublt.emacs.clj namespace maps
+    // it to/from a clojure.lang.Symbol/Keyword), a scalar as its boxed Java
+    // value, and anything else as an opaque LispObject.
+    public static native Object intern(String name);
+    public static native Object typeOf(Object v);
+    public static native boolean isNotNil(Object v);
+    public static native boolean eq(Object a, Object b);
+    public static native CompletableFuture<Object> applyAsync(Object f, Object[] args);
 }

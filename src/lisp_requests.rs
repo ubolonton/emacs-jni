@@ -20,14 +20,19 @@ use emacs::{Env, GlobalRef, IntoLisp, Result as EmacsResult, Value};
 use crate::commands::{Cmd, LispArg, LispReplyValue};
 use crate::{channel, protocol, worker};
 
-/// One `Object[]` element of an `apply`/`applyAsync` call, already
-/// classified on the JVM thread (`shim::jobject_array_to_lisp_request_args`)
-/// — see spec "Argument conversion".
+/// One value crossing Clojure → Lisp — an `apply` receiver or argument, or
+/// the operand of `typeOf`/`isNotNil`/`eq` — already classified on the JVM
+/// thread (`shim::object_to_lisp_request_arg`). See spec "Argument
+/// conversion".
 #[derive(Debug)]
 pub enum LispRequestArg {
-    /// A `LispObject` argument, carried by its `ptr` — bound to a `Value`
-    /// on the main thread, never freed here (see `borrow`).
+    /// A `LispObject`, carried by its `ptr` — bound to a `Value` on the
+    /// main thread, never freed here (see `borrow`).
     Obj(i64),
+    /// A Clojure symbol or keyword (an `emacs_jni.LispSymbol` marker) —
+    /// interned on the main thread. `name` is the bare name; a keyword is
+    /// interned with a leading `:`.
+    Symbol { name: String, keyword: bool },
     /// A scalar or other-JVM-object argument, already reduced to a
     /// `LispArg` the same way an ordinary `jvm-call` argument would be
     /// (reuses `marshal::jvm_value_to_lisp_arg`) — `LispArg::Callback`
@@ -38,14 +43,16 @@ pub enum LispRequestArg {
 
 /// A single request from a JVM thread to run one `Env` op on the main
 /// thread. `FreeRef` carries no `id` and produces no reply (see spec
-/// "Request/reply flow").
+/// "Request/reply flow"). `Prin1` alone keeps a raw `ptr`: it is
+/// `LispObject.prin1ToString`, so its receiver is always a real
+/// `LispObject`, never a symbol/scalar.
 #[derive(Debug)]
 pub enum LispRequest {
     Intern { id: u64, name: String },
-    Apply { id: u64, f_ptr: i64, args: Vec<LispRequestArg> },
-    TypeOf { id: u64, ptr: i64 },
-    IsNotNil { id: u64, ptr: i64 },
-    Eq { id: u64, a_ptr: i64, b_ptr: i64 },
+    Apply { id: u64, f: LispRequestArg, args: Vec<LispRequestArg> },
+    TypeOf { id: u64, arg: LispRequestArg },
+    IsNotNil { id: u64, arg: LispRequestArg },
+    Eq { id: u64, a: LispRequestArg, b: LispRequestArg },
     Prin1 { id: u64, ptr: i64 },
     FreeRef { ptr: i64 },
 }
@@ -100,6 +107,16 @@ fn borrow<'e>(env: &'e Env, ptr: i64) -> Value<'e> {
 fn arg_to_value<'e>(env: &'e Env, arg: &LispRequestArg) -> EmacsResult<Value<'e>> {
     match arg {
         LispRequestArg::Obj(ptr) => Ok(borrow(env, *ptr)),
+        // A keyword interns with its leading `:`; a plain symbol by name.
+        // `env.intern` uses the global obarray, so the result round-trips
+        // `eq`-stably back to a Clojure symbol via `value_to_reply`.
+        LispRequestArg::Symbol { name, keyword } => {
+            if *keyword {
+                env.intern(&format!(":{name}"))
+            } else {
+                env.intern(name)
+            }
+        }
         LispRequestArg::Scalar(scalar) => match scalar {
             LispArg::Nil => ().into_lisp(env),
             LispArg::True => true.into_lisp(env),
@@ -162,6 +179,26 @@ fn value_to_reply(env: &Env, value: Value) -> EmacsResult<LispReplyValue> {
         let digits = env.call("number-to-string", (value,))?.into_rust::<String>()?;
         return Ok(LispReplyValue::BigInt(digits));
     }
+    // A keyword's `symbol-name` includes the leading `:`; carry the bare
+    // name. `keywordp` in Emacs already implies interned, so every keyword
+    // converts.
+    if env.call("keywordp", (value,))?.is_not_nil() {
+        let full = env.call("symbol-name", (value,))?.into_rust::<String>()?;
+        let name = full.strip_prefix(':').unwrap_or(&full).to_string();
+        return Ok(LispReplyValue::Symbol { name, keyword: true });
+    }
+    if env.call("symbolp", (value,))?.is_not_nil() {
+        // Only an interned symbol (one `eq` to `intern-soft` of its own
+        // name, i.e. present in the global obarray) converts to a Clojure
+        // symbol. An uninterned symbol (`make-symbol`/`gensym`) stays an
+        // opaque `LispObject`, preserving its identity across the round
+        // trip — see spec "Result conversion".
+        let name = env.call("symbol-name", (value,))?;
+        let interned = env.call("intern-soft", (name,))?;
+        if env.call("eq", (value, interned))?.is_not_nil() {
+            return Ok(LispReplyValue::Symbol { name: name.into_rust::<String>()?, keyword: false });
+        }
+    }
     Ok(LispReplyValue::Ptr(box_value(value)))
 }
 
@@ -177,12 +214,15 @@ pub fn service(env: &Env) -> EmacsResult<()> {
     for req in drain() {
         match req {
             LispRequest::Intern { id, name } => {
-                let result = env.intern(&name).map(box_value).map(LispReplyValue::Ptr);
+                // Routed through `value_to_reply` like every other result:
+                // an interned symbol becomes a Clojure symbol, a keyword a
+                // keyword, and `intern "nil"`/`"t"` stay `nil`/`true`.
+                let result = env.intern(&name).and_then(|v| value_to_reply(env, v));
                 reply(id, result);
             }
-            LispRequest::Apply { id, f_ptr, args } => {
+            LispRequest::Apply { id, f, args } => {
                 let result = (|| -> EmacsResult<LispReplyValue> {
-                    let f_value = borrow(env, f_ptr);
+                    let f_value = arg_to_value(env, &f)?;
                     let mut arg_values = Vec::with_capacity(args.len());
                     for arg in &args {
                         arg_values.push(arg_to_value(env, arg)?);
@@ -192,17 +232,22 @@ pub fn service(env: &Env) -> EmacsResult<()> {
                 })();
                 reply(id, result);
             }
-            LispRequest::TypeOf { id, ptr } => {
-                let result = env.type_of(borrow(env, ptr)).map(box_value).map(LispReplyValue::Ptr);
+            LispRequest::TypeOf { id, arg } => {
+                let result = arg_to_value(env, &arg)
+                    .and_then(|v| env.type_of(v))
+                    .and_then(|v| value_to_reply(env, v));
                 reply(id, result);
             }
-            LispRequest::IsNotNil { id, ptr } => {
-                reply(id, Ok(LispReplyValue::Bool(borrow(env, ptr).is_not_nil())));
+            LispRequest::IsNotNil { id, arg } => {
+                let result = arg_to_value(env, &arg).map(|v| LispReplyValue::Bool(v.is_not_nil()));
+                reply(id, result);
             }
-            LispRequest::Eq { id, a_ptr, b_ptr } => {
-                let result = env
-                    .call("eq", (borrow(env, a_ptr), borrow(env, b_ptr)))
-                    .map(|v| LispReplyValue::Bool(v.is_not_nil()));
+            LispRequest::Eq { id, a, b } => {
+                let result = (|| -> EmacsResult<LispReplyValue> {
+                    let av = arg_to_value(env, &a)?;
+                    let bv = arg_to_value(env, &b)?;
+                    Ok(LispReplyValue::Bool(env.call("eq", (av, bv))?.is_not_nil()))
+                })();
                 reply(id, result);
             }
             LispRequest::Prin1 { id, ptr } => {
@@ -268,11 +313,11 @@ mod tests {
     /// that same order so the borrow is never dangling when the op runs.
     #[test]
     fn apply_enqueued_before_freeref_for_the_same_ptr_drains_before_it() {
-        enqueue(LispRequest::Apply { id: 1, f_ptr: 99, args: vec![] });
+        enqueue(LispRequest::Apply { id: 1, f: LispRequestArg::Obj(99), args: vec![] });
         enqueue(LispRequest::FreeRef { ptr: 99 });
         let drained = drain();
         assert_eq!(drained.len(), 2);
-        assert!(matches!(drained[0], LispRequest::Apply { f_ptr: 99, .. }));
+        assert!(matches!(drained[0], LispRequest::Apply { f: LispRequestArg::Obj(99), .. }));
         assert!(matches!(drained[1], LispRequest::FreeRef { ptr: 99 }));
     }
 

@@ -18,6 +18,8 @@ const LISP_REF_RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/LispRefReleaseNotifier.class"
 ));
+const LISP_SYMBOL_CLASS: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispSymbol.class"));
 
 /// Defines the `emacs_jni.{LispCallable,LispFunction,LispError,
 /// ReleaseNotifier,LispObject,Lisp,LispRefReleaseNotifier}` shim classes
@@ -104,6 +106,9 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     define_if_absent(env, &platform_loader, "emacs_jni/LispRefReleaseNotifier", LISP_REF_RELEASE_NOTIFIER_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/LispObject", LISP_OBJECT_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/Lisp", LISP_CLASS)?;
+    // Pure data carrier (no natives, no dependencies) -- the wire form for
+    // a symbol/keyword crossing to/from Clojure.
+    define_if_absent(env, &platform_loader, "emacs_jni/LispSymbol", LISP_SYMBOL_CLASS)?;
 
     // Sanity check: confirm find_class can see what was just defined, the
     // same way every later task will look these classes up.
@@ -114,6 +119,7 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     env.find_class(jni::jni_str!("emacs_jni/LispRefReleaseNotifier"))?;
     env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
     env.find_class(jni::jni_str!("emacs_jni/Lisp"))?;
+    env.find_class(jni::jni_str!("emacs_jni/LispSymbol"))?;
 
     register_lisp_function_native(env)?;
     register_release_notifier_native(env)?;
@@ -315,25 +321,29 @@ const LISP_REQUEST_TIMEOUT_SECS: i64 = 30;
 /// `register_native_methods` call since they all belong to the same class.
 fn register_lisp_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/Lisp"))?;
+    // Params/returns are `java.lang.Object`, not `LispObject`: a symbol or
+    // keyword crosses as a `LispSymbol` marker, a scalar as its boxed Java
+    // value, anything else as a `LispObject` -- one classifier
+    // (`object_to_lisp_request_arg`) handles all three.
     const INTERN_METHOD: jni::NativeMethod = jni::native_method! {
         name = "intern",
-        static fn lisp_intern(name: java.lang.String) -> emacs_jni.LispObject,
+        static fn lisp_intern(name: java.lang.String) -> java.lang.Object,
     };
     const TYPE_OF_METHOD: jni::NativeMethod = jni::native_method! {
         name = "typeOf",
-        static fn lisp_type_of(v: emacs_jni.LispObject) -> emacs_jni.LispObject,
+        static fn lisp_type_of(v: java.lang.Object) -> java.lang.Object,
     };
     const IS_NOT_NIL_METHOD: jni::NativeMethod = jni::native_method! {
         name = "isNotNil",
-        static fn lisp_is_not_nil(v: emacs_jni.LispObject) -> boolean,
+        static fn lisp_is_not_nil(v: java.lang.Object) -> boolean,
     };
     const EQ_METHOD: jni::NativeMethod = jni::native_method! {
         name = "eq",
-        static fn lisp_eq(a: emacs_jni.LispObject, b: emacs_jni.LispObject) -> boolean,
+        static fn lisp_eq(a: java.lang.Object, b: java.lang.Object) -> boolean,
     };
     const APPLY_ASYNC_METHOD: jni::NativeMethod = jni::native_method! {
         name = "applyAsync",
-        static fn lisp_apply_async(f: emacs_jni.LispObject, args: [java.lang.Object]) -> java.util.concurrent.CompletableFuture,
+        static fn lisp_apply_async(f: java.lang.Object, args: [java.lang.Object]) -> java.util.concurrent.CompletableFuture,
     };
     unsafe {
         env.register_native_methods(
@@ -477,14 +487,14 @@ fn lisp_type_of<'local>(
     _class: JClass<'local>,
     v: JObject<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
-    let ptr = get_ptr_field(env, &v)?;
-    service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::TypeOf { id, ptr })
+    let arg = object_to_lisp_request_arg(env, v)?;
+    service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::TypeOf { id, arg })
 }
 
 /// `Lisp.isNotNil`'s native implementation.
 fn lisp_is_not_nil<'local>(env: &mut jni::Env<'local>, _class: JClass<'local>, v: JObject<'local>) -> jni::errors::Result<bool> {
-    let ptr = get_ptr_field(env, &v)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::IsNotNil { id, ptr })?;
+    let arg = object_to_lisp_request_arg(env, v)?;
+    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::IsNotNil { id, arg })?;
     unbox_boolean(env, &result)
 }
 
@@ -495,9 +505,9 @@ fn lisp_eq<'local>(
     a: JObject<'local>,
     b: JObject<'local>,
 ) -> jni::errors::Result<bool> {
-    let a_ptr = get_ptr_field(env, &a)?;
-    let b_ptr = get_ptr_field(env, &b)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::Eq { id, a_ptr, b_ptr })?;
+    let a = object_to_lisp_request_arg(env, a)?;
+    let b = object_to_lisp_request_arg(env, b)?;
+    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::Eq { id, a, b })?;
     unbox_boolean(env, &result)
 }
 
@@ -510,7 +520,7 @@ fn lisp_apply_async<'local>(
     f: JObject<'local>,
     args: JObjectArray<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
-    let f_ptr = get_ptr_field(env, &f)?;
+    let f = object_to_lisp_request_arg(env, f)?;
     let request_args = jobject_array_to_lisp_request_args(env, &args)?;
 
     let id = crate::pending::next_id();
@@ -519,7 +529,7 @@ fn lisp_apply_async<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::pending::register(id, future_global);
 
-    crate::lisp_requests::enqueue(crate::lisp_requests::LispRequest::Apply { id, f_ptr, args: request_args });
+    crate::lisp_requests::enqueue(crate::lisp_requests::LispRequest::Apply { id, f, args: request_args });
     crate::channel::send(&crate::protocol::lisp_request_message());
     Ok(future)
 }
@@ -559,32 +569,54 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
     env.get_field(this, jni::jni_str!("ptr"), jni::jni_sig!(long))?.j()
 }
 
-/// Converts `applyAsync`'s `Object[]` ARGS into `LispRequestArg`s, per
-/// spec "Argument conversion": a `LispObject` element carries by `ptr`;
-/// everything else (including `null`) goes through the same
-/// `marshal::jvm_value_to_lisp_arg` an ordinary `jvm-call` argument would.
+/// Classifies one value crossing Clojure → Lisp (an `apply` receiver or
+/// argument, or a `typeOf`/`isNotNil`/`eq` operand) into a `LispRequestArg`,
+/// per spec "Argument conversion":
+/// - `null` → `Nil`;
+/// - an `emacs_jni.LispObject` → carried by its `ptr`;
+/// - an `emacs_jni.LispSymbol` marker (a Clojure symbol/keyword the
+///   namespace wrapped) → `Symbol { name, keyword }`;
+/// - everything else → the same `marshal::jvm_value_to_lisp_arg` an
+///   ordinary `jvm-call` argument would go through.
+fn object_to_lisp_request_arg<'local>(
+    env: &mut jni::Env<'local>,
+    elem: JObject<'local>,
+) -> jni::errors::Result<crate::lisp_requests::LispRequestArg> {
+    use crate::lisp_requests::LispRequestArg;
+    // `IsInstanceOf` (what `is_instance_of` calls) reports `true` for a
+    // null reference against ANY class per the JNI spec, so null must be
+    // checked before the class checks below -- otherwise a null value
+    // would be misread as `Obj(0)`.
+    if elem.is_null() {
+        return Ok(LispRequestArg::Scalar(crate::commands::LispArg::Nil));
+    }
+    let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
+    if env.is_instance_of(&elem, &lisp_object_class)? {
+        return Ok(LispRequestArg::Obj(get_ptr_field(env, &elem)?));
+    }
+    let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/LispSymbol"))?;
+    if env.is_instance_of(&elem, &lisp_symbol_class)? {
+        let name_obj = env.get_field(&elem, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?.l()?;
+        let name = env.cast_local::<JString>(name_obj)?;
+        let name = name.try_to_string(env)?;
+        let keyword = env.get_field(&elem, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?.z()?;
+        return Ok(LispRequestArg::Symbol { name, keyword });
+    }
+    let lisp_arg = crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(elem))?;
+    Ok(LispRequestArg::Scalar(lisp_arg))
+}
+
+/// Converts `applyAsync`'s `Object[]` ARGS into `LispRequestArg`s, element
+/// by element via `object_to_lisp_request_arg`.
 fn jobject_array_to_lisp_request_args<'local>(
     env: &mut jni::Env<'local>,
     args: &JObjectArray<'local>,
 ) -> jni::errors::Result<Vec<crate::lisp_requests::LispRequestArg>> {
-    let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
     let len = args.len(env)?;
     let mut out = Vec::with_capacity(len);
     for i in 0..len {
         let elem = args.get_element(env, i)?;
-        let arg = if elem.is_null() {
-            // `IsInstanceOf` (what `is_instance_of` calls) reports `true`
-            // for a null reference against ANY class per the JNI spec, so
-            // null must be checked before the `LispObject` check below --
-            // otherwise a null argument would be misread as `Obj(0)`.
-            crate::lisp_requests::LispRequestArg::Scalar(crate::commands::LispArg::Nil)
-        } else if env.is_instance_of(&elem, &lisp_object_class)? {
-            crate::lisp_requests::LispRequestArg::Obj(get_ptr_field(env, &elem)?)
-        } else {
-            let lisp_arg = crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(elem))?;
-            crate::lisp_requests::LispRequestArg::Scalar(lisp_arg)
-        };
-        out.push(arg);
+        out.push(object_to_lisp_request_arg(env, elem)?);
     }
     Ok(out)
 }

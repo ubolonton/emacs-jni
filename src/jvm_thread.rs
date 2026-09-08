@@ -631,6 +631,15 @@ fn build_lisp_reply_object<'local>(
                 &[jni::objects::JValueOwned::Object(jstr.into()).borrow()],
             )
         }
+        crate::commands::LispReplyValue::Symbol { name, keyword } => {
+            let jname: jni::objects::JObject = env.new_string(&name)?.into();
+            let class = env.find_class(jni::jni_str!("emacs_jni/LispSymbol"))?;
+            env.new_object(
+                &class,
+                jni::jni_sig!((name: java.lang.String, keyword: boolean) -> void),
+                &[jni::objects::JValue::Object(&jname), jni::objects::JValue::Bool(keyword)],
+            )
+        }
         crate::commands::LispReplyValue::Error(_) => {
             unreachable!("handled by handle_lisp_reply before build_lisp_reply_object is called")
         }

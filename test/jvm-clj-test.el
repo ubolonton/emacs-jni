@@ -42,10 +42,71 @@ non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
     (should (car result))
     (nth 1 result)))
 
-(ert-deftest emacs-jni-jvm-clj-test/intern-returns-a-lisp-object ()
+(ert-deftest emacs-jni-jvm-clj-test/intern-returns-a-clojure-symbol ()
   (jvm-clj-test--ensure-ready)
-  (let ((sym (jvm-clj-test--eval "(dev.ublt.emacs.clj/intern \"car\")")))
-    (should (equal (jvm-clj-test--prin1 sym) "car"))))
+  ;; intern now yields a Clojure symbol, not an opaque LispObject.
+  (should (eq (jvm-clj-test--eval "(symbol? (dev.ublt.emacs.clj/intern \"car\"))") t))
+  (should (equal (jvm-clj-test--eval "(str (dev.ublt.emacs.clj/intern \"car\"))") "car")))
+
+(ert-deftest emacs-jni-jvm-clj-test/intern-colon-name-returns-a-clojure-keyword ()
+  (jvm-clj-test--ensure-ready)
+  ;; A leading ":" interns a Lisp keyword, which maps to a Clojure keyword.
+  (should (eq (jvm-clj-test--eval "(keyword? (dev.ublt.emacs.clj/intern \":foo\"))") t))
+  (should (equal (jvm-clj-test--eval "(name (dev.ublt.emacs.clj/intern \":foo\"))") "foo")))
+
+(ert-deftest emacs-jni-jvm-clj-test/lisp-symbol-result-becomes-a-clojure-symbol ()
+  (jvm-clj-test--ensure-ready)
+  ;; Both directions at once: (symbol "intern") crosses Clojure->Lisp as
+  ;; the Lisp function `intern', whose result (a Lisp symbol foo) crosses
+  ;; back Lisp->Clojure as a Clojure symbol.
+  (should (eq (jvm-clj-test--eval
+               "(symbol? (dev.ublt.emacs.clj/apply (symbol \"intern\") \"foo\"))")
+              t))
+  (should (equal (jvm-clj-test--eval
+                  "(str (dev.ublt.emacs.clj/apply (symbol \"intern\") \"foo\"))")
+                 "foo")))
+
+(ert-deftest emacs-jni-jvm-clj-test/clojure-symbol-arg-becomes-a-lisp-symbol ()
+  (jvm-clj-test--ensure-ready)
+  ;; (symbol "symbol-name") is the receiver, (symbol "car") the argument;
+  ;; both cross as Lisp symbols. (symbol-name 'car) => "car".
+  (should (equal (jvm-clj-test--eval
+                  "(dev.ublt.emacs.clj/apply (symbol \"symbol-name\") (symbol \"car\"))")
+                 "car")))
+
+(ert-deftest emacs-jni-jvm-clj-test/clojure-keyword-arg-becomes-a-lisp-keyword ()
+  (jvm-clj-test--ensure-ready)
+  ;; A Lisp keyword's `symbol-name' includes the leading colon.
+  (should (equal (jvm-clj-test--eval
+                  "(dev.ublt.emacs.clj/apply (symbol \"symbol-name\") (keyword \"foo\"))")
+                 ":foo")))
+
+(ert-deftest emacs-jni-jvm-clj-test/namespaced-symbol-round-trips-by-full-name ()
+  (jvm-clj-test--ensure-ready)
+  (should (equal (jvm-clj-test--eval
+                  "(str (dev.ublt.emacs.clj/apply (symbol \"intern\") \"foo/bar\"))")
+                 "foo/bar")))
+
+(ert-deftest emacs-jni-jvm-clj-test/interned-symbol-round-trips-eq ()
+  (jvm-clj-test--ensure-ready)
+  ;; apply returns the Lisp symbol foo (as a Clojure symbol); eq'ing it
+  ;; with a fresh (symbol "foo") re-interns to the same Lisp symbol.
+  (should (eq (jvm-clj-test--eval
+               "(dev.ublt.emacs.clj/eq (dev.ublt.emacs.clj/apply (symbol \"intern\") \"foo\")
+                                        (symbol \"foo\"))")
+              t)))
+
+(ert-deftest emacs-jni-jvm-clj-test/uninterned-lisp-symbol-stays-a-lisp-object ()
+  (jvm-clj-test--ensure-ready)
+  ;; make-symbol yields an uninterned symbol; it is NOT converted to a
+  ;; Clojure symbol (identity preserved), so `symbol?' is false and the
+  ;; value stays an opaque LispObject.
+  (should (eq (jvm-clj-test--eval
+               "(symbol? (dev.ublt.emacs.clj/apply (symbol \"make-symbol\") \"uninterned-xyz\"))")
+              nil))
+  (let ((result (jvm-clj-test--eval
+                 "(dev.ublt.emacs.clj/apply (symbol \"make-symbol\") \"uninterned-xyz\")")))
+    (should (equal (jvm-clj-test--prin1 result) "uninterned-xyz"))))
 
 (ert-deftest emacs-jni-jvm-clj-test/apply-integer-result-becomes-a-clojure-value ()
   (jvm-clj-test--ensure-ready)
@@ -114,34 +175,35 @@ actually catches on."
                (catch Throwable e (str \"other:\" (.getName (.getClass e)))))")
            "lisp-error")))
 
-(ert-deftest emacs-jni-jvm-clj-test/type-of-a-symbol-is-the-symbol-type ()
+(ert-deftest emacs-jni-jvm-clj-test/type-of-returns-a-clojure-symbol ()
   (jvm-clj-test--ensure-ready)
-  (let ((result (jvm-clj-test--eval
-                 "(dev.ublt.emacs.clj/type-of (dev.ublt.emacs.clj/intern \"car\"))")))
-    (should (equal (jvm-clj-test--prin1 result) "symbol"))))
+  ;; type-of yields the Lisp type symbol as a Clojure symbol (e.g.
+  ;; `string' for a string value).
+  (should (eq (jvm-clj-test--eval "(symbol? (dev.ublt.emacs.clj/type-of \"hello\"))") t))
+  (should (equal (jvm-clj-test--eval "(str (dev.ublt.emacs.clj/type-of \"hello\"))") "string")))
 
-(ert-deftest emacs-jni-jvm-clj-test/eq-is-true-for-the-same-interned-symbol ()
+(ert-deftest emacs-jni-jvm-clj-test/eq-is-true-for-the-same-symbol ()
   (jvm-clj-test--ensure-ready)
   (should (eq (jvm-clj-test--eval
-               "(dev.ublt.emacs.clj/eq (dev.ublt.emacs.clj/intern \"car\") (dev.ublt.emacs.clj/intern \"car\"))")
+               "(dev.ublt.emacs.clj/eq (symbol \"car\") (symbol \"car\"))")
               t)))
 
 (ert-deftest emacs-jni-jvm-clj-test/eq-is-false-for-different-symbols ()
   (jvm-clj-test--ensure-ready)
   (should (eq (jvm-clj-test--eval
-               "(dev.ublt.emacs.clj/eq (dev.ublt.emacs.clj/intern \"car\") (dev.ublt.emacs.clj/intern \"cdr\"))")
+               "(dev.ublt.emacs.clj/eq (symbol \"car\") (symbol \"cdr\"))")
               nil)))
 
 (ert-deftest emacs-jni-jvm-clj-test/is-not-nil-is-true-for-a-non-nil-symbol ()
   (jvm-clj-test--ensure-ready)
   (should (eq (jvm-clj-test--eval
-               "(dev.ublt.emacs.clj/is-not-nil? (dev.ublt.emacs.clj/intern \"car\"))")
+               "(dev.ublt.emacs.clj/is-not-nil? (symbol \"car\"))")
               t)))
 
-(ert-deftest emacs-jni-jvm-clj-test/is-not-nil-is-false-for-the-nil-symbol ()
+(ert-deftest emacs-jni-jvm-clj-test/is-not-nil-is-false-for-nil ()
   (jvm-clj-test--ensure-ready)
   (should (eq (jvm-clj-test--eval
-               "(dev.ublt.emacs.clj/is-not-nil? (dev.ublt.emacs.clj/intern \"nil\"))")
+               "(dev.ublt.emacs.clj/is-not-nil? nil)")
               nil)))
 
 (ert-deftest emacs-jni-jvm-clj-test/clojure-calls-lisp-back-inside-a-lisp-to-clojure-call ()

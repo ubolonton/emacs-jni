@@ -52,24 +52,25 @@ until Emacs services it on its main thread.
 
 | Function | Arguments | Returns |
 |---|---|---|
-| `intern` | `[s]` | a `LispObject` (the interned symbol) |
+| `intern` | `[s]` | a Clojure symbol, or a keyword when S starts with `:` |
 | `apply` | `[f & args]` | the call result (see conversion below); blocks |
 | `apply-async` | `[f & args]` | a `CompletableFuture` of the call result |
-| `type-of` | `[v]` | a `LispObject` (the type symbol) |
+| `type-of` | `[v]` | a Clojure symbol (the Lisp type) |
 | `is-not-nil?` | `[v]` | a boolean |
 | `eq` | `[a b]` | a boolean |
 
-`f` is a `LispObject` (from `intern`, or any Lisp function value).
-`args` may be `LispObject`s or plain Clojure scalars (strings, numbers,
-booleans, `nil`), which convert to the matching Lisp value.
+`f` and each of `args` may be a Clojure symbol or keyword (→ a Lisp
+symbol/keyword), a plain scalar (string, number, boolean, `nil` → the
+matching Lisp value), a `LispObject` (passed by reference), or any other
+JVM object (→ a wrapped `jvm-handle` value).
 
-An `apply`/`apply-async` result converts by type: a scalar or string
-(integer, float, string, `t`, `nil`) comes back as the matching Clojure
-value (`Long`, `Double`, `String`, `true`, `nil`; a bignum as
-`BigInteger`), so a Lisp predicate is usable directly in a Clojure
-conditional. Any other value (a symbol, cons, vector, hash table, ...)
-stays an opaque `LispObject`. `intern` and `type-of` always return a
-`LispObject`. A Lisp `error` completes the future exceptionally with
+A result converts by type: a scalar or string (integer, float, string,
+`t`, `nil`) → the matching Clojure value (`Long`, `Double`, `String`,
+`true`, `nil`; a bignum → `BigInteger`); an interned Lisp symbol or
+keyword → a Clojure symbol/keyword; anything else (a cons, vector, hash
+table, or an *uninterned* symbol) → an opaque `LispObject`. So a Lisp
+predicate's `t`/`nil` and a returned Lisp symbol are usable directly as
+Clojure values. A Lisp `error` completes the future exceptionally with
 `emacs_jni.LispError`. `LispObject.prin1ToString` returns the value's
 `prin1-to-string` text as a Java `String` — the way to read an
 otherwise opaque `LispObject`.

@@ -36,33 +36,45 @@ To start an nREPL server with the namespace already loaded, use
 (require '[dev.ublt.emacs.clj :as l])
 ```
 
-## Intern a symbol
+## Symbols and keywords
+
+Lisp symbols and keywords map to Clojure symbols and keywords, both
+directions — so you pass and receive them as ordinary Clojure values.
 
 ```clojure
-(l/intern "car")
-;; => #object[emacs_jni.LispObject ...]
+(l/intern "car")    ; => car   (a Clojure symbol)
+(l/intern ":foo")   ; => :foo  (a Clojure keyword)
 ```
 
-`intern` returns a `LispObject` — an opaque handle to a Lisp value. It
-is not a Clojure value; inspect it with the functions below.
+`intern` builds one from a string (a leading `:` makes it a keyword),
+but a symbol/keyword literal works anywhere a Lisp symbol is wanted, so
+`intern` is only needed for a name you compute at runtime.
+
+Only *interned* Lisp symbols convert. An uninterned one
+(`make-symbol`/`gensym`) stays an opaque `LispObject`, which preserves
+its identity across the round trip. Clojure symbols have no interned
+form of their own; each maps to the Lisp symbol interned under its
+name.
 
 ## Apply a Lisp function
 
 ```clojure
-(l/apply (l/intern "+") 1 2)   ; => 3  (a Clojure Long)
+(l/apply '+ 1 2)              ; => 3      (a Clojure Long)
+(l/apply 'symbol-name 'car)   ; => "car"
 ```
 
-`apply` blocks until Lisp returns. A scalar or string result — number,
-string, `t`, `nil` — comes back as the matching Clojure value, so you
-use it directly. Any other Lisp value (a symbol, list, map, ...) comes
-back as an opaque `LispObject`. Arguments may be `LispObject`s or plain
-Clojure scalars, which convert to the matching Lisp value.
+`apply` blocks until Lisp returns. The result converts by type: a
+scalar or string → the matching Clojure value; a Lisp symbol or keyword
+→ a Clojure symbol/keyword; anything else (a list, map, buffer, ...) →
+an opaque `LispObject`. Arguments convert the same way — a Clojure
+symbol/keyword becomes a Lisp symbol/keyword, a scalar its Lisp
+counterpart, and a `LispObject` passes by reference.
 
 ## Apply without blocking
 
 ```clojure
-(l/apply-async (l/intern "+") 1 2)   ; => CompletableFuture
-@(l/apply-async (l/intern "+") 1 2)  ; => 3
+(l/apply-async '+ 1 2)   ; => CompletableFuture
+@(l/apply-async '+ 1 2)  ; => 3
 ```
 
 `apply-async` returns immediately with a `CompletableFuture`. Deref it
@@ -71,13 +83,14 @@ Clojure scalars, which convert to the matching Lisp value.
 ## Inspect a value
 
 ```clojure
-(l/type-of (l/intern "car"))               ; => a LispObject: symbol
-(l/is-not-nil? (l/intern "car"))           ; => true
-(l/is-not-nil? (l/intern "nil"))           ; => false
-(l/eq (l/intern "car") (l/intern "car"))   ; => true
+(l/type-of "hello")   ; => string   (a Clojure symbol)
+(l/type-of 42)        ; => integer
+(l/is-not-nil? 'car)  ; => true
+(l/is-not-nil? nil)   ; => false
+(l/eq 'car 'car)      ; => true
 ```
 
-`type-of` returns a `LispObject` (a type symbol). `is-not-nil?` and
+`type-of` returns the Lisp type as a Clojure symbol. `is-not-nil?` and
 `eq` return plain Clojure booleans.
 
 ## Read an opaque value's printed form
@@ -85,8 +98,8 @@ Clojure scalars, which convert to the matching Lisp value.
 A non-scalar result stays a `LispObject`:
 
 ```clojure
-(l/apply (l/intern "list") 1 2 3)                   ; => a LispObject (a Lisp list)
-(.prin1ToString (l/apply (l/intern "list") 1 2 3))  ; => "(1 2 3)"
+(l/apply 'list 1 2 3)                   ; => a LispObject (a Lisp list)
+(.prin1ToString (l/apply 'list 1 2 3))  ; => "(1 2 3)"
 ```
 
 `LispObject.prin1ToString` returns the value's `prin1-to-string`

@@ -12,12 +12,23 @@ opaque objects. This is the inverse of the existing `jvm-call` path
 `type-of`, `is-not-nil?`, and `eq`. A new Elisp library `jvm-clj.el`
 starts the Clojure side and wraps the existing nREPL controls.
 
-An `apply` result that is a scalar or string (integer, float, string,
-`t`, `nil`) converts to the matching Clojure value, the same way
-`jvm-call` marshals scalars. Non-goal: marshalling arbitrary *non-scalar*
-Lisp values to Clojure data — symbols, conses, vectors, and the like
-stay opaque `LispObject`s on the JVM side; you inspect them via
-`prin1-to-string`, `type-of`, `eq`, and `is-not-nil?`.
+Scalars and strings (integer, float, string, `t`, `nil`) convert to the
+matching Clojure value, the same way `jvm-call` marshals scalars.
+Interned Lisp symbols and keywords convert to Clojure symbols and
+keywords, both directions. Non-goal: marshalling the *remaining* Lisp
+values — conses, vectors, hash tables, buffers, uninterned symbols —
+which stay opaque `LispObject`s; you inspect them via `prin1-to-string`,
+`type-of`, `eq`, and `is-not-nil?`.
+
+Symbol mapping uses a platform-loader shim class `emacs_jni.LispSymbol`
+(name + keyword flag) as the wire form, because the real
+`clojure.lang.Symbol`/`Keyword` live in the child `URLClassLoader`,
+unreachable from a native's or the worker's `find_class`; the
+`dev.ublt.emacs.clj` namespace does the final Clojure-side
+symbol/keyword construction and destructuring. Only interned symbols
+convert (identity is by interning); an uninterned symbol stays an
+opaque `LispObject`. Because symbols become native Clojure values, the
+`Lisp` natives take/return `Object`, not `LispObject`.
 
 ## Core constraint
 
@@ -106,29 +117,36 @@ processing `FreeRef` eagerly) breaks this and must be rejected.
 
 Executed inside `jvm--service-lisp-requests` on the main thread:
 
-- `intern(name: String)` → `env.intern(name)` → `LispObject` (symbol).
-- `apply-async(f, args)` → bind `f`'s `GlobalRef`, convert each arg
-  (below), `env.call(f_value, args)` → the result `Value` is classified
-  (see "Result conversion"): a scalar/string becomes a Clojure value,
-  anything else a `LispObject`. The native method returns the
-  `CompletableFuture` immediately (derefable in Clojure with `@`). A
-  Lisp `error` becomes an exceptional future completion with
-  `LispError`, which surfaces on deref.
+- `intern(name: String)` → `env.intern(name)` → classified as a result
+  (so an interned symbol/keyword becomes a Clojure symbol/keyword; a
+  `:`-name a keyword; `"nil"`/`"t"` `nil`/`true`).
+- `apply-async(f, args)` → classify `f` and each arg (below) to a
+  `Value`, `env.call(f_value, args)` → the result `Value` is classified
+  (see "Result conversion"). The native returns the `CompletableFuture`
+  immediately (derefable in Clojure with `@`). A Lisp `error` becomes an
+  exceptional future completion with `LispError`, which surfaces on
+  deref.
 - `apply(f, args)` → the Clojure-level blocking form, `@(apply-async
   f args)`. No dedicated native.
-- `type-of(v)` → `env.type_of(value)` → `LispObject` (type symbol).
-- `is-not-nil?(v)` → `value.is_not_nil()` → `boolean`.
-- `eq(a, b)` → `env.call("eq", [a, b])?.is_not_nil()` → `boolean`.
+- `type-of(v)` → classify `v`, `env.type_of(value)` → classified as a
+  result (a type symbol → a Clojure symbol).
+- `is-not-nil?(v)` → classify `v`, `value.is_not_nil()` → `boolean`.
+- `eq(a, b)` → classify `a`/`b`, `env.call("eq", [a, b])?.is_not_nil()`
+  → `boolean`.
 - `LispObject.prin1ToString()` → `env.call("prin1-to-string",
   [value])?` → `String`.
 
 ### Argument conversion
 
-`apply`/`apply-async` take `Object[]`. Per element, on the JVM thread,
-into the request:
+Every value crossing Clojure → Lisp — an `apply` receiver or argument,
+or a `typeOf`/`isNotNil`/`eq` operand — is classified on the JVM thread
+(`shim::object_to_lisp_request_arg`):
 
 - a `LispObject` → carried by `ptr`, bound to its `Value` on the main
   thread;
+- an `emacs_jni.LispSymbol` marker (a Clojure symbol/keyword the
+  namespace wrapped) → interned on the main thread (`:`-prefixed for a
+  keyword);
 - a scalar (`String`, boxed `Long`/`Integer`/`Double`/`Boolean`,
   `null`) → converted to a Lisp `Value` on the main thread via the
   `emacs` crate's `IntoLisp`;
@@ -148,13 +166,18 @@ thread, mirroring `jvm-call`'s return-marshalling table in reverse:
 - a fixnum → boxed `Long`; a bignum → `BigInteger`;
 - a float → boxed `Double`;
 - a string → Java `String`;
-- anything else (other symbols, conses, vectors, hash tables, ...) →
-  an opaque `LispObject`.
+- a keyword → an `emacs_jni.LispSymbol` marker, `keyword` = true (the
+  namespace turns it into a Clojure keyword);
+- an interned symbol (`eq` to `intern-soft` of its own name) → a
+  `LispSymbol` marker, `keyword` = false;
+- anything else (conses, vectors, hash tables, an *uninterned* symbol,
+  ...) → an opaque `LispObject`.
 
-`intern` and `type-of` always produce a symbol, so they always return a
-`LispObject`; only `apply`/`apply-async` can yield a converted scalar.
-Converting `t`/`nil` lets a Lisp predicate's result drive a Clojure
-`if` directly.
+`t`/`nil` are checked before the symbol arms, so they stay `true`/`nil`
+rather than becoming symbols. Converting them, and interned symbols,
+lets a Lisp predicate's result and a returned symbol be used directly
+as Clojure values. An uninterned symbol stays a `LispObject` so its
+identity survives the round trip.
 
 ## Components
 
@@ -162,14 +185,20 @@ Converting `t`/`nil` lets a Lisp predicate's result drive a Clojure
 
 - New request queue module: `Mutex<VecDeque<LispRequest>>` plus
   `enqueue`/`drain`. `LispRequest` enum: `Intern`, `Apply`, `TypeOf`,
-  `IsNotNil`, `Eq`, `Prin1`, `FreeRef`.
+  `IsNotNil`, `Eq`, `Prin1`, `FreeRef`. Every operand that a caller can
+  pass an arbitrary value for (`Apply`'s `f` and args, `TypeOf`/
+  `IsNotNil`/`Eq`'s operands) is a classified `LispRequestArg` =
+  `Obj(i64) | Symbol { name, keyword } | Scalar(LispArg)`; `Prin1`/
+  `FreeRef` keep a raw `ptr` (their receiver is always a real
+  `LispObject`).
 - Reuse `pending.rs` (CompletableFuture-by-id) and the worker command
   channel; add `Cmd::LispReply { id, value: LispReplyValue }` with
   `LispReplyValue` = `Ptr(i64) | Nil | Bool(bool) | Int(i64) |
-  Float(f64) | BigInt(String) | Str(String) | Error(String)` (the
-  scalar variants carry a converted result; see "Result conversion").
-  The worker builds the Java value and completes/exceptionally-completes
-  the future (mirrors `handle_invoke_reply`).
+  Float(f64) | BigInt(String) | Str(String) | Symbol { name, keyword } |
+  Error(String)` (the scalar/symbol variants carry a converted result;
+  see "Result conversion"). The worker builds the Java value and
+  completes/exceptionally-completes the future (mirrors
+  `handle_invoke_reply`).
 - New `#[defun] jvm--service-lisp-requests(env)`: drains the queue,
   runs each op with `env`, boxes result `GlobalRef`s, emits
   `Cmd::LispReply`, and services `FreeRef` by
@@ -187,32 +216,52 @@ No `lisp_handles.rs` table: the `GlobalRef` is owned by the Java
   Cleaner-registered so GC enqueues `FreeRef(ptr)` (mirrors
   `ReleaseNotifier`; add a small `LispRefReleaseNotifier` or reuse the
   established pattern).
-- `emacs_jni.Lisp`: static natives `intern(String)`,
-  `typeOf(LispObject)`, `isNotNil(LispObject)`,
-  `eq(LispObject, LispObject)`, `applyAsync(LispObject, Object[])`.
-  The sync natives (`intern`, `typeOf`, `isNotNil`, `eq`, and
-  `LispObject.prin1ToString`) block internally on their own reply
-  future. There is no separate sync `apply` native — the Clojure
+- `emacs_jni.Lisp`: static natives `intern(String) -> Object`,
+  `typeOf(Object) -> Object`, `isNotNil(Object) -> boolean`,
+  `eq(Object, Object) -> boolean`, `applyAsync(Object, Object[]) ->
+  CompletableFuture`. Params/returns are `Object`, not `LispObject`,
+  because a symbol/keyword crosses as a `LispSymbol` marker and a scalar
+  as its boxed value. The sync natives (`intern`, `typeOf`, `isNotNil`,
+  `eq`, and `LispObject.prin1ToString`) block internally on their own
+  reply future. There is no separate sync `apply` native — the Clojure
   `apply` derefs `applyAsync`.
+- `emacs_jni.LispSymbol`: `final String name; final boolean keyword;` —
+  a pure data carrier (no natives), the wire form for a symbol/keyword.
+  Injected like the other shims so it is reachable from `find_class`.
 
 ### Clojure — `clojure-src/dev/ublt/emacs/clj.clj`
 
 New source directory `clojure-src/`, added to the JVM classpath. The
-namespace is a thin wrapper over `emacs_jni.Lisp`:
+namespace wraps `emacs_jni.Lisp`, mapping Clojure symbols/keywords
+to/from `LispSymbol` markers on the way in/out:
 
 ```clojure
 (ns dev.ublt.emacs.clj
-  (:import [emacs_jni Lisp LispObject]))
+  (:import [emacs_jni Lisp LispObject LispSymbol]
+           [java.util.function Function]))
 
-(defn intern [s] (Lisp/intern s))
-(defn apply-async [f & args] (Lisp/applyAsync f (object-array args)))
-(defn apply [f & args] (deref (Lisp/applyAsync f (object-array args))))
-(defn type-of [v] (Lisp/typeOf v))
-(defn is-not-nil? [v] (Lisp/isNotNil v))
-(defn eq [a b] (Lisp/eq a b))
+(defn- ->lisp [x]                      ; symbol/keyword -> LispSymbol marker
+  (cond (keyword? x) (LispSymbol. (subs (str x) 1) true)
+        (symbol? x)  (LispSymbol. (str x) false)
+        :else x))
+(defn- <-lisp [x]                      ; LispSymbol marker -> symbol/keyword
+  (if (instance? LispSymbol x)
+    (if (.-keyword x) (keyword (.-name x)) (symbol (.-name x)))
+    x))
+(defn- apply* [f args] (Lisp/applyAsync (->lisp f) (object-array (map ->lisp args))))
+
+(defn intern [s] (<-lisp (Lisp/intern s)))
+(defn apply-async [f & args] (.thenApply (apply* f args) (reify Function (apply [_ v] (<-lisp v)))))
+(defn apply [f & args] (<-lisp (deref (apply* f args))))
+(defn type-of [v] (<-lisp (Lisp/typeOf (->lisp v))))
+(defn is-not-nil? [v] (Lisp/isNotNil (->lisp v)))
+(defn eq [a b] (Lisp/eq (->lisp a) (->lisp b)))
 ```
 
-Loaded at runtime via `require`; no AOT step.
+The Clojure-side `->lisp`/`<-lisp` are where `clojure.lang.Symbol`/
+`Keyword` are actually built and read — the Rust/JNI side only ever
+touches the reachable `LispSymbol` shim. Loaded at runtime via
+`require`; no AOT step.
 
 ### Elisp
 
@@ -237,9 +286,14 @@ primitives; it does not replace them.
   `jvm-clojure-eval-string` to exercise each fn — result conversion
   (`(apply (intern "+") 1 2)` → the integer `3`; string, float, `nil`,
   `t`; and a non-scalar list result staying a `LispObject` read via
-  `prin1ToString`); `intern`, `type-of`, `eq`, `is-not-nil?`; and a
-  reentrancy test where Clojure calls Lisp back inside a Lisp→Clojure
-  call.
+  `prin1ToString`); symbol/keyword mapping both directions (a Clojure
+  symbol/keyword arg → a Lisp symbol/keyword, a Lisp symbol/keyword
+  result → a Clojure one), namespaced names, round-trip `eq`, and an
+  uninterned symbol staying an opaque `LispObject`; `intern`, `type-of`,
+  `eq`, `is-not-nil?`; and a reentrancy test where Clojure calls Lisp
+  back inside a Lisp→Clojure call. Symbol-producing forms use
+  `(symbol "x")`/`(keyword "x")`, since `jvm-clojure-eval-string` reads
+  via `clojure.edn/read-string`, which rejects the `'` reader macro.
 - Rust unit tests for the request queue and the
   box/borrow/free pointer discipline.
 - GC-driven `FreeRef` is inherently flaky to assert (forcing GC),

@@ -83,23 +83,33 @@ can catch as a real exception, not a string it has to pattern-match.
 The `dev.ublt.emacs.clj` namespace splits an `apply` result by type. A
 scalar or string — number, string, `t`, `nil` — converts to the
 matching Clojure value, the same way `jvm-call` marshals a Java scalar
-into a Lisp scalar. Every other Lisp value — a symbol (so `intern` and
-`type-of` always), a cons, a vector, a hash table, a buffer — becomes a
-Java `LispObject`, an opaque handle.
+into a Lisp scalar. An interned Lisp symbol or keyword converts to a
+Clojure symbol or keyword. Every remaining value — a cons, a vector, a
+hash table, a buffer, an uninterned symbol — becomes a Java
+`LispObject`, an opaque handle.
 
-Marshalling those non-scalar Lisp values into Clojure data was a
-non-goal. Lisp's type universe (symbols, keymaps, buffers, markers,
-overlays, closures) does not map onto Clojure data in any single
-obvious way, and most of it is only meaningful back in Lisp anyway. So
-a `LispObject` stays opaque: you inspect it with `type-of`,
-`is-not-nil?`, `eq`, and `LispObject.prin1ToString`, and you pass it
-back into `apply` — you do not pull it apart on the Clojure side.
-Arguments going the other way follow the same split: a `LispObject`
-passes through by reference, while a plain Clojure scalar converts to
-the matching Lisp value, so `(apply (intern "+") 1 2)` needs no manual
-wrapping. Converting scalars in both directions also means a Lisp
-predicate's `t`/`nil` result lands as Clojure `true`/`nil`, usable in
-an `if` directly rather than through `is-not-nil?`.
+Marshalling those remaining values into Clojure data was a non-goal.
+Lisp's type universe (keymaps, buffers, markers, overlays, closures)
+does not map onto Clojure data in any single obvious way, and most of
+it is only meaningful back in Lisp anyway. So a `LispObject` stays
+opaque: you inspect it with `type-of`, `is-not-nil?`, `eq`, and
+`LispObject.prin1ToString`, and you pass it back into `apply` — you do
+not pull it apart on the Clojure side. Arguments going the other way
+follow the same split: a Clojure symbol or keyword interns to a Lisp
+symbol/keyword, a plain scalar converts to the matching Lisp value, and
+a `LispObject` passes through by reference — so `(apply '+ 1 2)` needs
+no manual wrapping. Converting in both directions means a Lisp
+predicate's `t`/`nil` lands as Clojure `true`/`nil`, and a returned
+symbol as a real Clojure symbol, both usable directly.
+
+Symbols convert only when interned. Emacs symbol identity (`eq`) is by
+interning, so an interned symbol round-trips `eq`-stably — a Clojure
+symbol interns to the one Lisp symbol of that name, and back again —
+while an uninterned symbol (`make-symbol`/`gensym`) would lose its
+identity if flattened to a name, so it stays an opaque `LispObject`
+whose `GlobalRef` holds that exact symbol. Clojure symbols have no
+interned form of their own (only Clojure keywords are cached), so there
+is no matching case in the other direction.
 
 Underneath, a `LispObject` owns an `emacs::GlobalRef` — the `emacs`
 crate's mechanism for a Lisp value that outlives a single module call.
