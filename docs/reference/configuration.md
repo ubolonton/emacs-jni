@@ -14,13 +14,18 @@
 | Path | Produced by | Contents |
 |---|---|---|
 | `target/debug/libemacs_jni.so` | `cargo build` | The dynamic module `elisp/emacs-jni.el` loads. |
-| `target/emacs-jni-shim-classes/` | `cargo build`, through `build.rs` | Compiled Java shim classes (`LispCallable`, `LispFunction`, `LispError`) that Java code needs on its classpath to reference callback types directly, as `test/fixtures/Calc.java` does. |
+| `target/emacs-jni-shim-classes/` | `cargo build`, through `build.rs` | Compiled Java shim classes — `LispCallable`, `LispFunction`, `LispError`, `ReleaseNotifier`, and (for Clojure Lisp access) `LispObject`, `Lisp`, `LispRefReleaseNotifier`. Java code needs these on its classpath to reference the types directly, as `test/fixtures/Calc.java` does. |
 | `target/clojure-jars/` | `test/fetch-clojure-jars.sh` | The four jars listed under [Prerequisites for Clojure](#prerequisites-for-clojure) below. Gitignored, never bundled or committed. |
 
 ## Configuration variables
 
-`jvm-classpath`, `jvm-options`, and `jvm-status-hook` are documented in
-the [Lisp API reference](lisp-api.md#variables).
+`jvm-classpath`, `jvm-options`, `jvm-status-hook`, and (from
+`jvm-clj.el`) `jvm-clj-classpath` are documented in the
+[Lisp API reference](lisp-api.md#variables).
+
+`jvm-clj-start` also loads this package's `clojure-src/` source
+directory, which holds the `dev.ublt.emacs.clj` namespace, onto the
+JVM classpath. It is part of the repository, not a build output.
 
 ## Prerequisites
 

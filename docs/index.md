@@ -30,6 +30,7 @@ Task-focused recipes. Use them once you know the basics.
 - [Handle errors and timeouts](how-to-guides/handle-errors-and-timeouts.md)
 - [Evaluate Clojure code](how-to-guides/evaluate-clojure-code.md)
 - [Run an nREPL server](how-to-guides/run-an-nrepl-server.md)
+- [Access Emacs Lisp from Clojure](how-to-guides/access-lisp-from-clojure.md)
 
 ## Reference
 

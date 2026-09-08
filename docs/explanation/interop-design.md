@@ -78,16 +78,44 @@ type honestly, instead of taking `Object` and downcasting.
 `error` signaled inside a callback needs to become something Java code
 can catch as a real exception, not a string it has to pattern-match.
 
+## Why a Lisp value becomes an opaque Java object
+
+The `dev.ublt.emacs.clj` namespace lets Clojure hold any Lisp value —
+`intern` returns one, `apply` returns one, `type-of` returns one. Each
+is a Java `LispObject`, an opaque handle, not a marshalled Clojure
+value. This is deliberate, and the opposite choice from `jvm-call`'s
+return marshalling, which turns Java scalars into Lisp scalars.
+
+Marshalling arbitrary Lisp values into Clojure data was a non-goal.
+Lisp's type universe (symbols, keymaps, buffers, markers, overlays,
+closures) does not map onto Clojure data in any single obvious way, and
+most of it is only meaningful back in Lisp anyway. So a `LispObject`
+stays opaque: you inspect it with `type-of`, `is-not-nil?`, `eq`, and
+`LispObject.prin1ToString`, and you pass it back into `apply` — you do
+not pull it apart on the Clojure side. Arguments going the other way
+are the asymmetric case: a `LispObject` passes through by reference,
+while a plain Clojure scalar converts to the matching Lisp value, so
+`(apply (intern "+") 1 2)` needs no manual wrapping.
+
+Underneath, a `LispObject` owns an `emacs::GlobalRef` — the `emacs`
+crate's mechanism for a Lisp value that outlives a single module call.
+The Java object holds the pointer to it; there is no Rust-side handle
+table, so the `GlobalRef`'s owner is unambiguously the one Java object,
+and its lifetime ends when that object is collected. A `GlobalRef` can
+only be created, read, or freed with a live `Env`, which is why every
+`LispObject` operation is serviced on the Emacs main thread — see
+[Architecture](architecture.md#why-clojure-calls-into-lisp-run-on-the-emacs-main-thread).
+
 ## The no-cycles assumption
 
 The bidirectional GC notification described in
 [Architecture](architecture.md#why-lisp-functions-and-jvm-objects-need-bidirectional-gc-notification)
 assumes the cross-runtime object graph has no cycles: a Lisp closure
 that captures a JVM object is fine, and a JVM object that holds a
-`LispCallable` is fine, but a cycle spanning both runtimes — where
-each side's collector can only see the other side as "still
-referenced" — would keep both objects alive forever, since neither
-garbage collector can trace through the other's heap.
+`LispCallable` or a `LispObject` is fine, but a cycle spanning both
+runtimes — where each side's collector can only see the other side as
+"still referenced" — would keep both objects alive forever, since
+neither garbage collector can trace through the other's heap.
 
 This is a deliberate scope boundary, not an oversight. Detecting or
 breaking cross-runtime cycles needs a distributed garbage collection

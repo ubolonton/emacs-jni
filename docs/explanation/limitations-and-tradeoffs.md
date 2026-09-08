@@ -106,7 +106,10 @@ depends on a real garbage-collection event happening on each side.
 Triggering one deterministically, inside a short-lived `emacs --batch`
 test process, is the obstacle — neither Emacs's nor the JVM's collector
 promises to run on demand within a bounded window. This path has been
-manually verified, but not automated.
+manually verified, but not automated. The same holds for the third
+wrapper, a collected `LispObject` freeing its `GlobalRef`: it depends
+on a JVM garbage-collection event, so it is documented and manually
+checked, not asserted by a test.
 
 ## `jvm-call`/`jvm-new` trust the caller completely
 
@@ -135,6 +138,39 @@ own session and thread state internally, independent of the per-call
 dispatch model that everything else in this module uses. See
 [How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md#switch-namespaces-inside-a-single-call)
 for the workaround.
+
+## A synchronous Clojure-to-Lisp call waits for Emacs to be free
+
+Every `dev.ublt.emacs.clj` call — `intern`, `apply`, `type-of`, and so
+on — runs on the Emacs main thread, because it operates on Lisp values
+through an `Env` that is only valid there. The JVM thread that made the
+call blocks until Emacs services it, which happens the next time Emacs
+pumps the worker-to-Lisp pipe: while idle, or inside a `-sync`
+wrapper's `accept-process-output` loop. See
+[Architecture](architecture.md#why-clojure-calls-into-lisp-run-on-the-emacs-main-thread).
+
+The consequence is that such a call cannot complete while Emacs is busy
+in a long, uninterrupted Lisp computation — it waits until Emacs
+returns to its event loop. This is inherent to Emacs's single-threaded
+execution model, not a choice this module made; a per-call timeout
+bounds the wait rather than letting a stalled call hang forever.
+
+## Lisp values held by Clojure are opaque
+
+A Lisp value that Clojure holds through `dev.ublt.emacs.clj` is a
+`LispObject` — an opaque handle, not marshalled Clojure data. You can
+inspect it (`type-of`, `is-not-nil?`, `eq`, `prin1-to-string`) and pass
+it back into `apply`, but you cannot pull its structure apart on the
+Clojure side. Marshalling arbitrary Lisp values into Clojure data was a
+non-goal, for the same reason the reverse (rich Clojure-to-Lisp
+marshalling) is: neither type universe maps onto the other in a single
+obvious way. See
+[Interop design](interop-design.md#why-a-lisp-value-becomes-an-opaque-java-object).
+
+A `LispObject`'s underlying Lisp value stays alive only as long as the
+`LispObject` is reachable on the JVM side; a cross-runtime reference
+cycle through one would leak, the same as any other cross-runtime cycle
+(see [Interop design](interop-design.md#the-no-cycles-assumption)).
 
 ## The nREPL server ships unhardened
 

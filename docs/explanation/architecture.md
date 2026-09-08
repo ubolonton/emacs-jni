@@ -39,7 +39,8 @@ Emacs pipe process, backed by `Env::open_channel`, carrying
 newline-terminated S-expressions. `jvm--process-filter` in
 `elisp/emacs-jni.el` accumulates bytes until it sees a complete line,
 reads it as a Lisp form, and dispatches on its head symbol:
-`status`, `log`, `load-jar-done`, `call-done`, `invoke`, or `release`.
+`status`, `log`, `load-jar-done`, `call-done`, `invoke`, `release`, or
+`lisp-request`.
 
 Two separate channels, rather than one bidirectional one, follows from
 which side can block. The worker thread can block on the `mpsc`
@@ -108,20 +109,48 @@ installing those handlers at all. `jvm-stop` still runs shutdown hooks
 correctly with `-Xrs` set, because it tears the JVM down through the
 JNI API directly, not through a signal.
 
+## Why Clojure calls into Lisp run on the Emacs main thread
+
+When Clojure holds a Lisp value (via `dev.ublt.emacs.clj`, see
+[Interop design](interop-design.md#why-a-lisp-value-becomes-an-opaque-java-object)),
+every operation on it — `intern`, `apply`, `type-of`, `eq`,
+`prin1-to-string` — is an Emacs `Env` call. An `Env` is only valid on
+the Emacs main thread, during a module call. The JVM thread the Clojure
+code runs on has no `Env`.
+
+So those operations do not run on the JVM thread. The JVM thread
+enqueues a request, sends a one-symbol `(lisp-request)` wakeup over the
+same worker-to-Lisp pipe, and blocks. Emacs services the queue on its
+main thread, the next time it pumps that pipe — either while idle, or
+inside a `-sync` wrapper's own `accept-process-output` loop. That
+second case is what makes these calls reentrant: a Clojure call that
+reaches back into Lisp from inside a `jvm-clojure-eval-string` is
+serviced by the very `accept-process-output` loop that is already
+blocked waiting for that `eval` to finish.
+
+The cost is that a synchronous Clojure-to-Lisp call cannot complete
+while Emacs is busy in a long, uninterrupted Lisp computation — it
+waits until Emacs is free again. A per-call timeout bounds that wait.
+See [Limitations and trade-offs](limitations-and-tradeoffs.md#a-synchronous-clojure-to-lisp-call-waits-for-emacs-to-be-free).
+
 ## Why Lisp functions and JVM objects need bidirectional GC notification
 
 A Lisp function passed into a `jvm-call` becomes a real Java object (a
 `LispCallable`/`LispFunction` proxy, from the shim classes described in
 [Interop design](interop-design.md)). A JVM object returned to Lisp
-becomes a wrapped Lisp value (a `user-ptr`). Each side of that
-wrapping is a live reference the other runtime's garbage collector
-cannot see on its own.
+becomes a wrapped Lisp value (a `user-ptr`). A Lisp value held by
+Clojure becomes a third kind of wrapper — a Java `LispObject`, backed
+by an `emacs::GlobalRef` the JVM object owns. Each of these is a live
+reference the other runtime's garbage collector cannot see on its own.
 
-Both directions notify the other side on collection: a JVM-side
+Every direction notifies the other side on collection. A JVM-side
 `Cleaner` sends a `release` message when a `LispFunction` proxy is
-collected, and Emacs's own GC, running on a `JvmHandle` user-ptr, sends
-a release the other way. Without this, the object graph on either side
-would keep the other side's memory alive indefinitely, or would only
-release it when the whole JVM stops. This design assumes the
-cross-runtime object graph has no cycles — see
-[Interop design](interop-design.md) for what that assumption costs.
+collected. Emacs's own GC, running on a `JvmHandle` user-ptr, sends a
+release the other way. And a `Cleaner` on a collected `LispObject`
+enqueues a request to free its `GlobalRef` — which, like every other
+`GlobalRef` operation, happens back on the Emacs main thread. Without
+this, the object graph on either side would keep the other side's
+memory alive indefinitely, or would only release it when the whole JVM
+stops. This design assumes the cross-runtime object graph has no
+cycles — see [Interop design](interop-design.md) for what that
+assumption costs.

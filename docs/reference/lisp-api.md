@@ -32,6 +32,41 @@ defaults to 30. Past the deadline, a `-sync` function signals
 | `jvm-nrepl-stop` | `(server &optional timeout)` | `(OK RESULT ERR)`. | `SERVER` is the value `jvm-nrepl-start` returned. Synchronous only. |
 | `jvm-ping` | `()` | `t`. | A module sanity check. Does not touch the JVM. |
 
+## Clojure Lisp-access library (`jvm-clj.el`)
+
+A separate library, loaded with `(require 'jvm-clj)`. It lets Clojure
+hold and manipulate Lisp values — see
+[How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md).
+
+| Function | Arguments | Returns | Notes |
+|---|---|---|---|
+| `jvm-clj-start` | `(&optional timeout)` | `(OK RESULT ERR)` from the namespace `require`, on success. | Starts the JVM if needed, loads `jvm-clj-classpath` plus this package's `clojure-src` directory, and requires `dev.ublt.emacs.clj`. Signals an error if any step fails. |
+| `jvm-clj-nrepl-start` | `(&optional port timeout)` | Same as `jvm-nrepl-start`. | `jvm-nrepl-start` after ensuring `dev.ublt.emacs.clj` is loaded. |
+| `jvm-clj-nrepl-stop` | `(server &optional timeout)` | Same as `jvm-nrepl-stop`. | Passes through to `jvm-nrepl-stop`. |
+
+### Clojure API: `dev.ublt.emacs.clj`
+
+Alias it — `(require '[dev.ublt.emacs.clj :as l])` — since `intern`,
+`apply`, and `eq` shadow `clojure.core`. Each call blocks a JVM thread
+until Emacs services it on its main thread.
+
+| Function | Arguments | Returns |
+|---|---|---|
+| `intern` | `[s]` | a `LispObject` (the interned symbol) |
+| `apply` | `[f & args]` | a `LispObject` (the call result); blocks |
+| `apply-async` | `[f & args]` | a `CompletableFuture<LispObject>` |
+| `type-of` | `[v]` | a `LispObject` (the type symbol) |
+| `is-not-nil?` | `[v]` | a boolean |
+| `eq` | `[a b]` | a boolean |
+
+`f` is a `LispObject` (from `intern`, or any Lisp function value).
+`args` may be `LispObject`s or plain Clojure scalars (strings, numbers,
+booleans, `nil`), which convert to the matching Lisp value. A Lisp
+`error` completes the future exceptionally with `emacs_jni.LispError`.
+`LispObject.prin1ToString` returns the value's `prin1-to-string` text
+as a Java `String` — the only way to read an otherwise opaque
+`LispObject`.
+
 ## Variables
 
 | Variable | Kind | Default | Notes |
@@ -40,6 +75,7 @@ defaults to 30. Past the deadline, a `-sync` function signals
 | `jvm-options` | `defvar`, list of strings | `("-Xrs")` | JVM flags (for example `"-Xmx512m"`). Same fresh-start-only rule as `jvm-classpath`. `"-Xrs"` stops the JVM from installing its own signal handlers — see [Architecture](../explanation/architecture.md). |
 | `jvm-status-hook` | `defvar`, hook | `nil` | Run with one argument, the new status symbol, on every transition — including the transient `starting`/`pausing`/`stopping` states. |
 | `emacs-jni--module-path` | `defvar`, string | `$EMACS_JNI_MODULE_PATH`, or a path relative to `elisp/emacs-jni.el` | Path to the built `.so` module, read once at `require` time. |
+| `jvm-clj-classpath` | `defvar`, list of strings | `nil` | From `jvm-clj.el`. Extra classpath entries for `jvm-clj-start` (typically your Clojure/nREPL jars), added on top of `jvm-classpath`. `jvm-clj-start` also adds this package's `clojure-src` directory automatically. |
 
 ## Buffers
 

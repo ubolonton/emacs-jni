@@ -3,10 +3,13 @@
 An Emacs dynamic module (Rust, using the [`emacs`](https://github.com/ubolonton/emacs-module-rs)
 crate) that embeds a JVM via [`jni`](https://github.com/jni-rs/jni-rs).
 It gives Emacs Lisp control over a JVM's lifecycle, two-way calls
-between Lisp and Java, Clojure evaluation, and a real nREPL server.
+between Lisp and Java, Clojure evaluation, a real nREPL server, and
+Clojure access to Emacs Lisp values.
 
 **Status: done.** All three planned phases (JVM lifecycle, JVM ↔ Lisp
-interop, Clojure/nREPL) have shipped.
+interop, Clojure/nREPL) have shipped, plus a follow-on that lets
+Clojure hold and call Emacs Lisp values (`jvm-clj.el` /
+`dev.ublt.emacs.clj`).
 
 **Full documentation, in tutorial, how-to, reference, and explanation
 form:** [`docs/index.md`](docs/index.md). Start there for anything
@@ -18,7 +21,9 @@ Design rationale from development itself:
 [`docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md`](docs/superpowers/specs/2026-09-01-jvm-lisp-interop-design.md)
 (Phase 2), and
 [`docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md`](docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md)
-(Phase 3).
+(Phase 3), and
+[`docs/superpowers/specs/2026-09-08-clojure-lisp-access-design.md`](docs/superpowers/specs/2026-09-08-clojure-lisp-access-design.md)
+(Clojure Lisp access).
 
 ## Prerequisites
 
@@ -72,10 +77,10 @@ Each `test/*.el` file runs in its own `emacs --batch` process (the
 embedded JVM is a per-process singleton, so test files can't safely
 share one).
 
-The 5 Clojure/nREPL tests in `test/jvm-clojure-test.el` are gated
-behind `EMACS_JNI_CLOJURE_JARS_DIR` — they skip cleanly, not fail, when
-it's unset, so the rest of the suite stays runnable with no network
-access:
+The Clojure tests in `test/jvm-clojure-test.el` and
+`test/jvm-clj-test.el` (Lisp access) are gated behind
+`EMACS_JNI_CLOJURE_JARS_DIR` — they skip cleanly, not fail, when it's
+unset, so the rest of the suite stays runnable with no network access:
 
 ```sh
 ./test/fetch-clojure-jars.sh

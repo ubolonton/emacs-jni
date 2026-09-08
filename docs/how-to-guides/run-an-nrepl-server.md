@@ -48,6 +48,15 @@ for a minimal `nc`-based example that needs no extra tooling.
 `(cdr (nth 1 my-nrepl))` pulls `SERVER` out of the value
 `jvm-nrepl-start` returned.
 
+## Preload the Lisp-access namespace
+
+If you want connected nREPL clients to reach Emacs Lisp through
+`dev.ublt.emacs.clj`, start the server with `jvm-clj-nrepl-start`
+(from `jvm-clj.el`) instead of `jvm-nrepl-start`. It is the same call,
+but it loads that namespace first. Stop it with `jvm-clj-nrepl-stop`,
+or `jvm-nrepl-stop` — they are equivalent. See
+[How to access Emacs Lisp from Clojure](access-lisp-from-clojure.md).
+
 ## Restrict who can connect
 
 Do not expose this server beyond localhost. `jvm-nrepl-start` uses

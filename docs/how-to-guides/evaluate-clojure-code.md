@@ -72,3 +72,9 @@ opaque wrapped JVM object, not a Lisp-visible structure. Call
 
 The second form returns a real Lisp string directly, since `pr-str`
 itself returns a Java `String`, and strings marshal automatically.
+
+## Go the other way
+
+To have Clojure hold and manipulate Lisp values — call Lisp functions,
+intern symbols, compare values — see
+[How to access Emacs Lisp from Clojure](access-lisp-from-clojure.md).

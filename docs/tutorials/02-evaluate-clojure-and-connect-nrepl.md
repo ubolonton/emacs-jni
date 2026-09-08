@@ -111,5 +111,7 @@ an independent process over the real nREPL wire protocol.
   for namespace handling and return-value limits.
 - [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md)
   for port choice and security notes.
+- [How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md)
+  to call Lisp functions and hold Lisp values from Clojure.
 - [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md)
   for why `*ns*` does not carry over between separate eval calls.
