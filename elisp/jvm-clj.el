@@ -36,10 +36,11 @@ load, or the namespace fails to require (e.g. no Clojure jar on
       (error "jvm-clj-start: failed to require dev.ublt.emacs.clj: %s" (nth 2 required)))
     required))
 
-(defun jvm-clj-nrepl-start (&optional port timeout)
-  "Like `jvm-nrepl-start', but ensures `dev.ublt.emacs.clj' is loaded first."
+(defun jvm-clj-nrepl-start (&optional port bind timeout)
+  "Like `jvm-nrepl-start' (including its BIND argument), but ensures
+`dev.ublt.emacs.clj' is loaded first."
   (jvm-clj-start timeout)
-  (jvm-nrepl-start port timeout))
+  (jvm-nrepl-start port bind timeout))
 
 (defun jvm-clj-nrepl-stop (server &optional timeout)
   "Like `jvm-nrepl-stop'."

@@ -28,7 +28,7 @@ defaults to 30. Past the deadline, a `-sync` function signals
 | `jvm-new-sync` | `(class-name args &optional timeout)` | `(OK RESULT ERR)`. | |
 | `jvm-clojure-require` | `(namespace &optional timeout)` | `(OK RESULT ERR)`. | Calls Clojure's `require` on `NAMESPACE`, a string. Synchronous only — see [Known limitations](#known-limitations) below. |
 | `jvm-clojure-eval-string` | `(code &optional timeout)` | `(OK RESULT ERR)`. | Evaluates `CODE`, a string of Clojure source. Synchronous only. See [Known limitations](#known-limitations) below. |
-| `jvm-nrepl-start` | `(&optional port timeout)` | `(OK RESULT ERR)`, where `RESULT` is `(ACTUAL-PORT . SERVER)` on success. | `PORT` defaults to 0 (the OS picks a free port). `ACTUAL-PORT` is an integer. `SERVER` is a wrapped JVM object, needed by `jvm-nrepl-stop`. Synchronous only. |
+| `jvm-nrepl-start` | `(&optional port bind timeout)` | `(OK RESULT ERR)`, where `RESULT` is `(ACTUAL-PORT . SERVER)` on success. | `PORT` defaults to 0 (the OS picks a free port). `BIND`, if non-nil, is the interface address to listen on (e.g. `"0.0.0.0"`); it defaults to nREPL's loopback. Bind beyond loopback only when needed — see [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md#bind-to-a-routable-interface). `ACTUAL-PORT` is an integer. `SERVER` is a wrapped JVM object, needed by `jvm-nrepl-stop`. Synchronous only. |
 | `jvm-nrepl-stop` | `(server &optional timeout)` | `(OK RESULT ERR)`. | `SERVER` is the value `jvm-nrepl-start` returned. Synchronous only. |
 | `jvm-ping` | `()` | `t`. | A module sanity check. Does not touch the JVM. |
 
@@ -41,7 +41,7 @@ hold and manipulate Lisp values — see
 | Function | Arguments | Returns | Notes |
 |---|---|---|---|
 | `jvm-clj-start` | `(&optional timeout)` | `(OK RESULT ERR)` from the namespace `require`, on success. | Starts the JVM if needed, loads `jvm-clj-classpath` plus this package's `clojure-src` directory, and requires `dev.ublt.emacs.clj`. Signals an error if any step fails. |
-| `jvm-clj-nrepl-start` | `(&optional port timeout)` | Same as `jvm-nrepl-start`. | `jvm-nrepl-start` after ensuring `dev.ublt.emacs.clj` is loaded. |
+| `jvm-clj-nrepl-start` | `(&optional port bind timeout)` | Same as `jvm-nrepl-start`. | `jvm-nrepl-start` (including its `bind` argument) after ensuring `dev.ublt.emacs.clj` is loaded. |
 | `jvm-clj-nrepl-stop` | `(server &optional timeout)` | Same as `jvm-nrepl-stop`. | Passes through to `jvm-nrepl-stop`. |
 
 ### Clojure API: `dev.ublt.emacs.clj`

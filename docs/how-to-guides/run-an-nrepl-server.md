@@ -30,6 +30,27 @@ means "any free port." Read the real port back from `RESULT`'s `car`:
 ;; => 54321
 ```
 
+## Bind to a routable interface
+
+By default the server binds loopback (`127.0.0.1`) only — nREPL's own
+default. A loopback-only server is unreachable through VM or container
+port forwarding: the forward delivers the connection to a routable
+interface (the guest's `eth0`, say), not to the guest's `127.0.0.1`, so
+the connection is refused and the client sees an empty `clone` response
+("Could not open new session").
+
+Pass a bind address as the second argument to listen beyond loopback:
+
+```elisp
+(setq my-nrepl (jvm-nrepl-start 8000 "0.0.0.0"))
+;; => (t (8000 . #<user-ptr ...>) nil)
+```
+
+`"0.0.0.0"` listens on every interface; a specific address narrows it.
+`jvm-clj-nrepl-start` takes the same argument. Read
+[Restrict who can connect](#restrict-who-can-connect) before binding
+beyond loopback.
+
 ## Connect a client
 
 Any bencode-speaking nREPL client works: `lein repl :connect
@@ -59,11 +80,13 @@ or `jvm-nrepl-stop` — they are equivalent. See
 
 ## Restrict who can connect
 
-Do not expose this server beyond localhost. `jvm-nrepl-start` uses
-nREPL's defaults throughout: loopback-only usage assumed, no
+`jvm-nrepl-start` uses nREPL's defaults throughout: loopback bind, no
 authentication, no TLS, no middleware configuration. Anyone who can
 reach the port can evaluate arbitrary code with the permissions of
-your Emacs process. This is out of scope for this module — see
+your Emacs process. Binding beyond loopback (the `bind` argument above)
+widens that reach to everyone who can reach that interface — do it only
+on a network you trust, and prefer a specific routable address over
+`"0.0.0.0"` when you can. This is out of scope for this module — see
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).
 If you need authentication or TLS, configure them through nREPL's own
 middleware, by starting the server with `jvm-call`/`jvm-new` directly

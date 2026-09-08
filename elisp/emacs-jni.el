@@ -351,11 +351,18 @@ come back as an opaque wrapped JVM object, same limitation as any other
 non-scalar `jvm-call' result."
   (jvm-clojure--invoke-with-form "clojure.core" "eval" code timeout))
 
-(defun jvm-nrepl-start (&optional port timeout)
+(defun jvm-nrepl-start (&optional port bind timeout)
   "Start an nREPL server (requiring `nrepl.server' first if needed).
-PORT defaults to 0, letting the OS pick a free port. Returns
-\(OK RESULT ERR); if OK, RESULT is (cons ACTUAL-PORT SERVER) -- the real
-bound port and a wrapped JVM object `jvm-nrepl-stop' needs later."
+PORT defaults to 0, letting the OS pick a free port. BIND, if non-nil,
+is the interface address string the server listens on (e.g. \"0.0.0.0\"
+for all interfaces); it defaults to nREPL's own default, loopback. Bind
+beyond loopback only when you need it -- a loopback-only server is
+unreachable through VM/NAT port forwarding, which delivers the
+connection to a routable interface, not the guest's `127.0.0.1'. See
+docs/how-to-guides/run-an-nrepl-server.md for that and the security
+cost. Returns (OK RESULT ERR); if OK, RESULT is (cons ACTUAL-PORT
+SERVER) -- the real bound port and a wrapped JVM object `jvm-nrepl-stop'
+needs later."
   (catch 'jvm-nrepl-start
     (let ((required (jvm-clojure-require "nrepl.server" timeout)))
       (unless (car required) (throw 'jvm-nrepl-start required))
@@ -363,14 +370,20 @@ bound port and a wrapped JVM object `jvm-nrepl-stop' needs later."
         (unless (car start-fn) (throw 'jvm-nrepl-start start-fn))
         (let ((port-kw (jvm-clojure--read ":port")))
           (unless (car port-kw) (throw 'jvm-nrepl-start port-kw))
-          (let ((server (jvm-call-sync (nth 1 start-fn) "invoke"
-                                        (list (nth 1 port-kw) (or port 0))
-                                        timeout)))
-            (unless (car server) (throw 'jvm-nrepl-start server))
-            (let ((bound-port (jvm-call-sync (nth 1 port-kw) "invoke"
-                                              (list (nth 1 server)) timeout)))
-              (unless (car bound-port) (throw 'jvm-nrepl-start bound-port))
-              (list t (cons (nth 1 bound-port) (nth 1 server)) nil))))))))
+          (let ((start-args (list (nth 1 port-kw) (or port 0))))
+            ;; `start-server' takes keyword options; add `:bind BIND' to
+            ;; its argument list only when a bind address was requested,
+            ;; so the default path stays a plain `:port' call.
+            (when bind
+              (let ((bind-kw (jvm-clojure--read ":bind")))
+                (unless (car bind-kw) (throw 'jvm-nrepl-start bind-kw))
+                (setq start-args (append start-args (list (nth 1 bind-kw) bind)))))
+            (let ((server (jvm-call-sync (nth 1 start-fn) "invoke" start-args timeout)))
+              (unless (car server) (throw 'jvm-nrepl-start server))
+              (let ((bound-port (jvm-call-sync (nth 1 port-kw) "invoke"
+                                                (list (nth 1 server)) timeout)))
+                (unless (car bound-port) (throw 'jvm-nrepl-start bound-port))
+                (list t (cons (nth 1 bound-port) (nth 1 server)) nil)))))))))
 
 (defun jvm-nrepl-stop (server &optional timeout)
   "Stop SERVER (the cdr of `jvm-nrepl-start''s RESULT). Returns

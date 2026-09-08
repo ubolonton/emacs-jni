@@ -85,5 +85,31 @@ section)."
       ;; test is extended.
       (jvm-nrepl-stop server))))
 
+(ert-deftest emacs-jni-jvm-nrepl-test/bind-opens-the-server-beyond-loopback ()
+  "Passing BIND makes the server listen on the given interface instead
+of nREPL's loopback default. A loopback-only server is unreachable
+through VM/NAT port forwarding, which delivers the connection to a
+routable interface, not to the guest's `127.0.0.1'. Asserts the LISTEN
+socket for the bound port is a wildcard address, not loopback."
+  (jvm-clojure-test--ensure-ready)
+  (unless (executable-find "ss")
+    (ert-skip "needs `ss' to inspect the listening socket's bind address"))
+  (let ((start-result (jvm-nrepl-start 0 "0.0.0.0")))
+    (should (car start-result))
+    (let ((port (car (nth 1 start-result)))
+          (server (cdr (nth 1 start-result))))
+      (unwind-protect
+          (let ((listen (with-temp-buffer
+                          (call-process "ss" nil t nil "-tlnH")
+                          (buffer-string))))
+            ;; Bound to a wildcard address (`*'/`0.0.0.0'/`[::]'), the
+            ;; forms `ss' prints for an all-interfaces bind -- verified
+            ;; empirically against nREPL 1.7.0.
+            (should (string-match-p (format "\\(\\*\\|0\\.0\\.0\\.0\\|\\[::\\]\\):%d\\b" port) listen))
+            ;; ...and specifically NOT loopback-only, which is what the
+            ;; default (no BIND) produces and what this option fixes.
+            (should-not (string-match-p (format "127\\.0\\.0\\.1:%d\\b" port) listen)))
+        (jvm-nrepl-stop server)))))
+
 (provide 'jvm-clojure-test)
 ;;; jvm-clojure-test.el ends here
