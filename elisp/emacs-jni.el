@@ -101,6 +101,14 @@ docs/explanation/architecture.md).")
              (jvm--invoke-reply id t (apply fn (mapcar #'jvm--resolve-sexp-result args)))
            (error
             (jvm--invoke-reply id nil (format "%S" err)))))))
+    (`(lisp-request)
+     ;; A JVM thread enqueued one or more Lisp-access requests (`intern',
+     ;; `apply', `type-of', `is-not-nil?', `eq', `prin1-to-string', or a
+     ;; GC-driven `FreeRef') on the Rust-side queue and woke us up to
+     ;; service them -- see `jvm--service-lisp-requests' and the design
+     ;; spec's "Request/reply flow". No payload: the request itself rides
+     ;; the Rust queue, not this message.
+     (jvm--service-lisp-requests))
     (`(release ,handle)
      ;; The JVM-side LispFunction proxy for HANDLE was garbage collected
      ;; (see `ReleaseNotifier' in java/emacs_jni and its native `run',

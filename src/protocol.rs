@@ -37,6 +37,14 @@ pub fn release_message(handle: u64) -> String {
     format!("(release {handle})\n")
 }
 
+/// Wakes the main thread up to drain the Lisp-access request queue
+/// (`lisp_requests::service`, via `jvm--service-lisp-requests`) — carries
+/// no payload, since the actual request rides the in-process queue, not
+/// the wire (see design spec, "Request/reply flow").
+pub fn lisp_request_message() -> String {
+    "(lisp-request)\n".to_string()
+}
+
 pub fn log_message(level: &str, message: &str) -> String {
     format!("(log {} {})\n", level, quote(message))
 }
@@ -166,5 +174,10 @@ mod tests {
     #[test]
     fn formats_release() {
         assert_eq!(release_message(9), "(release 9)\n");
+    }
+
+    #[test]
+    fn formats_lisp_request() {
+        assert_eq!(lisp_request_message(), "(lisp-request)\n");
     }
 }

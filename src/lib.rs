@@ -4,6 +4,7 @@ mod channel;
 mod commands;
 mod handles;
 mod jvm_thread;
+mod lisp_requests;
 mod marshal;
 mod pending;
 mod protocol;
@@ -114,6 +115,18 @@ fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64
 #[defun(mod_in_name = false, name = "jvm--wrap-handle")]
 fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
     Ok(Box::new(handles::JvmHandle(handle)))
+}
+
+/// Drains the Lisp-access request queue (`lisp_requests`) and runs each
+/// request's `Env` op on this (the main) thread — the module-primitive
+/// half of the built-in-Lisp-access design (see design spec, "Request/
+/// reply flow"). Called from `jvm--dispatch-message`'s `(lisp-request)`
+/// case (`elisp/emacs-jni.el`), itself triggered by a JVM thread's
+/// `channel::send`-based wakeup after enqueuing a request (`shim.rs`'s
+/// `Lisp.*`/`LispRefReleaseNotifier` natives).
+#[defun(mod_in_name = false, name = "jvm--service-lisp-requests")]
+fn jvm_service_lisp_requests(env: &Env) -> Result<()> {
+    lisp_requests::service(env)
 }
 
 /// Replies to a pending JVM-initiated `invoke` request: RESULT is either

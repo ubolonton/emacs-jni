@@ -31,6 +31,26 @@ pub enum LispArg {
     Callback(u64),
 }
 
+/// The value a `Cmd::LispReply` completes a pending Lisp-access future
+/// with — built by `lisp_requests::service` (which runs the actual `Env`
+/// op) and consumed by `jvm_thread::handle_lisp_reply` (which turns it
+/// into a real Java value on the worker's own JNI attachment). Mirrors
+/// `handle_invoke_reply`'s `ok`/`LispArg` pair, but as a single enum since
+/// a Lisp-access reply's success shape varies by request kind (a
+/// `LispObject` pointer, a `boolean`, or a `String`), unlike `invoke`'s
+/// reply, which is always a `LispArg`.
+#[derive(Debug)]
+pub enum LispReplyValue {
+    /// A boxed `emacs::GlobalRef` pointer — becomes a Java `LispObject`.
+    Ptr(i64),
+    Bool(bool),
+    Str(String),
+    /// A Lisp `error` (or Rust-side signal) message — completes the
+    /// future exceptionally with a `LispError`, mirroring `InvokeReply`'s
+    /// `ok = false` case.
+    Error(String),
+}
+
 #[derive(Debug)]
 pub enum Cmd {
     /// Sent to an already-running worker thread to resume from `paused`.
@@ -44,6 +64,12 @@ pub enum Cmd {
     Call { id: u64, target: CallTarget, member: String, args: Vec<LispArg> },
     InvokeReply { id: u64, ok: bool, result: LispArg },
     ReleaseRef { handle: u64 },
+    /// Completes a pending Lisp-access native's reply future (`intern`,
+    /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by
+    /// `jvm--service-lisp-requests` (`lisp_requests::service`) after
+    /// running the corresponding `Env` op on the main thread. See
+    /// `jvm_thread::handle_lisp_reply`.
+    LispReply { id: u64, value: LispReplyValue },
     #[cfg(feature = "test-support")]
     TestPanic,
 }

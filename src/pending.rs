@@ -51,10 +51,29 @@ mod tests {
     use jni::vm::{InitArgsBuilder, JavaVM};
     use jni::JNIVersion;
 
+    /// Retries against jni-rs 0.22.4's racy check-then-create singleton --
+    /// see `handles.rs`'s `create_test_jvm` for the full explanation. This
+    /// test used to create its JVM directly; with more JVM-creating tests
+    /// now running in this same binary (`shim.rs`), the race became
+    /// reliably hit rather than a rare fluke.
+    fn create_test_jvm() -> JavaVM {
+        let mut last_err = None;
+        for _ in 0..20 {
+            let init_args = InitArgsBuilder::new().version(JNIVersion::V1_8).build().unwrap();
+            match JavaVM::new(init_args) {
+                Ok(vm) => return vm,
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+        panic!("failed to create/attach a test JVM after retries: {last_err:?}");
+    }
+
     #[test]
     fn register_then_take_returns_once() {
-        let init_args = InitArgsBuilder::new().version(JNIVersion::V1_8).build().unwrap();
-        let vm = JavaVM::new(init_args).unwrap();
+        let vm = create_test_jvm();
         vm.attach_current_thread(|env| -> jni::errors::Result<()> {
             let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
             let obj = env.new_object(&object_class, jni::jni_sig!(() -> void), &[])?;

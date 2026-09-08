@@ -83,6 +83,13 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 crate::handles::release(handle);
                 false
             }
+            // Handled inline, same reasoning as `Cmd::InvokeReply`: completing
+            // an already-existing `CompletableFuture` is one or two cheap JNI
+            // calls, not an arbitrary user method.
+            Cmd::LispReply { id, value } => {
+                handle_lisp_reply(&vm, id, value);
+                false
+            }
             #[cfg(feature = "test-support")]
             Cmd::TestPanic => panic!("jvm--test-panic: deliberate panic for crash-handling tests"),
         }));
@@ -323,11 +330,18 @@ fn handle_load_jar(
     // up front so `jvm-load-jar`'s ok/err result actually reflects whether
     // the jar is there, without touching the reflective addURL sequence
     // below.
-    if !std::path::Path::new(&path).is_file() {
+    //
+    // Accepts a directory too, not just a jar file: `add_jar_url` below
+    // goes through `File::toURI`, which already appends a trailing slash
+    // for a directory on its own -- exactly the URL form `URLClassLoader`
+    // needs to treat it as a classpath directory (rather than a jar) --
+    // so this primitive doubles as "add a classpath directory", used by
+    // `jvm-clj-start` to add `clojure-src/` alongside real jars.
+    if !std::path::Path::new(&path).exists() {
         channel::send(&protocol::load_jar_done_message(
             id,
             false,
-            Some(&format!("jar file not found: {path}")),
+            Some(&format!("jar/classpath entry not found: {path}")),
         ));
         return;
     }
@@ -508,6 +522,88 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::
             "error",
             &format!("invoke-reply for id {id}: failed to complete the pending future: {e}"),
         ));
+    }
+}
+
+/// Resolves the pending `CompletableFuture` for ID with VALUE — the
+/// Lisp-access counterpart of `handle_invoke_reply` above, completing (or
+/// exceptionally completing) whatever future `shim.rs`'s `Lisp.*` natives
+/// registered in `pending` (see design spec, "Request/reply flow", step
+/// 3: "Completion must route through the worker because only it is
+/// attached to the JVM"). Runs inline, like `handle_invoke_reply`, for the
+/// same reason: completing a future is one or two cheap JNI calls, not an
+/// arbitrary user method.
+fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispReplyValue) {
+    let Some(future) = crate::pending::take(id) else {
+        channel::send(&protocol::log_message("error", &format!("lisp-reply for unknown id {id}")));
+        return;
+    };
+    let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
+        let future_local = env.new_local_ref(future.as_obj())?;
+        if let crate::commands::LispReplyValue::Error(message) = value {
+            // Same "always a plain formatted message" shape as
+            // `handle_invoke_reply`'s own `ok = false` case.
+            let lisp_error_class = env.find_class(jni::jni_str!("emacs_jni/LispError"))?;
+            let jmessage = env.new_string(&message)?;
+            let error = env.new_object(
+                &lisp_error_class,
+                jni::jni_sig!((message: java.lang.String) -> void),
+                &[jni::objects::JValueOwned::Object(jmessage.into()).borrow()],
+            )?;
+            env.call_method(
+                &future_local,
+                jni::jni_str!("completeExceptionally"),
+                jni::jni_sig!((ex: java.lang.Throwable) -> boolean),
+                &[jni::objects::JValueOwned::Object(error).borrow()],
+            )?;
+        } else {
+            let obj = build_lisp_reply_object(env, value)?;
+            env.call_method(
+                &future_local,
+                jni::jni_str!("complete"),
+                jni::jni_sig!((v: java.lang.Object) -> boolean),
+                &[jni::objects::JValueOwned::Object(obj).borrow()],
+            )?;
+        }
+        Ok(())
+    });
+    if let Err(e) = result {
+        channel::send(&protocol::log_message(
+            "error",
+            &format!("lisp-reply for id {id}: failed to complete the pending future: {e}"),
+        ));
+    }
+}
+
+/// Builds the actual Java value a successful `LispReplyValue` becomes —
+/// factored out of `handle_lisp_reply` since the `LispReplyValue::Error`
+/// case (handled by that function's caller) never reaches here.
+fn build_lisp_reply_object<'local>(
+    env: &mut jni::Env<'local>,
+    value: crate::commands::LispReplyValue,
+) -> jni::errors::Result<jni::objects::JObject<'local>> {
+    match value {
+        crate::commands::LispReplyValue::Ptr(ptr) => {
+            let class = env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
+            env.new_object(&class, jni::jni_sig!((ptr: long) -> void), &[jni::objects::JValue::Long(ptr)])
+        }
+        crate::commands::LispReplyValue::Bool(b) => {
+            let class = env.find_class(jni::jni_str!("java/lang/Boolean"))?;
+            env.call_static_method(
+                &class,
+                jni::jni_str!("valueOf"),
+                jni::jni_sig!((v: boolean) -> java.lang.Boolean),
+                &[jni::objects::JValue::Bool(b)],
+            )?
+            .l()
+        }
+        crate::commands::LispReplyValue::Str(s) => {
+            let jstr = env.new_string(&s)?;
+            Ok(jstr.into())
+        }
+        crate::commands::LispReplyValue::Error(_) => {
+            unreachable!("handled by handle_lisp_reply before build_lisp_reply_object is called")
+        }
     }
 }
 
