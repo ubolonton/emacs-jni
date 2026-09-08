@@ -42,8 +42,19 @@ pub enum LispArg {
 #[derive(Debug)]
 pub enum LispReplyValue {
     /// A boxed `emacs::GlobalRef` pointer — becomes a Java `LispObject`.
+    /// Used for any result value that is not a scalar or string (symbols,
+    /// conses, vectors, hash tables, ...).
     Ptr(i64),
+    /// Lisp `nil` — becomes Clojure `nil` (Java `null`).
+    Nil,
     Bool(bool),
+    /// A fixnum — becomes a boxed `Long`.
+    Int(i64),
+    /// A float — becomes a boxed `Double`.
+    Float(f64),
+    /// Decimal digits of a bignum too large for `i64` — becomes a boxed
+    /// `BigInteger`, matching the `jvm-call` marshalling table.
+    BigInt(String),
     Str(String),
     /// A Lisp `error` (or Rust-side signal) message — completes the
     /// future exceptionally with a `LispError`, mirroring `InvokeReply`'s

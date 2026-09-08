@@ -47,11 +47,47 @@ non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
   (let ((sym (jvm-clj-test--eval "(dev.ublt.emacs.clj/intern \"car\")")))
     (should (equal (jvm-clj-test--prin1 sym) "car"))))
 
-(ert-deftest emacs-jni-jvm-clj-test/apply-plus-returns-a-lisp-object-whose-prin1-is-3 ()
+(ert-deftest emacs-jni-jvm-clj-test/apply-integer-result-becomes-a-clojure-value ()
   (jvm-clj-test--ensure-ready)
+  ;; `+' returns an integer -> a Clojure Long, not an opaque LispObject.
+  ;; `jvm-clojure-eval-string' then marshals that Long back to Lisp as 3.
+  (should (equal (jvm-clj-test--eval
+                  "(dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"+\") 1 2)")
+                 3)))
+
+(ert-deftest emacs-jni-jvm-clj-test/apply-string-result-becomes-a-clojure-string ()
+  (jvm-clj-test--ensure-ready)
+  (should (equal (jvm-clj-test--eval
+                  "(dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"concat\") \"a\" \"b\")")
+                 "ab")))
+
+(ert-deftest emacs-jni-jvm-clj-test/apply-float-result-becomes-a-clojure-double ()
+  (jvm-clj-test--ensure-ready)
+  (should (equal (jvm-clj-test--eval
+                  "(dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"+\") 1.0 0.5)")
+                 1.5)))
+
+(ert-deftest emacs-jni-jvm-clj-test/apply-nil-result-becomes-clojure-nil ()
+  (jvm-clj-test--ensure-ready)
+  ;; (not 1) => nil, converted to Clojure nil, marshalled back as Lisp nil.
+  (should (eq (jvm-clj-test--eval
+               "(dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"not\") 1)")
+              nil)))
+
+(ert-deftest emacs-jni-jvm-clj-test/apply-t-result-becomes-clojure-true ()
+  (jvm-clj-test--ensure-ready)
+  ;; (not nil) => t, converted to Clojure true, marshalled back as Lisp t.
+  (should (eq (jvm-clj-test--eval
+               "(dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"not\") nil)")
+              t)))
+
+(ert-deftest emacs-jni-jvm-clj-test/apply-non-scalar-result-stays-a-lisp-object ()
+  (jvm-clj-test--ensure-ready)
+  ;; A list is not a scalar, so it stays an opaque LispObject; read it
+  ;; back with prin1ToString.
   (let ((result (jvm-clj-test--eval
-                 "(dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"+\") 1 2)")))
-    (should (equal (jvm-clj-test--prin1 result) "3"))))
+                 "(dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"list\") 1 2 3)")))
+    (should (equal (jvm-clj-test--prin1 result) "(1 2 3)"))))
 
 (ert-deftest emacs-jni-jvm-clj-test/apply-lisp-error-completes-the-future-exceptionally ()
   "A Lisp `error' during `apply' completes the future exceptionally with
@@ -120,8 +156,8 @@ still-running outer `accept-process-output' loop, before the outer
 the outer `-sync' wrapper's own `accept-process-output' loop.\""
   (jvm-clj-test--ensure-ready)
   (should (eq (jvm-clj-test--eval
-               "(let [result (dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"+\") 1 2)]
-                  (dev.ublt.emacs.clj/is-not-nil? result))")
+               "(let [sym (dev.ublt.emacs.clj/intern \"car\")]
+                  (dev.ublt.emacs.clj/is-not-nil? sym))")
               t)))
 
 (provide 'jvm-clj-test)

@@ -49,19 +49,20 @@ is not a Clojure value; inspect it with the functions below.
 ## Apply a Lisp function
 
 ```clojure
-(l/apply (l/intern "+") 1 2)   ; => a LispObject; its prin1 form is "3"
+(l/apply (l/intern "+") 1 2)   ; => 3  (a Clojure Long)
 ```
 
-`apply` blocks until Lisp returns, and yields the result as a
-`LispObject`. Arguments may be other `LispObject`s, or plain Clojure
-scalars (strings, numbers, booleans, `nil`), which convert to the
-matching Lisp value.
+`apply` blocks until Lisp returns. A scalar or string result — number,
+string, `t`, `nil` — comes back as the matching Clojure value, so you
+use it directly. Any other Lisp value (a symbol, list, map, ...) comes
+back as an opaque `LispObject`. Arguments may be `LispObject`s or plain
+Clojure scalars, which convert to the matching Lisp value.
 
 ## Apply without blocking
 
 ```clojure
-(l/apply-async (l/intern "+") 1 2)   ; => CompletableFuture<LispObject>
-@(l/apply-async (l/intern "+") 1 2)  ; deref for the LispObject
+(l/apply-async (l/intern "+") 1 2)   ; => CompletableFuture
+@(l/apply-async (l/intern "+") 1 2)  ; => 3
 ```
 
 `apply-async` returns immediately with a `CompletableFuture`. Deref it
@@ -79,16 +80,18 @@ matching Lisp value.
 `type-of` returns a `LispObject` (a type symbol). `is-not-nil?` and
 `eq` return plain Clojure booleans.
 
-## Read a value's printed form
+## Read an opaque value's printed form
+
+A non-scalar result stays a `LispObject`:
 
 ```clojure
-(.prin1ToString (l/apply (l/intern "+") 1 2))   ; => "3"
+(l/apply (l/intern "list") 1 2 3)                   ; => a LispObject (a Lisp list)
+(.prin1ToString (l/apply (l/intern "list") 1 2 3))  ; => "(1 2 3)"
 ```
 
 `LispObject.prin1ToString` returns the value's `prin1-to-string`
-output, as a Java `String`. This is the way to turn an opaque
-`LispObject` into readable text — Lisp values stay opaque on the
-Clojure side on purpose (see
+output, as a Java `String` — the way to read a value that stays opaque
+(see
 [Interop design](../explanation/interop-design.md#why-a-lisp-value-becomes-an-opaque-java-object)).
 
 ## Handle a Lisp error

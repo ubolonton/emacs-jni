@@ -601,6 +601,36 @@ fn build_lisp_reply_object<'local>(
             let jstr = env.new_string(&s)?;
             Ok(jstr.into())
         }
+        crate::commands::LispReplyValue::Nil => Ok(jni::objects::JObject::null()),
+        crate::commands::LispReplyValue::Int(n) => {
+            let class = env.find_class(jni::jni_str!("java/lang/Long"))?;
+            env.call_static_method(
+                &class,
+                jni::jni_str!("valueOf"),
+                jni::jni_sig!((v: long) -> java.lang.Long),
+                &[jni::objects::JValue::Long(n)],
+            )?
+            .l()
+        }
+        crate::commands::LispReplyValue::Float(f) => {
+            let class = env.find_class(jni::jni_str!("java/lang/Double"))?;
+            env.call_static_method(
+                &class,
+                jni::jni_str!("valueOf"),
+                jni::jni_sig!((v: double) -> java.lang.Double),
+                &[jni::objects::JValue::Double(f)],
+            )?
+            .l()
+        }
+        crate::commands::LispReplyValue::BigInt(digits) => {
+            let jstr = env.new_string(&digits)?;
+            let class = env.find_class(jni::jni_str!("java/math/BigInteger"))?;
+            env.new_object(
+                &class,
+                jni::jni_sig!((val: java.lang.String) -> void),
+                &[jni::objects::JValueOwned::Object(jstr.into()).borrow()],
+            )
+        }
         crate::commands::LispReplyValue::Error(_) => {
             unreachable!("handled by handle_lisp_reply before build_lisp_reply_object is called")
         }

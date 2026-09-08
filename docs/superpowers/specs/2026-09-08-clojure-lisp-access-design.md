@@ -12,8 +12,11 @@ opaque objects. This is the inverse of the existing `jvm-call` path
 `type-of`, `is-not-nil?`, and `eq`. A new Elisp library `jvm-clj.el`
 starts the Clojure side and wraps the existing nREPL controls.
 
-Non-goal: marshalling arbitrary Lisp values to Clojure data. Lisp
-values stay opaque on the JVM side; you inspect them via
+An `apply` result that is a scalar or string (integer, float, string,
+`t`, `nil`) converts to the matching Clojure value, the same way
+`jvm-call` marshals scalars. Non-goal: marshalling arbitrary *non-scalar*
+Lisp values to Clojure data — symbols, conses, vectors, and the like
+stay opaque `LispObject`s on the JVM side; you inspect them via
 `prin1-to-string`, `type-of`, `eq`, and `is-not-nil?`.
 
 ## Core constraint
@@ -105,11 +108,12 @@ Executed inside `jvm--service-lisp-requests` on the main thread:
 
 - `intern(name: String)` → `env.intern(name)` → `LispObject` (symbol).
 - `apply-async(f, args)` → bind `f`'s `GlobalRef`, convert each arg
-  (below), `env.call(f_value, args)` → result `Value` → `LispObject`.
-  The native method returns the `CompletableFuture<LispObject>`
-  immediately (derefable in Clojure with `@`). A Lisp `error` becomes
-  an exceptional future completion with `LispError`, which surfaces on
-  deref.
+  (below), `env.call(f_value, args)` → the result `Value` is classified
+  (see "Result conversion"): a scalar/string becomes a Clojure value,
+  anything else a `LispObject`. The native method returns the
+  `CompletableFuture` immediately (derefable in Clojure with `@`). A
+  Lisp `error` becomes an exceptional future completion with
+  `LispError`, which surfaces on deref.
 - `apply(f, args)` → the Clojure-level blocking form, `@(apply-async
   f args)`. No dedicated native.
 - `type-of(v)` → `env.type_of(value)` → `LispObject` (type symbol).
@@ -134,6 +138,24 @@ into the request:
 
 `intern` takes a bare `String`.
 
+### Result conversion
+
+An `apply`/`apply-async` result `Value` is classified on the main
+thread, mirroring `jvm-call`'s return-marshalling table in reverse:
+
+- `nil` → Clojure `nil` (Java `null`);
+- the symbol `t` → Clojure `true` (boxed `Boolean`);
+- a fixnum → boxed `Long`; a bignum → `BigInteger`;
+- a float → boxed `Double`;
+- a string → Java `String`;
+- anything else (other symbols, conses, vectors, hash tables, ...) →
+  an opaque `LispObject`.
+
+`intern` and `type-of` always produce a symbol, so they always return a
+`LispObject`; only `apply`/`apply-async` can yield a converted scalar.
+Converting `t`/`nil` lets a Lisp predicate's result drive a Clojure
+`if` directly.
+
 ## Components
 
 ### Rust
@@ -143,10 +165,11 @@ into the request:
   `IsNotNil`, `Eq`, `Prin1`, `FreeRef`.
 - Reuse `pending.rs` (CompletableFuture-by-id) and the worker command
   channel; add `Cmd::LispReply { id, value: LispReplyValue }` with
-  `LispReplyValue` = `Ptr(i64) | Bool(bool) | Str(String) |
-  Error(String)`. The worker builds the Java value and
-  completes/exceptionally-completes the future (mirrors
-  `handle_invoke_reply`).
+  `LispReplyValue` = `Ptr(i64) | Nil | Bool(bool) | Int(i64) |
+  Float(f64) | BigInt(String) | Str(String) | Error(String)` (the
+  scalar variants carry a converted result; see "Result conversion").
+  The worker builds the Java value and completes/exceptionally-completes
+  the future (mirrors `handle_invoke_reply`).
 - New `#[defun] jvm--service-lisp-requests(env)`: drains the queue,
   runs each op with `env`, boxes result `GlobalRef`s, emits
   `Cmd::LispReply`, and services `FreeRef` by
@@ -211,11 +234,12 @@ primitives; it does not replace them.
 ## Testing
 
 - ERT (mirrors `test/jvm-clojure-test.el`): drive Clojure via
-  `jvm-clojure-eval-string` to exercise each fn — e.g.
-  `(dev.ublt.emacs.clj/apply "+" 1 2)` yields a `LispObject` whose
-  `prin1ToString` is `"3"`; `type-of`, `eq`, `is-not-nil?`; and a
-  reentrancy test where Clojure calls Lisp back inside a
-  Lisp→Clojure call.
+  `jvm-clojure-eval-string` to exercise each fn — result conversion
+  (`(apply (intern "+") 1 2)` → the integer `3`; string, float, `nil`,
+  `t`; and a non-scalar list result staying a `LispObject` read via
+  `prin1ToString`); `intern`, `type-of`, `eq`, `is-not-nil?`; and a
+  reentrancy test where Clojure calls Lisp back inside a Lisp→Clojure
+  call.
 - Rust unit tests for the request queue and the
   box/borrow/free pointer discipline.
 - GC-driven `FreeRef` is inherently flaky to assert (forcing GC),

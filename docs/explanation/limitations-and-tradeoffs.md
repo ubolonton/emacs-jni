@@ -157,14 +157,15 @@ bounds the wait rather than letting a stalled call hang forever.
 
 ## Lisp values held by Clojure are opaque
 
-A Lisp value that Clojure holds through `dev.ublt.emacs.clj` is a
-`LispObject` — an opaque handle, not marshalled Clojure data. You can
+A scalar or string result from `apply` converts to a Clojure value, but
+any other Lisp value that Clojure holds through `dev.ublt.emacs.clj` is
+a `LispObject` — an opaque handle, not marshalled Clojure data. You can
 inspect it (`type-of`, `is-not-nil?`, `eq`, `prin1-to-string`) and pass
 it back into `apply`, but you cannot pull its structure apart on the
-Clojure side. Marshalling arbitrary Lisp values into Clojure data was a
-non-goal, for the same reason the reverse (rich Clojure-to-Lisp
-marshalling) is: neither type universe maps onto the other in a single
-obvious way. See
+Clojure side. Marshalling arbitrary non-scalar Lisp values into Clojure
+data was a non-goal, for the same reason the reverse (rich
+Clojure-to-Lisp marshalling of vectors, maps, and keywords) is: neither
+type universe maps onto the other in a single obvious way. See
 [Interop design](interop-design.md#why-a-lisp-value-becomes-an-opaque-java-object).
 
 A `LispObject`'s underlying Lisp value stays alive only as long as the

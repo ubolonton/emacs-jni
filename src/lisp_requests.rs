@@ -134,6 +134,37 @@ fn reply(id: u64, result: EmacsResult<LispReplyValue>) {
     let _ = worker::send_command(Cmd::LispReply { id, value });
 }
 
+/// Classifies an `apply` result: a scalar or string converts to the
+/// matching Clojure value directly; everything else (symbols, conses,
+/// vectors, hash tables, ...) stays an opaque `LispObject`. `nil` becomes
+/// Clojure `nil` and the symbol `t` becomes `true`, so a Lisp predicate's
+/// result is usable directly in a Clojure conditional. The scalar set and
+/// its Java shapes mirror the `jvm-call` return-marshalling table.
+fn value_to_reply(env: &Env, value: Value) -> EmacsResult<LispReplyValue> {
+    if !value.is_not_nil() {
+        return Ok(LispReplyValue::Nil);
+    }
+    if env.call("eq", (value, env.intern("t")?))?.is_not_nil() {
+        return Ok(LispReplyValue::Bool(true));
+    }
+    if env.call("stringp", (value,))?.is_not_nil() {
+        return Ok(LispReplyValue::Str(value.into_rust::<String>()?));
+    }
+    if env.call("floatp", (value,))?.is_not_nil() {
+        return Ok(LispReplyValue::Float(value.into_rust::<f64>()?));
+    }
+    if env.call("integerp", (value,))?.is_not_nil() {
+        // A fixnum fits an i64; a bignum does not, so render it to its
+        // decimal string and rebuild it as a BigInteger on the JVM side.
+        if env.call("fixnump", (value,))?.is_not_nil() {
+            return Ok(LispReplyValue::Int(value.into_rust::<i64>()?));
+        }
+        let digits = env.call("number-to-string", (value,))?.into_rust::<String>()?;
+        return Ok(LispReplyValue::BigInt(digits));
+    }
+    Ok(LispReplyValue::Ptr(box_value(value)))
+}
+
 /// Drains the request queue and runs each request's `Env` op, in the
 /// order `drain` returned them. Registered as `#[defun]
 /// jvm--service-lisp-requests` (`lib.rs`), called from `jvm--dispatch-
@@ -150,16 +181,16 @@ pub fn service(env: &Env) -> EmacsResult<()> {
                 reply(id, result);
             }
             LispRequest::Apply { id, f_ptr, args } => {
-                let result = (|| -> EmacsResult<i64> {
+                let result = (|| -> EmacsResult<LispReplyValue> {
                     let f_value = borrow(env, f_ptr);
                     let mut arg_values = Vec::with_capacity(args.len());
                     for arg in &args {
                         arg_values.push(arg_to_value(env, arg)?);
                     }
                     let result_value = f_value.call(&arg_values)?;
-                    Ok(box_value(result_value))
+                    value_to_reply(env, result_value)
                 })();
-                reply(id, result.map(LispReplyValue::Ptr));
+                reply(id, result);
             }
             LispRequest::TypeOf { id, ptr } => {
                 let result = env.type_of(borrow(env, ptr)).map(box_value).map(LispReplyValue::Ptr);
