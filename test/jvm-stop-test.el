@@ -1,7 +1,7 @@
 ;;; jvm-stop-test.el --- Tests for jvm-stop -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (ert-deftest emacs-jni-jvm-stop-test/stop-from-ready ()
   (should (eq (jvm-start-sync) 'ready))

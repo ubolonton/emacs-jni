@@ -1,7 +1,7 @@
 ;;; jvm-pause-test.el --- Tests for jvm-pause/resume -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (ert-deftest emacs-jni-jvm-pause-test/pause-then-resume ()
   (should (eq (jvm-start-sync) 'ready))

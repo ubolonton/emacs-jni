@@ -1,7 +1,7 @@
 ;;; jvm-clj-test.el --- Tests for built-in Lisp access from Clojure -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 (require 'jvm-clj)
 
 (defvar jvm-clj-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR")

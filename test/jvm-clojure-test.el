@@ -1,7 +1,7 @@
 ;;; jvm-clojure-test.el --- Tests for Clojure eval + nREPL -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (defvar jvm-clojure-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR")
   "Directory containing Clojure/nREPL jars, or nil if unset.

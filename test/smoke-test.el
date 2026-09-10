@@ -1,7 +1,7 @@
 ;;; smoke-test.el --- Smoke test for module loading -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (ert-deftest emacs-jni-smoke-test/module-loads-and-responds ()
   (should (eq (jvm-ping) t)))

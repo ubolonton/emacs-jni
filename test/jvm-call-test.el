@@ -1,7 +1,7 @@
 ;;; jvm-call-test.el --- Tests for jvm-call/jvm-new -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (defvar jvm-call-test--calc-jar
   (expand-file-name "../target/test-fixtures/calc.jar"

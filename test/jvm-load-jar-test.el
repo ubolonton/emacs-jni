@@ -1,7 +1,7 @@
 ;;; jvm-load-jar-test.el --- Tests for jvm-load-jar -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (ert-deftest emacs-jni-jvm-load-jar-test/loads-fixture-jar ()
   (should (eq (jvm-start-sync) 'ready))

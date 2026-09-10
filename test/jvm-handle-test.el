@@ -1,7 +1,7 @@
 ;;; jvm-handle-test.el --- Tests for the JVM-object user-ptr plumbing -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (ert-deftest emacs-jni-jvm-handle-test/round-trips-as-a-distinct-lisp-value ()
   (let ((h1 (jvm--test-make-handle))

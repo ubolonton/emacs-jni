@@ -1,7 +1,7 @@
 ;;; jvm-crash-test.el --- Tests for crash recovery -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (defun jvm--wait-for-status (target timeout)
   (let ((deadline (+ (float-time) timeout)))

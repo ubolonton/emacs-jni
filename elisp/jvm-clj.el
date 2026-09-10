@@ -1,6 +1,6 @@
 ;;; jvm-clj.el --- Clojure access to Emacs Lisp values -*- lexical-binding: t; -*-
 
-(require 'emacs-jni)
+(require 'jvm)
 
 (defvar jvm-clj-classpath nil
   "List of paths (jar files or directories) added to the JVM classpath
@@ -15,7 +15,7 @@ versions). `jvm-clj-start' additionally adds this package's own
   "Absolute path to this package's `clojure-src' directory.
 Computed at load time (`load-file-name'/`buffer-file-name' are only
 meaningful while this file itself is being loaded, unlike inside a
-function called later -- see `emacs-jni--module-path' for the same
+function called later -- see `jvm--module-path' for the same
 pattern).")
 
 (defun jvm-clj-start (&optional timeout)

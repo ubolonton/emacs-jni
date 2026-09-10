@@ -1,7 +1,7 @@
 ;;; jvm-invoke-test.el --- Tests for the JVM-calls-Lisp round trip -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (defvar jvm-invoke-test--calc-jar
   (expand-file-name "../target/test-fixtures/calc.jar"

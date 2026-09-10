@@ -1,7 +1,7 @@
 ;;; jvm-callback-wrap-test.el --- Tests for wrapping a Lisp fn as a JVM object -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'emacs-jni)
+(require 'jvm)
 
 (defvar jvm-callback-wrap-test--calc-jar
   (expand-file-name "../target/test-fixtures/calc.jar"
