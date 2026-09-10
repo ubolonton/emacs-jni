@@ -226,5 +226,50 @@ the outer `-sync' wrapper's own `accept-process-output' loop.\""
                   (emacs-jni.clj/is-not-nil? sym))")
               t)))
 
+(ert-deftest jvm-clj-test-require-symbol-is-callable ()
+  "require-symbol returns an IFn that funcalls the Lisp symbol."
+  (jvm-clj-test--ensure-ready)
+  ;; `jvm-clj-test--eval' reads CODE via `clojure.java.api.Clojure/read',
+  ;; which is `clojure.edn/read-string' -- edn has no `'' quote reader
+  ;; macro, so `'sym' would misread as a symbol literally named "'sym".
+  ;; Spell it out as `(quote sym)' instead; same semantics.
+  ;; `=' is numeric-only in Elisp; use `equal' for the string result.
+  (should
+   (equal (jvm-clj-test--eval
+           "((emacs-jni.clj/require-symbol (quote concat)) \"a\" \"b\")")
+          "ab"))
+  (should
+   (= (jvm-clj-test--eval
+       "(clojure.core/apply (emacs-jni.clj/require-symbol (quote +)) [1 2 3])")
+      6)))
+
+(ert-deftest jvm-clj-test-refer-symbols-defs-vars ()
+  "refer-symbols creates callable vars in the current namespace."
+  (jvm-clj-test--ensure-ready)
+  (should
+   (equal (jvm-clj-test--eval
+           "(do (emacs-jni.clj/refer-symbols concat) (concat \"x\" \"y\"))")
+          "xy")))
+
+(ert-deftest jvm-clj-test-require-function-is-early-bound ()
+  "require-function captures the function now; a later fset of the symbol
+does not change the imported function, while require-symbol tracks it."
+  (jvm-clj-test--ensure-ready)
+  (should
+   (equal
+    (jvm-clj-test--eval
+     "(do (emacs-jni.clj/apply (emacs-jni.clj/intern \"defalias\")
+            (emacs-jni.clj/intern \"jvm-clj-test-fn\") (emacs-jni.clj/intern \"car\"))
+          (let [early (emacs-jni.clj/require-function (quote jvm-clj-test-fn))
+                late  (emacs-jni.clj/require-symbol (quote jvm-clj-test-fn))]
+            (emacs-jni.clj/apply (emacs-jni.clj/intern \"defalias\")
+              (emacs-jni.clj/intern \"jvm-clj-test-fn\") (emacs-jni.clj/intern \"cdr\"))
+            (let [lst (emacs-jni.clj/apply (emacs-jni.clj/intern \"list\") 1 2 3)]
+              (str (early lst) \"|\" (str (late lst))))))")
+    ;; early still `car' -> 1; late now `cdr' -> opaque LispObject (2 3),
+    ;; whose prin1 is "(2 3)". Returned as a string to avoid depending on
+    ;; vector return marshaling in jvm-clojure-eval-string.
+    "1|(2 3)")))
+
 (provide 'jvm-clj-test)
 ;;; jvm-clj-test.el ends here

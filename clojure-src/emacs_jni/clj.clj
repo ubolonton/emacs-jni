@@ -78,6 +78,74 @@
     (<-lisp (deref (apply* f args)))
     (catch Throwable t (throw-lisp-exit t))))
 
+(defn- sym->lisp-name
+  "The Lisp symbol name for SYM (a Clojure symbol, keyword, or string),
+  preserving a namespace segment as a `foo/bar` Lisp name."
+  [sym]
+  (if-let [ns (and (or (symbol? sym) (keyword? sym)) (namespace sym))]
+    (str ns "/" (name sym))
+    (name sym)))
+
+(defn- run-lisp
+  "Apply RECEIVER (a LispSymbol marker or a function LispObject) to ARGS
+  (a seq), blocking for the converted result; a non-local exit surfaces as
+  an ex-info, same as `apply`."
+  [receiver args]
+  (try
+    (<-lisp (deref (apply* receiver args)))
+    (catch Throwable t (throw-lisp-exit t))))
+
+(defmacro ^:private def-lisp-callable
+  "Define a deftype NAME wrapping a `receiver`, applying it to its call
+  args through `run-lisp`. Covers direct arities 0-5 plus applyTo (for
+  `clojure.core/apply` and higher arities)."
+  [name]
+  `(deftype ~name [~'receiver]
+     clojure.lang.IFn
+     (invoke [_#] (run-lisp ~'receiver []))
+     (invoke [_# a#] (run-lisp ~'receiver [a#]))
+     (invoke [_# a# b#] (run-lisp ~'receiver [a# b#]))
+     (invoke [_# a# b# c#] (run-lisp ~'receiver [a# b# c#]))
+     (invoke [_# a# b# c# d#] (run-lisp ~'receiver [a# b# c# d#]))
+     (invoke [_# a# b# c# d# e#] (run-lisp ~'receiver [a# b# c# d# e#]))
+     (applyTo [_# args#] (run-lisp ~'receiver (seq args#)))))
+
+;; Late binding: wraps a symbol-name marker; each call re-funcalls the
+;; symbol, so a later redefinition is picked up.
+(def-lisp-callable LispSymbolFn)
+
+;; Early binding: wraps the resolved function object; each call applies
+;; that same object.
+(def-lisp-callable LispFunctionFn)
+
+(defn require-symbol
+  "Import Lisp symbol SYM as a callable value (late binding, like
+  `emacs::use_symbols!`). Returns a LispSymbolFn: call it to funcall SYM."
+  [sym]
+  (->LispSymbolFn (LispSymbol. (sym->lisp-name sym) false)))
+
+(defmacro refer-symbols
+  "Define a var per SYM in the current namespace, each the LispSymbolFn
+  from `require-symbol`. So `(refer-symbols message)` makes
+  `(message \"hi\")` call Lisp `message`."
+  [& syms]
+  `(do ~@(map (fn [s] `(def ~s (require-symbol '~s))) syms)))
+
+(defn require-function
+  "Import Lisp function SYM as a callable value (early binding, like
+  `emacs::use_functions!`). Resolves `indirect-function` now and holds the
+  function object; a later redefinition of SYM does not affect it."
+  [sym]
+  (let [f (apply (LispSymbol. "indirect-function" false)
+                 (LispSymbol. (sym->lisp-name sym) false))]
+    (->LispFunctionFn f)))
+
+(defmacro refer-functions
+  "Define a var per SYM in the current namespace, each the LispFunctionFn
+  from `require-function`."
+  [& syms]
+  `(do ~@(map (fn [s] `(def ~s (require-function '~s))) syms)))
+
 (defn type-of
   "Return V's Lisp type as a Clojure symbol (e.g. symbol, string, cons)."
   [v]
