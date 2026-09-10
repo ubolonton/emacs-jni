@@ -1,4 +1,4 @@
-(ns dev.ublt.emacs.clj
+(ns emacs-jni.clj
   "Hold and manipulate Emacs Lisp values from Clojure.
 
   Scalars and strings (numbers, strings, nil, t) come back as Clojure
