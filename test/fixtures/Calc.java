@@ -38,7 +38,7 @@ public class Calc {
     // a real Java object (`this`, a Calc instance) rather than a primitive,
     // so the Lisp callback receives a `(jvm-handle N)` wire tag as one of
     // its ARGS -- see `jvm--dispatch-message`'s `invoke` case in
-    // elisp/emacs-jni.el.
+    // elisp/jvm.el.
     public Object callWithSelf(emacs_jni.core.LispCallable fn) throws Exception {
         return fn.call(this).get(10, java.util.concurrent.TimeUnit.SECONDS);
     }

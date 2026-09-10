@@ -242,7 +242,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
         Err(e) => {
             channel::send(&protocol::log_message(
                 "error",
-                &format!("failed to define emacs_jni shim classes: {e}"),
+                &format!("failed to define emacs_jni.core shim classes: {e}"),
             ));
         }
     }

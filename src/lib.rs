@@ -121,7 +121,7 @@ fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
 /// request's `Env` op on this (the main) thread — the module-primitive
 /// half of the built-in-Lisp-access design (see design spec, "Request/
 /// reply flow"). Called from `jvm--dispatch-message`'s `(lisp-request)`
-/// case (`elisp/emacs-jni.el`), itself triggered by a JVM thread's
+/// case (`elisp/jvm.el`), itself triggered by a JVM thread's
 /// `channel::send`-based wakeup after enqueuing a request (`shim.rs`'s
 /// `Lisp.*`/`LispRefReleaseNotifier` natives).
 #[defun(mod_in_name = false, name = "jvm--service-lisp-requests")]
@@ -132,7 +132,7 @@ fn jvm_service_lisp_requests(env: &Env) -> Result<()> {
 /// Replies to a pending JVM-initiated `invoke` request: RESULT is either
 /// the Lisp function's return value (OK is `t`) or a formatted error
 /// message (OK is `nil`), per `jvm--dispatch-message`'s `invoke` case in
-/// `elisp/emacs-jni.el`. Sends `Cmd::InvokeReply` to the worker thread,
+/// `elisp/jvm.el`. Sends `Cmd::InvokeReply` to the worker thread,
 /// which resolves (or exceptionally completes) the `CompletableFuture`
 /// `shim::lisp_function_call` handed back to Java — the reverse direction
 /// of `jvm--call`. Silently drops the reply (like every other `worker::
@@ -146,7 +146,7 @@ fn jvm_invoke_reply(id: u64, ok: Value, result: Value) -> Result<()> {
     // Lisp has no dedicated boolean type -- see `lisp_value_to_arg`'s own
     // note on this same point), so OK is received as a raw `Value` and
     // checked for Lisp truthiness directly, matching `jvm--invoke-reply`'s
-    // two call sites in `elisp/emacs-jni.el`, which always pass literally
+    // two call sites in `elisp/jvm.el`, which always pass literally
     // `t` or `nil`.
     let ok = ok.is_not_nil();
     let arg = if ok {

@@ -55,7 +55,7 @@ pub fn log_message(level: &str, message: &str) -> String {
 /// (plain error/log text), not full Lisp reader syntax.
 ///
 /// Escaping `\n`/`\r` (not just `"`/`\`) matters because the wire protocol
-/// is newline-delimited: `jvm--process-filter` (elisp/emacs-jni.el) splits
+/// is newline-delimited: `jvm--process-filter` (elisp/jvm.el) splits
 /// incoming bytes into one message per literal `\n` *before* calling `read`
 /// on each line. A raw newline embedded inside a quoted string here — e.g.
 /// a multi-line Java exception's `to_string()`, which a `CaughtJavaException`

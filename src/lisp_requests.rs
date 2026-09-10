@@ -166,7 +166,14 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispReplyValue {
             let d = boxed(value_to_reply(env, unsafe { data.value(env) }));
             match (s, d) {
                 (Some(symbol), Some(data)) => LispReplyValue::Signal { symbol, data },
-                _ => fallback_signal(&format!("{e}")),
+                // One side may have marshaled to a `Ptr` (already `box_value`d
+                // a `GlobalRef`) while the other failed. That surviving box is
+                // dropped here, so free its ref first to avoid a leak.
+                (s, d) => {
+                    free_reply_ptr(env, s);
+                    free_reply_ptr(env, d);
+                    fallback_signal(&format!("{e}"))
+                }
             }
         }
         Some(ErrorKind::Throw { tag, value }) => {
@@ -174,15 +181,36 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispReplyValue {
             let v = boxed(value_to_reply(env, unsafe { value.value(env) }));
             match (t, v) {
                 (Some(tag), Some(value)) => LispReplyValue::Throw { tag, value },
-                _ => fallback_signal(&format!("{e}")),
+                (t, v) => {
+                    free_reply_ptr(env, t);
+                    free_reply_ptr(env, v);
+                    fallback_signal(&format!("{e}"))
+                }
             }
         }
         _ => fallback_signal(&format!("{e}")),
     }
 }
 
+/// Reclaims and frees the boxed `GlobalRef` inside V if it is a `Ptr` — for
+/// the error-fallback path, where a marshaled component (an `Ok(Ptr)` that
+/// already ran `box_value`) is discarded instead of being handed to Java. No
+/// Java `LispObject`/Cleaner was ever created for this ptr, so this is the
+/// one and only free of it. A `None` or non-`Ptr` value is a no-op.
+fn free_reply_ptr(env: &Env, v: Option<Box<LispReplyValue>>) {
+    if let Some(b) = v {
+        if let LispReplyValue::Ptr(ptr) = *b {
+            let gref = unsafe { Box::from_raw(ptr as *mut GlobalRef) };
+            let _ = gref.free(env);
+        }
+    }
+}
+
 /// A `Signal` reply for a non-`ErrorKind` error: symbol `error`, data the
 /// message string. Keeps every failure arriving at Clojure as a signal.
+/// Divergence from spec §2 by intent: `data` is a bare string, not a
+/// one-element Lisp list -- this path has no `Env` to build a list and fires
+/// only for Rust-internal errors, never a genuine Lisp signal.
 fn fallback_signal(message: &str) -> LispReplyValue {
     LispReplyValue::Signal {
         symbol: Box::new(LispReplyValue::Symbol { name: "error".to_string(), keyword: false }),
@@ -244,7 +272,7 @@ fn value_to_reply(env: &Env, value: Value) -> EmacsResult<LispReplyValue> {
 /// Drains the request queue and runs each request's `Env` op, in the
 /// order `drain` returned them. Registered as `#[defun]
 /// jvm--service-lisp-requests` (`lib.rs`), called from `jvm--dispatch-
-/// message`'s `(lisp-request)` case (`elisp/emacs-jni.el`).
+/// message`'s `(lisp-request)` case (`elisp/jvm.el`).
 ///
 /// Must not reorder or batch-by-kind — see spec "Ordering invariant": a
 /// `FreeRef` is only sound to run exactly when it's reached in this order,

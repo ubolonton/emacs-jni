@@ -62,8 +62,8 @@ until Emacs services it on its main thread.
 | `type-of` | `[v]` | a Clojure symbol (the Lisp type) |
 | `is-not-nil?` | `[v]` | a boolean |
 | `eq` | `[a b]` | a boolean |
-| `lisp-signal?` | `[e]` | true if E is a `::lisp-signal` ex-info thrown by `apply`/`apply-async` |
-| `lisp-throw?` | `[e]` | true if E is a `::lisp-throw` ex-info thrown by `apply`/`apply-async` |
+| `lisp-signal?` | `[e]` | true if E is a `::lisp-signal` ex-info (the exception `apply` throws; for `apply-async`, unwrap the `ExecutionException` first — see below) |
+| `lisp-throw?` | `[e]` | true if E is a `::lisp-throw` ex-info (the exception `apply` throws; for `apply-async`, unwrap the `ExecutionException` first — see below) |
 
 `f` and each of `args` may be a Clojure symbol or keyword (→ a Lisp
 symbol/keyword), a plain scalar (string, number, boolean, `nil` → the

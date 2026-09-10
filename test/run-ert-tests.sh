@@ -16,7 +16,7 @@ jar cf target/test-fixtures/greeter.jar -C target/test-fixtures Greeter.class
 export EMACS_JNI_GREETER_JAR="$(pwd)/target/test-fixtures/greeter.jar"
 
 # `cargo build` (via build.rs) compiles the emacs_jni.core.{LispCallable,
-# LispFunction,LispError} shim classes into target/emacs-jni-shim-classes.
+# LispFunction,LispNonLocalExit} shim classes into target/emacs-jni-shim-classes.
 # Calc.java references emacs_jni.core.LispCallable (isLispCallable, added in
 # Task 6), so it must be compiled against that output — meaning this must
 # run before compiling Calc.java, not after, and Calc's javac invocation
