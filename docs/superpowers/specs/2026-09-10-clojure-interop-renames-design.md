@@ -134,12 +134,13 @@ Result: `((require-symbol 'message) "foo")`, and after
 
 ### Early binding (function)
 
-- `(defn require-function [sym])` → resolves `(symbol-function sym)` now
+- `(defn require-function [sym])` → resolves `(indirect-function sym)` now
   and wraps the returned function `LispObject` in a `LispFunctionFn`
-  (`deftype`, `clojure.lang.IFn`). Each `invoke` applies that captured
-  function object — early binding (the `use_functions!` analog); a later
-  redefinition of the Lisp symbol does not affect an already-imported
-  function.
+  (`deftype`, `clojure.lang.IFn`). `indirect-function` chases symbol
+  indirection, so the captured value is the real function object, not an
+  alias symbol. Each `invoke` applies that captured function object —
+  early binding (the `use_functions!` analog); a later redefinition of the
+  Lisp symbol does not affect an already-imported function.
 - `(defmacro refer-functions [& syms])` → analogous to `refer-symbols`.
 
 Both wrapper types delegate `invoke` to the same `apply` used elsewhere;
