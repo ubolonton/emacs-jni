@@ -86,11 +86,11 @@ pub fn lisp_arg_to_jvalue<'local>(
         // handle number). Wrapping it as a `LispFunction' here is what
         // makes "a Lisp function crosses into Java as a real object" a
         // reality: `LispFunction`'s single constructor just stores the
-        // handle (see `java/emacs_jni/LispFunction.java`), for later
+        // handle (see `java/emacs_jni/core/LispFunction.java`), for later
         // `invoke`/`InvokeReply` round-tripping (Task 7) to call back
         // into Lisp by that handle.
         (LispArg::Callback(handle), _) => {
-            let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/LispFunction"))?;
+            let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
             let obj = env.new_object(
                 &lisp_function_class,
                 jni::jni_sig!((handle: long) -> void),
@@ -125,7 +125,7 @@ fn register_release_on_gc<'local>(
     obj: &JObject<'local>,
     handle: u64,
 ) -> jni::errors::Result<()> {
-    let notifier_class = env.find_class(jni::jni_str!("emacs_jni/ReleaseNotifier"))?;
+    let notifier_class = env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
     let notifier = env.new_object(
         &notifier_class,
         jni::jni_sig!((handle: long) -> void),

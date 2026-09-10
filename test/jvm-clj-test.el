@@ -35,7 +35,7 @@ success, and return its RESULT."
 (defun jvm-clj-test--prin1 (lisp-object)
   "Call `prin1ToString' on the wrapped Java LISP-OBJECT via plain
 `jvm-call-sync' reflection (the same generic path any other JVM-object
-method call uses -- a Java `emacs_jni.LispObject' has no special status on
+method call uses -- a Java `emacs_jni.core.LispObject' has no special status on
 the Lisp side, it's just an opaque wrapped handle, per the design spec's
 non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
   (let ((result (jvm-call-sync lisp-object "prin1ToString" nil)))
@@ -152,7 +152,7 @@ non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
 
 (ert-deftest emacs-jni-jvm-clj-test/apply-lisp-error-completes-the-future-exceptionally ()
   "A Lisp `error' during `apply' completes the future exceptionally with
-`emacs_jni.LispError', so `deref' throws it (wrapped in the
+`emacs_jni.core.LispError', so `deref' throws it (wrapped in the
 `CompletableFuture'-standard `ExecutionException'). Design spec flags
 this path as load-bearing (\"A Lisp error becomes an exceptional future
 completion with LispError, which surfaces on deref\"). `apply' derefs
@@ -168,10 +168,10 @@ actually catches on."
                (dev.ublt.emacs.clj/apply (dev.ublt.emacs.clj/intern \"error\") \"boom\")
                \"no-throw\"
                (catch java.util.concurrent.ExecutionException e
-                 (if (instance? emacs_jni.LispError (.getCause e))
+                 (if (instance? emacs_jni.core.LispError (.getCause e))
                    \"lisp-error\"
                    (str \"other-cause:\" (.getName (.getClass (.getCause e))))))
-               (catch emacs_jni.LispError e \"lisp-error\")
+               (catch emacs_jni.core.LispError e \"lisp-error\")
                (catch Throwable e (str \"other:\" (.getName (.getClass e)))))")
            "lisp-error")))
 

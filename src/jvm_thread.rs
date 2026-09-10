@@ -180,7 +180,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     let init_args = builder.build().map_err(|e| e.to_string())?;
     let vm = JavaVM::new(init_args).map_err(|e| e.to_string())?;
 
-    // Defines the `emacs_jni.{LispCallable,LispFunction,LispError}` shim
+    // Defines the `emacs_jni.core.{LispCallable,LispFunction,LispError}` shim
     // classes (Task 1) into this JVM, per `shim::define_classes`'s own doc
     // comment: "must be called once, right after the JVM is created,
     // before anything else in this crate references those classes." No
@@ -188,7 +188,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     // `shim.rs`'s own unit test, against its own throwaway JVM) — Task 6
     // is the first thing that references a shim class outside that test
     // (`marshal::lisp_arg_to_jvalue`'s `LispArg::Callback` arm calls
-    // `find_class(emacs_jni/LispFunction)` on every `jvm-call` argument
+    // `find_class(emacs_jni/core/LispFunction)` on every `jvm-call` argument
     // that turns out to be a Lisp function), so without this, that
     // `find_class` would throw `ClassNotFoundException` against a real
     // JVM started via `jvm-start`.
@@ -496,7 +496,7 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::
             let crate::commands::LispArg::Str(message) = result else {
                 return Ok(());
             };
-            let lisp_error_class = env.find_class(jni::jni_str!("emacs_jni/LispError"))?;
+            let lisp_error_class = env.find_class(jni::jni_str!("emacs_jni/core/LispError"))?;
             let jmessage = env.new_string(&message)?;
             let error = env.new_object(
                 &lisp_error_class,
@@ -543,7 +543,7 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispReplyValu
         if let crate::commands::LispReplyValue::Error(message) = value {
             // Same "always a plain formatted message" shape as
             // `handle_invoke_reply`'s own `ok = false` case.
-            let lisp_error_class = env.find_class(jni::jni_str!("emacs_jni/LispError"))?;
+            let lisp_error_class = env.find_class(jni::jni_str!("emacs_jni/core/LispError"))?;
             let jmessage = env.new_string(&message)?;
             let error = env.new_object(
                 &lisp_error_class,
@@ -584,7 +584,7 @@ fn build_lisp_reply_object<'local>(
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
     match value {
         crate::commands::LispReplyValue::Ptr(ptr) => {
-            let class = env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
+            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
             env.new_object(&class, jni::jni_sig!((ptr: long) -> void), &[jni::objects::JValue::Long(ptr)])
         }
         crate::commands::LispReplyValue::Bool(b) => {
@@ -633,7 +633,7 @@ fn build_lisp_reply_object<'local>(
         }
         crate::commands::LispReplyValue::Symbol { name, keyword } => {
             let jname: jni::objects::JObject = env.new_string(&name)?.into();
-            let class = env.find_class(jni::jni_str!("emacs_jni/LispSymbol"))?;
+            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
             env.new_object(
                 &class,
                 jni::jni_sig!((name: java.lang.String, keyword: boolean) -> void),

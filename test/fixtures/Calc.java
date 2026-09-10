@@ -22,10 +22,10 @@ public class Calc {
     }
 
     public static boolean isLispCallable(Object obj) {
-        return obj instanceof emacs_jni.LispCallable;
+        return obj instanceof emacs_jni.core.LispCallable;
     }
 
-    public static Object callWithArg(emacs_jni.LispCallable fn, long n) throws Exception {
+    public static Object callWithArg(emacs_jni.core.LispCallable fn, long n) throws Exception {
         // A synchronous-looking wait is fine INSIDE A TEST FIXTURE (not
         // inside the shim or any real interop path) -- this just proves
         // the round trip completes with the right value; production Java
@@ -39,7 +39,7 @@ public class Calc {
     // so the Lisp callback receives a `(jvm-handle N)` wire tag as one of
     // its ARGS -- see `jvm--dispatch-message`'s `invoke` case in
     // elisp/emacs-jni.el.
-    public Object callWithSelf(emacs_jni.LispCallable fn) throws Exception {
+    public Object callWithSelf(emacs_jni.core.LispCallable fn) throws Exception {
         return fn.call(this).get(10, java.util.concurrent.TimeUnit.SECONDS);
     }
 

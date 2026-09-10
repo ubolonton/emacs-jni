@@ -1,27 +1,27 @@
 use jni::objects::{JClass, JClassLoader, JObject, JObjectArray, JString, JThrowable, JValue, JValueOwned};
 
 const LISP_CALLABLE_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispCallable.class"));
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispCallable.class"));
 const LISP_FUNCTION_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispFunction.class"));
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispFunction.class"));
 const LISP_ERROR_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispError.class"));
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispError.class"));
 const RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/target/emacs-jni-shim-classes/emacs_jni/ReleaseNotifier.class"
+    "/target/emacs-jni-shim-classes/emacs_jni/core/ReleaseNotifier.class"
 ));
 const LISP_OBJECT_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispObject.class"));
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispObject.class"));
 const LISP_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/Lisp.class"));
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/Lisp.class"));
 const LISP_REF_RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/target/emacs-jni-shim-classes/emacs_jni/LispRefReleaseNotifier.class"
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispRefReleaseNotifier.class"
 ));
 const LISP_SYMBOL_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/LispSymbol.class"));
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispSymbol.class"));
 
-/// Defines the `emacs_jni.{LispCallable,LispFunction,LispError,
+/// Defines the `emacs_jni.core.{LispCallable,LispFunction,LispError,
 /// ReleaseNotifier,LispObject,Lisp,LispRefReleaseNotifier}` shim classes
 /// into the currently-attached JVM, using the *platform* classloader
 /// (not the system/application classloader, despite this file's original
@@ -40,7 +40,7 @@ const LISP_SYMBOL_CLASS: &[u8] =
 /// `URLClassLoader` side (loader parents aren't searched by their
 /// children's siblings), which was a real bug this task found: any jar
 /// class using a shim type (e.g. a method parameter typed
-/// `emacs_jni.LispCallable`) threw `NoClassDefFoundError` wrapped in
+/// `emacs_jni.core.LispCallable`) threw `NoClassDefFoundError` wrapped in
 /// `InvocationTargetException` at the first `Method.invoke`, since the
 /// jar's own `URLClassLoader` could never resolve the shim classes that
 /// existed only over in the system loader. Called from
@@ -95,31 +95,31 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     // it) for the JVM's verifier to resolve the interface reference.
     // LispError and ReleaseNotifier have no such dependency and can go
     // anywhere.
-    define_if_absent(env, &platform_loader, "emacs_jni/LispCallable", LISP_CALLABLE_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/LispFunction", LISP_FUNCTION_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/LispError", LISP_ERROR_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/ReleaseNotifier", RELEASE_NOTIFIER_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispCallable", LISP_CALLABLE_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispFunction", LISP_FUNCTION_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispError", LISP_ERROR_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/ReleaseNotifier", RELEASE_NOTIFIER_CLASS)?;
     // LispRefReleaseNotifier has no class-loading dependency on LispObject
     // (LispObject's constructor only *references* it inside a method body,
     // which the verifier resolves lazily) -- defined first anyway, out of
     // the same caution as LispCallable/LispFunction's ordering above.
-    define_if_absent(env, &platform_loader, "emacs_jni/LispRefReleaseNotifier", LISP_REF_RELEASE_NOTIFIER_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/LispObject", LISP_OBJECT_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/Lisp", LISP_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispRefReleaseNotifier", LISP_REF_RELEASE_NOTIFIER_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispObject", LISP_OBJECT_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/Lisp", LISP_CLASS)?;
     // Pure data carrier (no natives, no dependencies) -- the wire form for
     // a symbol/keyword crossing to/from Clojure.
-    define_if_absent(env, &platform_loader, "emacs_jni/LispSymbol", LISP_SYMBOL_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispSymbol", LISP_SYMBOL_CLASS)?;
 
     // Sanity check: confirm find_class can see what was just defined, the
     // same way every later task will look these classes up.
-    env.find_class(jni::jni_str!("emacs_jni/LispCallable"))?;
-    env.find_class(jni::jni_str!("emacs_jni/LispFunction"))?;
-    env.find_class(jni::jni_str!("emacs_jni/LispError"))?;
-    env.find_class(jni::jni_str!("emacs_jni/ReleaseNotifier"))?;
-    env.find_class(jni::jni_str!("emacs_jni/LispRefReleaseNotifier"))?;
-    env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
-    env.find_class(jni::jni_str!("emacs_jni/Lisp"))?;
-    env.find_class(jni::jni_str!("emacs_jni/LispSymbol"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispError"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/Lisp"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
 
     register_lisp_function_native(env)?;
     register_release_notifier_native(env)?;
@@ -159,7 +159,7 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
 /// callback runs, which instead completes the future exceptionally via
 /// `LispError`, see `jvm_thread::handle_invoke_reply`).
 fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> {
-    let class = env.find_class(jni::jni_str!("emacs_jni/LispFunction"))?;
+    let class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
     const CALL_METHOD: jni::NativeMethod = jni::native_method! {
         name = "call",
         fn lisp_function_call(args: [java.lang.Object]) -> java.util.concurrent.CompletableFuture,
@@ -217,7 +217,7 @@ fn lisp_function_call<'local>(
 /// `extern "system" fn` + manual `RegisterNatives` call). `run` takes no
 /// arguments and returns `void`, per `Runnable#run`'s own signature.
 fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<()> {
-    let class = env.find_class(jni::jni_str!("emacs_jni/ReleaseNotifier"))?;
+    let class = env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
     const RUN_METHOD: jni::NativeMethod = jni::native_method! {
         name = "run",
         fn release_notifier_run() -> void,
@@ -314,13 +314,13 @@ fn define_if_absent(
 /// its JVM thread until Emacs pumps... Mitigated by a JVM-side timeout."
 const LISP_REQUEST_TIMEOUT_SECS: i64 = 30;
 
-/// Registers the 5 static natives on `emacs_jni.Lisp` — the JVM-side entry
+/// Registers the 5 static natives on `emacs_jni.core.Lisp` — the JVM-side entry
 /// points for Clojure to hold and manipulate Lisp values (design spec
 /// "Built-in Lisp access from Clojure"). Same `native_method!` pattern as
 /// `register_lisp_function_native`; batched into one
 /// `register_native_methods` call since they all belong to the same class.
 fn register_lisp_native(env: &mut jni::Env) -> jni::errors::Result<()> {
-    let class = env.find_class(jni::jni_str!("emacs_jni/Lisp"))?;
+    let class = env.find_class(jni::jni_str!("emacs_jni/core/Lisp"))?;
     // Params/returns are `java.lang.Object`, not `LispObject`: a symbol or
     // keyword crosses as a `LispSymbol` marker, a scalar as its boxed Java
     // value, anything else as a `LispObject` -- one classifier
@@ -355,7 +355,7 @@ fn register_lisp_native(env: &mut jni::Env) -> jni::errors::Result<()> {
 
 /// Registers `LispObject.prin1ToString`'s native implementation.
 fn register_lisp_object_native(env: &mut jni::Env) -> jni::errors::Result<()> {
-    let class = env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
+    let class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
     const PRIN1_TO_STRING_METHOD: jni::NativeMethod = jni::native_method! {
         name = "prin1ToString",
         fn lisp_object_prin1_to_string() -> java.lang.String,
@@ -366,7 +366,7 @@ fn register_lisp_object_native(env: &mut jni::Env) -> jni::errors::Result<()> {
 /// Registers `LispRefReleaseNotifier.run`'s native implementation — the
 /// Lisp-access counterpart of `register_release_notifier_native`.
 fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<()> {
-    let class = env.find_class(jni::jni_str!("emacs_jni/LispRefReleaseNotifier"))?;
+    let class = env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
     const RUN_METHOD: jni::NativeMethod = jni::native_method! {
         name = "run",
         fn lisp_ref_release_notifier_run() -> void,
@@ -573,8 +573,8 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
 /// argument, or a `typeOf`/`isNotNil`/`eq` operand) into a `LispRequestArg`,
 /// per spec "Argument conversion":
 /// - `null` → `Nil`;
-/// - an `emacs_jni.LispObject` → carried by its `ptr`;
-/// - an `emacs_jni.LispSymbol` marker (a Clojure symbol/keyword the
+/// - an `emacs_jni.core.LispObject` → carried by its `ptr`;
+/// - an `emacs_jni.core.LispSymbol` marker (a Clojure symbol/keyword the
 ///   namespace wrapped) → `Symbol { name, keyword }`;
 /// - everything else → the same `marshal::jvm_value_to_lisp_arg` an
 ///   ordinary `jvm-call` argument would go through.
@@ -590,11 +590,11 @@ fn object_to_lisp_request_arg<'local>(
     if elem.is_null() {
         return Ok(LispRequestArg::Scalar(crate::commands::LispArg::Nil));
     }
-    let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
+    let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
     if env.is_instance_of(&elem, &lisp_object_class)? {
         return Ok(LispRequestArg::Obj(get_ptr_field(env, &elem)?));
     }
-    let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/LispSymbol"))?;
+    let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
     if env.is_instance_of(&elem, &lisp_symbol_class)? {
         let name_obj = env.get_field(&elem, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?.l()?;
         let name = env.cast_local::<JString>(name_obj)?;
@@ -659,19 +659,19 @@ mod tests {
             define_classes(env)?;
             // Confirm LispFunction really implements LispCallable, not
             // just that both classes independently exist.
-            let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/LispFunction"))?;
-            let lisp_callable_class = env.find_class(jni::jni_str!("emacs_jni/LispCallable"))?;
+            let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
+            let lisp_callable_class = env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
             let is_assignable = env.is_assignable_from(&lisp_function_class, &lisp_callable_class)?;
             assert!(is_assignable, "LispFunction should implement LispCallable");
             // Same shape of check for ReleaseNotifier/LispRefReleaseNotifier:
             // confirm both really implement Runnable.
             let runnable_class = env.find_class(jni::jni_str!("java/lang/Runnable"))?;
-            let release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/ReleaseNotifier"))?;
+            let release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
             assert!(
                 env.is_assignable_from(&release_notifier_class, &runnable_class)?,
                 "ReleaseNotifier should implement Runnable"
             );
-            let lisp_ref_release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/LispRefReleaseNotifier"))?;
+            let lisp_ref_release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
             assert!(
                 env.is_assignable_from(&lisp_ref_release_notifier_class, &runnable_class)?,
                 "LispRefReleaseNotifier should implement Runnable"
@@ -698,7 +698,7 @@ mod tests {
         let vm = create_test_jvm();
         vm.attach_current_thread(|env| -> jni::errors::Result<()> {
             define_classes(env)?;
-            let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/LispObject"))?;
+            let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
             // `LispObject`'s constructor is package-private, but JNI
             // construction (unlike ordinary Java code) isn't subject to
             // that -- same reasoning as `get_handle_field`'s doc comment.

@@ -29,7 +29,7 @@ pub enum LispRequestArg {
     /// A `LispObject`, carried by its `ptr` — bound to a `Value` on the
     /// main thread, never freed here (see `borrow`).
     Obj(i64),
-    /// A Clojure symbol or keyword (an `emacs_jni.LispSymbol` marker) —
+    /// A Clojure symbol or keyword (an `emacs_jni.core.LispSymbol` marker) —
     /// interned on the main thread. `name` is the bare name; a keyword is
     /// interned with a leading `:`.
     Symbol { name: String, keyword: bool },

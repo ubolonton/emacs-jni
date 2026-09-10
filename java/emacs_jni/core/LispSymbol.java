@@ -1,4 +1,4 @@
-package emacs_jni;
+package emacs_jni.core;
 
 // Wire form for a Lisp symbol or keyword crossing to/from Clojure. The real
 // clojure.lang.Symbol/Keyword live in the child URLClassLoader, unreachable

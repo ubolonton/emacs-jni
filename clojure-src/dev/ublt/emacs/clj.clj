@@ -8,7 +8,7 @@
 
   See design spec
   docs/superpowers/specs/2026-09-08-clojure-lisp-access-design.md."
-  (:import [emacs_jni Lisp LispObject LispSymbol]
+  (:import [emacs_jni.core Lisp LispObject LispSymbol]
            [java.util.function Function]))
 
 (defn- ->lisp

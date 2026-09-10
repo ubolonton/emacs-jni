@@ -56,7 +56,7 @@ pub enum LispReplyValue {
     /// `BigInteger`, matching the `jvm-call` marshalling table.
     BigInt(String),
     Str(String),
-    /// An interned Lisp symbol or keyword — becomes an `emacs_jni.LispSymbol`
+    /// An interned Lisp symbol or keyword — becomes an `emacs_jni.core.LispSymbol`
     /// marker the `dev.ublt.emacs.clj` namespace turns into a Clojure
     /// symbol/keyword. `name` is the bare name (no leading `:`).
     Symbol { name: String, keyword: bool },

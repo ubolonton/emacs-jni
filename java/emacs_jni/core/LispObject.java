@@ -1,4 +1,4 @@
-package emacs_jni;
+package emacs_jni.core;
 
 import java.lang.ref.Cleaner;
 

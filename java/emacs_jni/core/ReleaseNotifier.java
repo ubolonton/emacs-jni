@@ -1,4 +1,4 @@
-package emacs_jni;
+package emacs_jni.core;
 
 // Registered as a java.lang.ref.Cleaner action on a LispFunction proxy (see
 // marshal.rs's register_release_on_gc). When the proxy becomes

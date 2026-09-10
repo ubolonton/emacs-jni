@@ -1,4 +1,4 @@
-package emacs_jni;
+package emacs_jni.core;
 
 // Registered as a java.lang.ref.Cleaner action on a LispObject (see
 // LispObject's constructor). When the LispObject becomes phantom-reachable,
