@@ -150,30 +150,34 @@ non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
                  "(emacs-jni.clj/apply (emacs-jni.clj/intern \"list\") 1 2 3)")))
     (should (equal (jvm-clj-test--prin1 result) "(1 2 3)"))))
 
-(ert-deftest emacs-jni-jvm-clj-test/apply-lisp-error-completes-the-future-exceptionally ()
-  "A Lisp `error' during `apply' completes the future exceptionally with
-`emacs_jni.core.LispError', so `deref' throws it (wrapped in the
-`CompletableFuture'-standard `ExecutionException'). Design spec flags
-this path as load-bearing (\"A Lisp error becomes an exceptional future
-completion with LispError, which surfaces on deref\"). `apply' derefs
-`apply-async's future internally, so it raises that exceptional
-completion here. Asserts on the exception TYPE, not its message text,
-since the message is the Rust-side `Display' of an `emacs::Error' -- an
-implementation detail, unlike the LispError contract the JVM caller
-actually catches on."
+(ert-deftest jvm-clj-test-apply-error-becomes-lisp-signal ()
+  "A Lisp `error' surfaces to Clojure as an ex-info tagged ::lisp-signal,
+carrying the signal symbol and data."
   (jvm-clj-test--ensure-ready)
-  (should (equal
-           (jvm-clj-test--eval
-            "(try
-               (emacs-jni.clj/apply (emacs-jni.clj/intern \"error\") \"boom\")
-               \"no-throw\"
-               (catch java.util.concurrent.ExecutionException e
-                 (if (instance? emacs_jni.core.LispError (.getCause e))
-                   \"lisp-error\"
-                   (str \"other-cause:\" (.getName (.getClass (.getCause e))))))
-               (catch emacs_jni.core.LispError e \"lisp-error\")
-               (catch Throwable e (str \"other:\" (.getName (.getClass e)))))")
-           "lisp-error")))
+  (should
+   (equal
+    (jvm-clj-test--eval
+     "(try (emacs-jni.clj/apply (emacs-jni.clj/intern \"error\") \"boom\")
+        (catch clojure.lang.ExceptionInfo e
+          (let [d (ex-data e)]
+            (str (:type d) \"|\" (:symbol d)))))")
+    ":emacs-jni.clj/lisp-signal|error")))
+
+(ert-deftest jvm-clj-test-throw-becomes-lisp-throw ()
+  "A Lisp `throw' surfaces to Clojure as an ex-info tagged ::lisp-throw,
+carrying tag and value."
+  (jvm-clj-test--ensure-ready)
+  (should
+   (equal
+    (jvm-clj-test--eval
+     "(let [f (emacs-jni.clj/intern \"eval\")
+            form (emacs-jni.clj/apply (emacs-jni.clj/intern \"read\")
+                                       \"(throw 'my-tag 42)\")]
+        (try (emacs-jni.clj/apply f form)
+          (catch clojure.lang.ExceptionInfo e
+            (let [d (ex-data e)]
+              (str (:type d) \"|\" (:tag d) \"|\" (:value d))))))")
+    ":emacs-jni.clj/lisp-throw|my-tag|42")))
 
 (ert-deftest emacs-jni-jvm-clj-test/type-of-returns-a-clojure-symbol ()
   (jvm-clj-test--ensure-ready)

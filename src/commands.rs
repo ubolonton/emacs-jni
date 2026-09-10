@@ -60,10 +60,13 @@ pub enum LispReplyValue {
     /// marker the `emacs-jni.clj` namespace turns into a Clojure
     /// symbol/keyword. `name` is the bare name (no leading `:`).
     Symbol { name: String, keyword: bool },
-    /// A Lisp `error` (or Rust-side signal) message — completes the
-    /// future exceptionally with a `LispError`, mirroring `InvokeReply`'s
-    /// `ok = false` case.
-    Error(String),
+    /// A Lisp `signal` — the future completes exceptionally with a
+    /// `LispNonLocalExit(SIGNAL, symbol, data)`. `symbol` and `data` are
+    /// nested, already-marshaled reply values (a symbol marker; the data
+    /// list as a `LispObject`).
+    Signal { symbol: Box<LispReplyValue>, data: Box<LispReplyValue> },
+    /// A Lisp `throw` — `LispNonLocalExit(THROW, tag, value)`.
+    Throw { tag: Box<LispReplyValue>, value: Box<LispReplyValue> },
 }
 
 #[derive(Debug)]

@@ -139,16 +139,55 @@ fn arg_to_value<'e>(env: &'e Env, arg: &LispRequestArg) -> EmacsResult<Value<'e>
     }
 }
 
-/// Sends a `Cmd::LispReply` for ID, converting an `Err` into
-/// `LispReplyValue::Error` (its `Display` text — matches
-/// `jvm_thread::handle_invoke_reply`'s use of a plain formatted message
-/// for a failed callback).
-fn reply(id: u64, result: EmacsResult<LispReplyValue>) {
+/// Sends a `Cmd::LispReply` for ID. An `Err` is converted to a `Signal`
+/// or `Throw` reply via `error_to_reply` (marshaling the signal symbol/
+/// data or throw tag/value through `value_to_reply`).
+fn reply(env: &Env, id: u64, result: EmacsResult<LispReplyValue>) {
     let value = match result {
         Ok(v) => v,
-        Err(e) => LispReplyValue::Error(format!("{e}")),
+        Err(e) => error_to_reply(env, e),
     };
     let _ = worker::send_command(Cmd::LispReply { id, value });
+}
+
+/// Converts an `emacs::Error` into a `LispReplyValue::{Signal,Throw}`. A
+/// `Signal`/`Throw` `ErrorKind` carries the real symbol/data or tag/value
+/// (each a `TempValue` bound with this `Env` -- sound here because `reply`
+/// runs on the main thread with the `Env` the failing call used). Anything
+/// else (a Rust-internal error, or a marshaling failure while building the
+/// nested values) collapses to a `Signal` whose symbol is `error` and
+/// whose data is the formatted message string.
+fn error_to_reply(env: &Env, e: emacs::Error) -> LispReplyValue {
+    use emacs::ErrorKind;
+    let boxed = |r: EmacsResult<LispReplyValue>| r.ok().map(Box::new);
+    match e.downcast_ref::<ErrorKind>() {
+        Some(ErrorKind::Signal { symbol, data }) => {
+            let s = boxed(value_to_reply(env, unsafe { symbol.value(env) }));
+            let d = boxed(value_to_reply(env, unsafe { data.value(env) }));
+            match (s, d) {
+                (Some(symbol), Some(data)) => LispReplyValue::Signal { symbol, data },
+                _ => fallback_signal(&format!("{e}")),
+            }
+        }
+        Some(ErrorKind::Throw { tag, value }) => {
+            let t = boxed(value_to_reply(env, unsafe { tag.value(env) }));
+            let v = boxed(value_to_reply(env, unsafe { value.value(env) }));
+            match (t, v) {
+                (Some(tag), Some(value)) => LispReplyValue::Throw { tag, value },
+                _ => fallback_signal(&format!("{e}")),
+            }
+        }
+        _ => fallback_signal(&format!("{e}")),
+    }
+}
+
+/// A `Signal` reply for a non-`ErrorKind` error: symbol `error`, data the
+/// message string. Keeps every failure arriving at Clojure as a signal.
+fn fallback_signal(message: &str) -> LispReplyValue {
+    LispReplyValue::Signal {
+        symbol: Box::new(LispReplyValue::Symbol { name: "error".to_string(), keyword: false }),
+        data: Box::new(LispReplyValue::Str(message.to_string())),
+    }
 }
 
 /// Classifies an `apply` result: a scalar or string converts to the
@@ -218,7 +257,7 @@ pub fn service(env: &Env) -> EmacsResult<()> {
                 // an interned symbol becomes a Clojure symbol, a keyword a
                 // keyword, and `intern "nil"`/`"t"` stay `nil`/`true`.
                 let result = env.intern(&name).and_then(|v| value_to_reply(env, v));
-                reply(id, result);
+                reply(env, id, result);
             }
             LispRequest::Apply { id, f, args } => {
                 let result = (|| -> EmacsResult<LispReplyValue> {
@@ -230,17 +269,17 @@ pub fn service(env: &Env) -> EmacsResult<()> {
                     let result_value = f_value.call(&arg_values)?;
                     value_to_reply(env, result_value)
                 })();
-                reply(id, result);
+                reply(env, id, result);
             }
             LispRequest::TypeOf { id, arg } => {
                 let result = arg_to_value(env, &arg)
                     .and_then(|v| env.type_of(v))
                     .and_then(|v| value_to_reply(env, v));
-                reply(id, result);
+                reply(env, id, result);
             }
             LispRequest::IsNotNil { id, arg } => {
                 let result = arg_to_value(env, &arg).map(|v| LispReplyValue::Bool(v.is_not_nil()));
-                reply(id, result);
+                reply(env, id, result);
             }
             LispRequest::Eq { id, a, b } => {
                 let result = (|| -> EmacsResult<LispReplyValue> {
@@ -248,14 +287,14 @@ pub fn service(env: &Env) -> EmacsResult<()> {
                     let bv = arg_to_value(env, &b)?;
                     Ok(LispReplyValue::Bool(env.call("eq", (av, bv))?.is_not_nil()))
                 })();
-                reply(id, result);
+                reply(env, id, result);
             }
             LispRequest::Prin1 { id, ptr } => {
                 let result = env
                     .call("prin1-to-string", (borrow(env, ptr),))
                     .and_then(|v| v.into_rust::<String>())
                     .map(LispReplyValue::Str);
-                reply(id, result);
+                reply(env, id, result);
             }
             LispRequest::FreeRef { ptr } => {
                 // Safety: PTR is a `LispObject`'s own `ptr`, sent exactly
@@ -279,6 +318,17 @@ pub fn service(env: &Env) -> EmacsResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_signal_is_error_symbol_with_message() {
+        match fallback_signal("boom") {
+            LispReplyValue::Signal { symbol, data } => {
+                assert!(matches!(*symbol, LispReplyValue::Symbol { ref name, keyword: false } if name == "error"));
+                assert!(matches!(*data, LispReplyValue::Str(ref s) if s == "boom"));
+            }
+            _ => panic!("expected Signal"),
+        }
+    }
 
     #[test]
     fn drain_returns_requests_in_fifo_order() {

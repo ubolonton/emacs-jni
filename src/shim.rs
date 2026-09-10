@@ -4,8 +4,10 @@ const LISP_CALLABLE_CLASS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispCallable.class"));
 const LISP_FUNCTION_CLASS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispFunction.class"));
-const LISP_ERROR_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispError.class"));
+const LISP_NON_LOCAL_EXIT_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispNonLocalExit.class"
+));
 const RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/ReleaseNotifier.class"
@@ -21,7 +23,7 @@ const LISP_REF_RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
 const LISP_SYMBOL_CLASS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispSymbol.class"));
 
-/// Defines the `emacs_jni.core.{LispCallable,LispFunction,LispError,
+/// Defines the `emacs_jni.core.{LispCallable,LispFunction,LispNonLocalExit,
 /// ReleaseNotifier,LispObject,Lisp,LispRefReleaseNotifier}` shim classes
 /// into the currently-attached JVM, using the *platform* classloader
 /// (not the system/application classloader, despite this file's original
@@ -93,11 +95,11 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
 
     // LispCallable must be defined before LispFunction (which implements
     // it) for the JVM's verifier to resolve the interface reference.
-    // LispError and ReleaseNotifier have no such dependency and can go
-    // anywhere.
+    // LispNonLocalExit and ReleaseNotifier have no such dependency and can
+    // go anywhere.
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispCallable", LISP_CALLABLE_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispFunction", LISP_FUNCTION_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/core/LispError", LISP_ERROR_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispNonLocalExit", LISP_NON_LOCAL_EXIT_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/ReleaseNotifier", RELEASE_NOTIFIER_CLASS)?;
     // LispRefReleaseNotifier has no class-loading dependency on LispObject
     // (LispObject's constructor only *references* it inside a method body,
@@ -114,7 +116,7 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     // same way every later task will look these classes up.
     env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
-    env.find_class(jni::jni_str!("emacs_jni/core/LispError"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
@@ -157,7 +159,7 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
 /// means the round trip never even started, e.g. because posting to the
 /// channel failed, as opposed to a failure that happens after a Lisp
 /// callback runs, which instead completes the future exceptionally via
-/// `LispError`, see `jvm_thread::handle_invoke_reply`).
+/// `LispNonLocalExit`, see `jvm_thread::handle_invoke_reply`).
 fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
     const CALL_METHOD: jni::NativeMethod = jni::native_method! {
@@ -429,7 +431,7 @@ fn block_on_lisp_reply<'local>(
 /// Unwraps and rethrows the pending exception left by a failed
 /// `CompletableFuture#get` call above: an `ExecutionException` wraps
 /// whatever `jvm_thread::handle_lisp_reply` completed the future with
-/// exceptionally (a `LispError`) — the useful part is that cause, one
+/// exceptionally (a `LispNonLocalExit`) — the useful part is that cause, one
 /// `getCause()` hop down, same reasoning as
 /// `jvm_thread::describe_pending_java_exception`. A `TimeoutException`/
 /// `InterruptedException` (from `get`'s own timeout/interruption, not a

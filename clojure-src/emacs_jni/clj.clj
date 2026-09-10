@@ -8,8 +8,8 @@
 
   See design spec
   docs/superpowers/specs/2026-09-08-clojure-lisp-access-design.md."
-  (:import [emacs_jni.core Lisp LispObject LispSymbol]
-           [java.util.function Function]))
+  (:import [emacs_jni.core Lisp LispObject LispSymbol LispNonLocalExit]
+           [java.util.function BiFunction]))
 
 (defn- ->lisp
   "Marshal a value heading into Lisp: a Clojure symbol or keyword becomes
@@ -41,18 +41,42 @@
   [s]
   (<-lisp (Lisp/intern s)))
 
+(defn- lisp-exit->ex-info
+  "Translate a native LispNonLocalExit carrier into a Clojure ex-info,
+  converting its parts with <-lisp."
+  [^LispNonLocalExit e]
+  (let [a (<-lisp (.-symbolOrTag e))
+        b (<-lisp (.-dataOrValue e))]
+    (if (= (.-kind e) LispNonLocalExit/SIGNAL)
+      (ex-info (str "Lisp signal: " a) {:type ::lisp-signal :symbol a :data b} e)
+      (ex-info (str "Lisp throw: " a) {:type ::lisp-throw :tag a :value b} e))))
+
+(defn- throw-lisp-exit
+  "Given a completion throwable (a bare LispNonLocalExit from .handle, or
+  one wrapped in an ExecutionException from deref), rethrow it as an
+  ex-info. Anything else is rethrown unchanged."
+  [t]
+  (let [cause (if (instance? java.util.concurrent.ExecutionException t) (.getCause t) t)]
+    (if (instance? LispNonLocalExit cause)
+      (throw (lisp-exit->ex-info cause))
+      (throw t))))
+
 (defn apply-async
   "Apply F to ARGS asynchronously. Returns a CompletableFuture of the
-  result (converted): a scalar/string/symbol/keyword as a Clojure value,
-  anything else a LispObject."
+  converted result. A Lisp non-local exit surfaces as an ex-info
+  (::lisp-signal or ::lisp-throw)."
   [f & args]
-  (.thenApply (apply* f args) (reify Function (apply [_ v] (<-lisp v)))))
+  (.handle (apply* f args)
+    (reify BiFunction
+      (apply [_ v t] (if t (throw-lisp-exit t) (<-lisp v))))))
 
 (defn apply
-  "Apply F to ARGS, blocking for the result. Sugar over
-  @(apply-async f args...)."
+  "Apply F to ARGS, blocking for the result. A Lisp non-local exit surfaces
+  as an ex-info (::lisp-signal or ::lisp-throw)."
   [f & args]
-  (<-lisp (deref (apply* f args))))
+  (try
+    (<-lisp (deref (apply* f args)))
+    (catch Throwable t (throw-lisp-exit t))))
 
 (defn type-of
   "Return V's Lisp type as a Clojure symbol (e.g. symbol, string, cons)."
@@ -68,3 +92,13 @@
   "True if A and B are the same Lisp object (Lisp's own eq)."
   [a b]
   (Lisp/eq (->lisp a) (->lisp b)))
+
+(defn lisp-signal?
+  "True if E is a Lisp-signal ex-info (from `apply`)."
+  [e]
+  (= (:type (ex-data e)) ::lisp-signal))
+
+(defn lisp-throw?
+  "True if E is a Lisp-throw ex-info (from `apply`)."
+  [e]
+  (= (:type (ex-data e)) ::lisp-throw))
