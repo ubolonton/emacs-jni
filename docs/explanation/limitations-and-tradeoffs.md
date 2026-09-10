@@ -141,7 +141,7 @@ for the workaround.
 
 ## A synchronous Clojure-to-Lisp call waits for Emacs to be free
 
-Every `dev.ublt.emacs.clj` call — `intern`, `apply`, `type-of`, and so
+Every `emacs-jni.clj` call — `intern`, `apply`, `type-of`, and so
 on — runs on the Emacs main thread, because it operates on Lisp values
 through an `Env` that is only valid there. The JVM thread that made the
 call blocks until Emacs services it, which happens the next time Emacs
@@ -159,7 +159,7 @@ bounds the wait rather than letting a stalled call hang forever.
 
 Scalars, strings, and interned symbols/keywords from `apply` convert to
 Clojure values, but any other Lisp value that Clojure holds through
-`dev.ublt.emacs.clj` — a cons, vector, hash table, buffer, or an
+`emacs-jni.clj` — a cons, vector, hash table, buffer, or an
 uninterned symbol — is a `LispObject`, an opaque handle, not marshalled
 Clojure data. You can inspect it (`type-of`, `is-not-nil?`, `eq`,
 `prin1-to-string`) and pass it back into `apply`, but you cannot pull

@@ -37,7 +37,7 @@ not a fetched-in-later design choice.
 The worker thread talks back to Lisp through a different mechanism: an
 Emacs pipe process, backed by `Env::open_channel`, carrying
 newline-terminated S-expressions. `jvm--process-filter` in
-`elisp/emacs-jni.el` accumulates bytes until it sees a complete line,
+`elisp/jvm.el` accumulates bytes until it sees a complete line,
 reads it as a Lisp form, and dispatches on its head symbol:
 `status`, `log`, `load-jar-done`, `call-done`, `invoke`, `release`, or
 `lisp-request`.
@@ -111,7 +111,7 @@ JNI API directly, not through a signal.
 
 ## Why Clojure calls into Lisp run on the Emacs main thread
 
-When Clojure holds a Lisp value (via `dev.ublt.emacs.clj`, see
+When Clojure holds a Lisp value (via `emacs-jni.clj`, see
 [Interop design](interop-design.md#why-a-lisp-value-becomes-an-opaque-java-object)),
 every operation on it — `intern`, `apply`, `type-of`, `eq`,
 `prin1-to-string` — is an Emacs `Env` call. An `Env` is only valid on

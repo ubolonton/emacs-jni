@@ -9,7 +9,7 @@ Clojure access to Emacs Lisp values.
 **Status: done.** All three planned phases (JVM lifecycle, JVM ↔ Lisp
 interop, Clojure/nREPL) have shipped, plus a follow-on that lets
 Clojure hold and call Emacs Lisp values (`jvm-clj.el` /
-`dev.ublt.emacs.clj`).
+`emacs-jni.clj`).
 
 **Full documentation, in tutorial, how-to, reference, and explanation
 form:** [`docs/index.md`](docs/index.md). Start there for anything
@@ -46,7 +46,7 @@ cd emacs-jni
 cargo build
 ```
 
-This produces `target/debug/libemacs_jni.so`, which `elisp/emacs-jni.el`
+This produces `target/debug/libemacs_jni.so`, which `elisp/jvm.el`
 loads automatically.
 
 ## Try it

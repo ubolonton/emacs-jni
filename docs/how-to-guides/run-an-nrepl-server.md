@@ -72,7 +72,7 @@ for a minimal `nc`-based example that needs no extra tooling.
 ## Preload the Lisp-access namespace
 
 If you want connected nREPL clients to reach Emacs Lisp through
-`dev.ublt.emacs.clj`, start the server with `jvm-clj-nrepl-start`
+`emacs-jni.clj`, start the server with `jvm-clj-nrepl-start`
 (from `jvm-clj.el`) instead of `jvm-nrepl-start`. It is the same call,
 but it loads that namespace first. Stop it with `jvm-clj-nrepl-stop`,
 or `jvm-nrepl-stop` — they are equivalent. See

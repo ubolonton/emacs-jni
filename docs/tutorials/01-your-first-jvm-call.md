@@ -30,7 +30,7 @@ public class Greeter {
 ```
 
 `cargo build` produces `target/debug/libemacs_jni.so`. This is the
-dynamic module that `elisp/emacs-jni.el` loads.
+dynamic module that `elisp/jvm.el` loads.
 
 ## Step 2: Start Emacs with the module on the load path
 
@@ -39,14 +39,14 @@ emacs -Q -L elisp
 ```
 
 `-Q` skips your personal init file. `-L elisp` puts
-`elisp/emacs-jni.el` on Emacs's `load-path`.
+`elisp/jvm.el` on Emacs's `load-path`.
 
 ## Step 3: Load the library and start the JVM
 
 Open `*scratch*` (or `M-x ielm`). Evaluate each form one at a time.
 
 ```elisp
-(require 'emacs-jni)
+(require 'jvm)
 
 (jvm-start-sync)
 ```

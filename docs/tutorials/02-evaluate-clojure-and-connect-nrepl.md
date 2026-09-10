@@ -36,7 +36,7 @@ find the jars by reading this environment variable back from Lisp.
 In `*scratch*`, evaluate each form one at a time.
 
 ```elisp
-(require 'emacs-jni)
+(require 'jvm)
 
 (jvm-start-sync)
 ;; => ready

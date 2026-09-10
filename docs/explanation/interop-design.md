@@ -67,20 +67,26 @@ that type — it does not need to know it is backed by Lisp.
 
 The alternative — handing Java a bare integer handle and a
 side-channel convention for "calling" it — was available, and is in
-fact roughly what happens underneath (`elisp/emacs-jni.el`'s
+fact roughly what happens underneath (`elisp/jvm.el`'s
 `jvm--lisp-callbacks` table, keyed by handle). The shim class exists to
 make that handle behave like a normal, type-correct Java object from
 the Java caller's point of view, so a method like
 `Calc.callWithArg(LispCallable fn, long n)` can declare its parameter
 type honestly, instead of taking `Object` and downcasting.
 
-`LispError` exists for the same reason, in the other direction: a Lisp
-`error` signaled inside a callback needs to become something Java code
-can catch as a real exception, not a string it has to pattern-match.
+`LispNonLocalExit` exists for the same reason, in the other direction:
+a Lisp `error` (or `throw`) signaled inside a callback needs to become
+something Java code can catch as a real exception, not a string it has
+to pattern-match. It is a plain `RuntimeException` carrying the
+signal/throw's symbol-or-tag and data-or-value, marshaled to Java the
+same way any other returned value is — a `LispSymbol` marker, a
+`LispObject`, or a boxed scalar. Plain Java code catches it directly.
+`emacs-jni.clj` rethrows it as a Clojure `ex-info`; see
+[How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md#handle-a-lisp-error).
 
 ## Why a Lisp value becomes an opaque Java object
 
-The `dev.ublt.emacs.clj` namespace splits an `apply` result by type. A
+The `emacs-jni.clj` namespace splits an `apply` result by type. A
 scalar or string — number, string, `t`, `nil` — converts to the
 matching Clojure value, the same way `jvm-call` marshals a Java scalar
 into a Lisp scalar. An interned Lisp symbol or keyword converts to a

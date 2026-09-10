@@ -2,7 +2,7 @@
 
 This guide covers the other direction of interop: Clojure code that
 holds and manipulates Emacs Lisp values directly. It uses the
-`jvm-clj.el` library and the `dev.ublt.emacs.clj` Clojure namespace.
+`jvm-clj.el` library and the `emacs-jni.clj` Clojure namespace.
 It assumes you can already evaluate Clojure — see
 [How to evaluate Clojure code](evaluate-clojure-code.md).
 
@@ -21,7 +21,7 @@ call.
 
 `jvm-clj-start` starts the JVM if needed, loads `jvm-clj-classpath`
 plus this package's own `clojure-src` directory, and requires
-`dev.ublt.emacs.clj`. It signals an error if any step fails — for
+`emacs-jni.clj`. It signals an error if any step fails — for
 example, if no Clojure jar is on `jvm-clj-classpath`.
 
 To start an nREPL server with the namespace already loaded, use
@@ -29,11 +29,11 @@ To start an nREPL server with the namespace already loaded, use
 
 ## Alias the namespace
 
-`dev.ublt.emacs.clj` defines `intern`, `apply`, and `eq`, which shadow
+`emacs-jni.clj` defines `intern`, `apply`, and `eq`, which shadow
 `clojure.core`. Alias it rather than referring the names in:
 
 ```clojure
-(require '[dev.ublt.emacs.clj :as l])
+(require '[emacs-jni.clj :as l])
 ```
 
 ## Symbols and keywords
@@ -80,6 +80,51 @@ counterpart, and a `LispObject` passes by reference.
 `apply-async` returns immediately with a `CompletableFuture`. Deref it
 (`@`, or `.get`) for the result. `apply` is exactly `@(apply-async ...)`.
 
+## Import a Lisp name as a callable
+
+Calling through `apply` (`(l/apply 'message "hi")`) works for any
+name, but reads awkwardly for code that calls the same Lisp function
+many times. `require-symbol`/`refer-symbols` and `require-function`/
+`refer-functions` import a Lisp name as a plain Clojure callable
+instead:
+
+```clojure
+((l/require-symbol 'message) "hi")   ; late-bound: funcalls `message` each call
+
+(l/refer-symbols message)
+(message "hi")                       ; now calls Lisp's `message`, like any Clojure fn
+```
+
+`require-symbol` returns a callable that funcalls the named Lisp
+symbol fresh on every call — late binding. If Lisp code later
+redefines `message` (`defun`/`fset`), the next call picks up the new
+definition. `refer-symbols` is the same thing as a macro: it `def`s a
+var per symbol, named after the symbol, in the current namespace.
+
+`require-function`/`refer-functions` bind early instead: they resolve
+`indirect-function` once, at import time, and keep calling that one
+function object, so a later redefinition of the Lisp symbol has no
+effect on the imported callable.
+
+```clojure
+(l/refer-functions message)          ; resolves `message`'s function object now
+(message "hi")                       ; always calls that same function object
+```
+
+Use `require-symbol`/`refer-symbols` when Lisp code may redefine the
+target later (interactive development, `advice-add`, and so on). Use
+`require-function`/`refer-functions` to pin down one specific
+definition.
+
+`refer-symbols`/`refer-functions` only work for Lisp names that are
+also legal Clojure `def` symbols. For a name that is not (for example,
+one containing a character illegal in a Clojure symbol), use
+`require-symbol`/`require-function` with a string instead:
+
+```clojure
+(def my-fn (l/require-symbol "some-odd-name"))
+```
+
 ## Inspect a value
 
 ```clojure
@@ -109,16 +154,55 @@ output, as a Java `String` — the way to read a value that stays opaque
 
 ## Handle a Lisp error
 
+A Lisp non-local exit during `apply`/`apply-async` — `error`/`signal`,
+or `throw` — surfaces as a `clojure.lang.ExceptionInfo` (`ex-info`),
+not a plain exception:
+
 ```clojure
-(l/apply (l/intern "error") "boom")
-;; throws: the future completes exceptionally with emacs_jni.LispError,
-;; which surfaces on deref (wrapped in a java.util.concurrent.ExecutionException)
+(try
+  (l/apply (l/intern "error") "boom")
+  (catch clojure.lang.ExceptionInfo e
+    (ex-data e)))
+;; => {:type :emacs-jni.clj/lisp-signal, :symbol error, :data #object[...]}
 ```
 
-A Lisp `error` signaled during `apply`/`apply-async` completes the
-future exceptionally with an `emacs_jni.LispError`. It surfaces when
-you deref — mirroring how a Java-side callback error surfaces to Lisp
-(see [How to pass a Lisp function to Java](pass-a-lisp-function-to-java.md)).
+`:symbol` converts to a Clojure symbol (interned), same as any other
+result. `:data` here is the Lisp error-data list `("boom")` — a list,
+not a scalar, so it stays an opaque `LispObject` (read it with
+`(.prin1ToString (:data (ex-data e)))` → `"(\"boom\")"`; see
+[Read an opaque value's printed form](#read-an-opaque-values-printed-form)
+above).
+
+`ex-data` carries which case it is, and the exit's payload, already
+converted the same way as any other result:
+
+| Exit | `(ex-data e)` |
+|---|---|
+| `signal` (`error`, `signal`) | `{:type :emacs-jni.clj/lisp-signal :symbol <sym> :data <data>}` |
+| `throw` | `{:type :emacs-jni.clj/lisp-throw :tag <tag> :value <value>}` |
+
+`(:symbol (ex-data e))` reads the signaled condition's symbol (for
+example `error`, or a custom condition from `define-error`); `:data`
+is its data list. `lisp-signal?`/`lisp-throw?` test which case an
+exception is, without pulling `ex-data` apart yourself:
+
+```clojure
+(try
+  (l/apply (l/intern "error") "boom")
+  (catch clojure.lang.ExceptionInfo e
+    (if (l/lisp-signal? e)
+      (println "Lisp signaled:" (:symbol (ex-data e)))
+      (throw e))))
+```
+
+`apply-async`'s `CompletableFuture` completes exceptionally with the
+same `ex-info` as its completion exception, but `deref` (`.get()`)
+wraps it in a `java.util.concurrent.ExecutionException` — read
+`(.getCause e)` for the `ex-info`, or use `apply` to get the `ex-info`
+directly. See
+[How to pass a Lisp function to Java](pass-a-lisp-function-to-java.md)
+for the mirror-image case, a Lisp error raised inside a callback Java
+calls.
 
 ## Know when a LispObject stops holding its value
 

@@ -40,13 +40,13 @@ hold and manipulate Lisp values — see
 
 | Function | Arguments | Returns | Notes |
 |---|---|---|---|
-| `jvm-clj-start` | `(&optional timeout)` | `(OK RESULT ERR)` from the namespace `require`, on success. | Starts the JVM if needed, loads `jvm-clj-classpath` plus this package's `clojure-src` directory, and requires `dev.ublt.emacs.clj`. Signals an error if any step fails. |
-| `jvm-clj-nrepl-start` | `(&optional port bind timeout)` | Same as `jvm-nrepl-start`. | `jvm-nrepl-start` (including its `bind` argument) after ensuring `dev.ublt.emacs.clj` is loaded. |
+| `jvm-clj-start` | `(&optional timeout)` | `(OK RESULT ERR)` from the namespace `require`, on success. | Starts the JVM if needed, loads `jvm-clj-classpath` plus this package's `clojure-src` directory, and requires `emacs-jni.clj`. Signals an error if any step fails. |
+| `jvm-clj-nrepl-start` | `(&optional port bind timeout)` | Same as `jvm-nrepl-start`. | `jvm-nrepl-start` (including its `bind` argument) after ensuring `emacs-jni.clj` is loaded. |
 | `jvm-clj-nrepl-stop` | `(server &optional timeout)` | Same as `jvm-nrepl-stop`. | Passes through to `jvm-nrepl-stop`. |
 
-### Clojure API: `dev.ublt.emacs.clj`
+### Clojure API: `emacs-jni.clj`
 
-Alias it — `(require '[dev.ublt.emacs.clj :as l])` — since `intern`,
+Alias it — `(require '[emacs-jni.clj :as l])` — since `intern`,
 `apply`, and `eq` shadow `clojure.core`. Each call blocks a JVM thread
 until Emacs services it on its main thread.
 
@@ -55,9 +55,15 @@ until Emacs services it on its main thread.
 | `intern` | `[s]` | a Clojure symbol, or a keyword when S starts with `:` |
 | `apply` | `[f & args]` | the call result (see conversion below); blocks |
 | `apply-async` | `[f & args]` | a `CompletableFuture` of the call result |
+| `require-symbol` | `[sym]` | a callable value (`IFn`), late-bound: each call funcalls SYM's Lisp definition at that moment |
+| `refer-symbols` | `[& syms]` (macro) | defs one var per SYM in the current namespace, each the `require-symbol` value |
+| `require-function` | `[sym]` | a callable value (`IFn`), early-bound: resolves `indirect-function` once and holds that function object |
+| `refer-functions` | `[& syms]` (macro) | defs one var per SYM in the current namespace, each the `require-function` value |
 | `type-of` | `[v]` | a Clojure symbol (the Lisp type) |
 | `is-not-nil?` | `[v]` | a boolean |
 | `eq` | `[a b]` | a boolean |
+| `lisp-signal?` | `[e]` | true if E is a `::lisp-signal` ex-info thrown by `apply`/`apply-async` |
+| `lisp-throw?` | `[e]` | true if E is a `::lisp-throw` ex-info thrown by `apply`/`apply-async` |
 
 `f` and each of `args` may be a Clojure symbol or keyword (→ a Lisp
 symbol/keyword), a plain scalar (string, number, boolean, `nil` → the
@@ -70,10 +76,52 @@ A result converts by type: a scalar or string (integer, float, string,
 keyword → a Clojure symbol/keyword; anything else (a cons, vector, hash
 table, or an *uninterned* symbol) → an opaque `LispObject`. So a Lisp
 predicate's `t`/`nil` and a returned Lisp symbol are usable directly as
-Clojure values. A Lisp `error` completes the future exceptionally with
-`emacs_jni.LispError`. `LispObject.prin1ToString` returns the value's
+Clojure values. `LispObject.prin1ToString` returns the value's
 `prin1-to-string` text as a Java `String` — the way to read an
 otherwise opaque `LispObject`.
+
+A Lisp non-local exit (`error`/`signal`, or `throw`) during `apply`
+surfaces directly as a `clojure.lang.ExceptionInfo` (`ex-info`), not a
+plain exception. `apply-async` completes its `CompletableFuture`
+exceptionally with the same `ex-info`, but `deref`/`.get()` wraps it in
+a `java.util.concurrent.ExecutionException` — read `(.getCause e)` for
+the `ex-info`.
+
+| Exit | `(ex-data e)` |
+|---|---|
+| `signal` | `{:type :emacs-jni.clj/lisp-signal :symbol <sym> :data <data>}` |
+| `throw` | `{:type :emacs-jni.clj/lisp-throw :tag <tag> :value <value>}` |
+
+`:symbol`/`:tag` and `:data`/`:value` are converted the same way as any
+other result — a Lisp symbol or keyword to its Clojure counterpart,
+anything else to an opaque `LispObject`. `lisp-signal?`/`lisp-throw?`
+test which case an exception is. See
+[How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md#handle-a-lisp-error)
+for a full example.
+
+#### Import Lisp names as callables
+
+`require-symbol`/`refer-symbols` and `require-function`/
+`refer-functions` (in the table above) import Lisp names so they read
+as ordinary Clojure calls:
+
+```clojure
+((l/require-symbol 'message) "hi")   ; late-bound: funcalls `message` each call
+(l/refer-symbols message)
+(message "hi")                       ; now calls Lisp's `message`
+```
+
+`require-symbol`/`refer-symbols` are late-bound: each call re-funcalls
+the current Lisp definition of the symbol, so a later `defun`/`fset`
+takes effect immediately. `require-function`/`refer-functions` are
+early-bound: they resolve `indirect-function` once, at import time, and
+keep calling that same function object, unaffected by a later
+redefinition of the Lisp symbol.
+
+`refer-symbols`/`refer-functions` only work for Lisp names that are
+also legal Clojure `def` symbols (no name with a character illegal in a
+Clojure symbol, such as embedded whitespace). For any other name, use
+`require-symbol`/`require-function` with a string.
 
 ## Variables
 
@@ -82,7 +130,7 @@ otherwise opaque `LispObject`.
 | `jvm-classpath` | `defvar`, list of strings | `nil` | Extra classpath entries. Read only on a genuinely fresh `jvm-start` — see the `jvm-start` row above. Set with `setq` before your first `jvm-start`. |
 | `jvm-options` | `defvar`, list of strings | `("-Xrs")` | JVM flags (for example `"-Xmx512m"`). Same fresh-start-only rule as `jvm-classpath`. `"-Xrs"` stops the JVM from installing its own signal handlers — see [Architecture](../explanation/architecture.md). |
 | `jvm-status-hook` | `defvar`, hook | `nil` | Run with one argument, the new status symbol, on every transition — including the transient `starting`/`pausing`/`stopping` states. |
-| `emacs-jni--module-path` | `defvar`, string | `$EMACS_JNI_MODULE_PATH`, or a path relative to `elisp/emacs-jni.el` | Path to the built `.so` module, read once at `require` time. |
+| `jvm--module-path` | `defvar`, string | `$EMACS_JNI_MODULE_PATH`, or a path relative to `elisp/jvm.el` | Path to the built `.so` module, read once at `require` time. |
 | `jvm-clj-classpath` | `defvar`, list of strings | `nil` | From `jvm-clj.el`. Extra classpath entries for `jvm-clj-start` (typically your Clojure/nREPL jars), added on top of `jvm-classpath`. `jvm-clj-start` also adds this package's `clojure-src` directory automatically. |
 
 ## Buffers
