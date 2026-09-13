@@ -26,6 +26,8 @@ defaults to 30. Past the deadline, a `-sync` function signals
 | `jvm-call-sync` | `(target member args &optional timeout)` | `(OK RESULT ERR)`. | |
 | `jvm-new` | `(class-name args &optional callback)` | A request ID. | `jvm-call` with `member` fixed to the constructor's internal name, `"<init>"`. |
 | `jvm-new-sync` | `(class-name args &optional timeout)` | `(OK RESULT ERR)`. | |
+| `jvm-call-direct` | `(target member args)` | The `RESULT` value itself. | Like `jvm-call`, but runs the whole call synchronously on the Emacs main thread — no worker round trip — and returns the value directly, signalling `jvm-error` on failure. Blocks Emacs's main loop for the call's duration; a same-thread Clojure→Lisp callback made during the call runs directly (no deadlock). Experimental — see [Synchronous Lisp → Clojure calls](../explanation/limitations-and-tradeoffs.md#jvm-call-direct-blocks-emacs-and-its-outbound-errors-are-coarse). |
+| `jvm-new-direct` | `(class-name args)` | The new instance. | `jvm-call-direct` with `member` fixed to `"<init>"`. |
 | `jvm-clojure-require` | `(namespace &optional timeout)` | `(OK RESULT ERR)`. | Calls Clojure's `require` on `NAMESPACE`, a string. Synchronous only — see [Known limitations](#known-limitations) below. |
 | `jvm-clojure-eval-string` | `(code &optional timeout)` | `(OK RESULT ERR)`. | Evaluates `CODE`, a string of Clojure source. Synchronous only. See [Known limitations](#known-limitations) below. |
 | `jvm-nrepl-start` | `(&optional port bind timeout)` | `(OK RESULT ERR)`, where `RESULT` is `(ACTUAL-PORT . SERVER)` on success. | `PORT` defaults to 0 (the OS picks a free port). `BIND`, if non-nil, is the interface address to listen on (e.g. `"0.0.0.0"`); it defaults to nREPL's loopback. Bind beyond loopback only when needed — see [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md#bind-to-a-routable-interface). `ACTUAL-PORT` is an integer. `SERVER` is a wrapped JVM object, needed by `jvm-nrepl-stop`. Synchronous only. |
@@ -194,8 +196,9 @@ Java value returned, or passed as an argument into a Lisp callback:
 | Condition | Signaled by | Meaning |
 |---|---|---|
 | `jvm-timeout` | Any `-sync` function, once its `timeout` elapses before the operation finishes. | The operation may still finish later. The caller stopped waiting for it. |
-| `jvm-invalid-argument` | `jvm-call`/`jvm-new`, and their `-sync` forms. | An argument's Lisp value has no marshalling rule for any of the target member's parameter types. |
-| `jvm-illegal-transition` | `jvm-start`, `jvm-pause`, `jvm-stop`, and their `-sync` forms. | The current `jvm-status` does not allow this transition. |
+| `jvm-invalid-argument` | `jvm-call`/`jvm-new`, and their `-sync`/`-direct` forms. | An argument's Lisp value has no marshalling rule for any of the target member's parameter types. |
+| `jvm-illegal-transition` | `jvm-start`, `jvm-pause`, `jvm-stop`, and their `-sync` forms; `jvm-call-direct`/`jvm-new-direct` with no running JVM. | The current `jvm-status` does not allow this transition. |
+| `jvm-error` | `jvm-call-direct`/`jvm-new-direct`. | The synchronous call failed (missing class/method, a Java exception, or a Clojure exception — including an uncaught Lisp signal that unwound through Clojure). Unlike the async forms, which report failures in their return value, the direct forms signal. |
 
 A Java exception, or a call to a nonexistent class or method, is
 **not** signaled as a Lisp condition. It comes back as a descriptive

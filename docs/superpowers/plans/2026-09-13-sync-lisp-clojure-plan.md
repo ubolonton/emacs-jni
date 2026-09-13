@@ -108,20 +108,44 @@ durable Java before `env` drops; else fall back to enqueue + block for reply
 5. JNI FFI / `RegisterNatives` — existing surface.
 
 ## Phases (TDD; `cargo test --lib -- --test-threads=1` + `./test/run-ert-tests.sh`)
-1. Share `JavaVM` + `loader` globally; refactor `handle_call` core out.
-2. `jvm--call-sync` defun + `jvm-call-sync` elisp wrapper: attach-as-daemon,
-   resolve+invoke, marshal, return. ERT: forward calls (JDK + jar class),
-   matches `jvm--call` results. (Additive — worker/`jvm--call` untouched.)
-3. Env stack (thread-local + `EnvScope`) wired into `jvm--call-sync`. No
-   behaviour change yet.
-4. Reentrant fast-path in `Lisp.*` natives. ERT (test-support + clojure jars):
-   same-thread Clojure→Lisp callback runs without the queue; background-thread
-   callback still uses the queue.
-5. Boundary unwinding both directions. ERT: Lisp signal raised in a callback
-   propagates out of `jvm--call-sync` as a signal; a Clojure exception surfaces
-   as `jvm-error`.
-6. Docs: this plan → done; new/updated design spec; README + limitations doc;
-   elisp docstrings; heavy code doc-comments in the repo's existing style.
+1. [DONE] Share `JavaVM` + `loader` globally (`runtime`); refactor
+   `resolve_and_invoke` out of `handle_call`.
+2. [DONE] `jvm--call-direct` defun + `jvm-call-direct`/`jvm-new-direct` elisp
+   wrappers: attach, resolve+invoke, marshal, return; `jvm-error` on failure.
+   ERT `test/jvm-call-direct-test.el` (7 tests). Additive — worker/`jvm--call`
+   untouched.
+3. [DONE] Env stack (`reentry`: thread-local + `EnvScope`) wired into
+   `jvm--call-direct`.
+4. [DONE] Reentrant fast-path in the `Lisp.*` natives + `applyAsync`
+   (`shim.rs`). ERT `test/jvm-clj-direct-test.el` (4 tests): same-thread
+   Clojure→Lisp callback runs without the queue (would otherwise deadlock).
+   Background-thread callback still uses the queue (all async tests still pass).
+5. [PARTIAL] Boundary unwinding. Inbound DONE: a Lisp signal/throw in a
+   reentrant callback is thrown as a `LispNonLocalExit` up the Clojure stack
+   (`throw_non_local_exit`). Outbound NOT done: `jvm--call-direct` surfaces a
+   Clojure exception (incl. an uncaught `LispNonLocalExit`) as a generic
+   `jvm-error`, rather than reconstructing the original Lisp signal symbol/data
+   — see Follow-ups.
+6. [DONE] Docs: this plan updated; design spec
+   `docs/superpowers/specs/2026-09-13-sync-lisp-clojure-design.md`; README;
+   `docs/explanation/limitations-and-tradeoffs.md`; elisp docstrings; dense
+   code doc-comments throughout.
+
+## Deviations from the original design notes
+- Named `jvm--call-direct`/`jvm-call-direct` (not `-sync`): `jvm-call-sync`
+  already exists (async `jvm-call` + a blocking wait on the worker).
+- No daemon attach: jni 0.22 exposes none, and `DestroyJavaVM` blocks on a
+  live non-daemon attachment. So the main thread attaches permanently but
+  `call_direct` detaches when its outermost frame returns (thread-local depth
+  counter) — the "attach, execute, detach, return" shape, with nested
+  reentrant calls sharing the one attachment.
+
+## Follow-ups
+- Outbound signal reconstruction: unwrap a `LispNonLocalExit` returned to
+  `jvm--call-direct` back into the original Lisp `signal`/`throw`, instead of
+  `jvm-error`. Mirrors the async path's non-local-exit marshalling.
+- Consider adopting the reviewed emacs-module-rs reentry API in place of the
+  raw `unsafe Env::new(raw)` once the user approves it.
 
 ## Out of scope
 - Wiring emacs-jni to the new emacs-module-rs reentry API (held for review).
