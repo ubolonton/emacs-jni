@@ -846,6 +846,31 @@ thread_local! {
     /// `jvm--stop` (always a separate, non-nested call) finds it detached.
     /// Nested reentrant calls (Lisp→JVM→Lisp→JVM) share the one attachment.
     static ATTACH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+
+    /// Side channel from `describe_pending_java_exception` back to
+    /// `call_direct`, for the outbound half of the reentrant boundary: a Lisp
+    /// signal/throw raised in a callback unwinds up through Clojure as a
+    /// `LispNonLocalExit`; when it reaches the top of a direct call
+    /// (`ATTACH_DEPTH > 0`) `describe` classifies its fields into this slot so
+    /// `call_direct` can re-raise the *original* signal/throw instead of a
+    /// generic `jvm-error`. A plain error can't carry them — `describe`'s
+    /// return type is fixed `jni::errors::Error`. Filled at the invoke error
+    /// site, taken (once) by the enclosing `call_direct`. Never touched on the
+    /// async worker thread (its `ATTACH_DEPTH` stays 0), so `handle_call` is
+    /// unchanged.
+    static PENDING_NLE: std::cell::RefCell<Option<DirectError>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Failure of a `call_direct`.
+pub(crate) enum DirectError {
+    /// A Lisp non-local exit that unwound up through Clojure as a
+    /// `LispNonLocalExit`. `kind` is 0 (signal) or 1 (throw); `a`/`b` are the
+    /// already-classified symbol/data or tag/value, ready to rebind to the
+    /// caller's `Env` and re-raise via `(signal …)`/`(throw …)`.
+    NonLocalExit { kind: i32, a: crate::lisp_requests::LispRequestArg, b: crate::lisp_requests::LispRequestArg },
+    /// Any other JVM-side failure — surfaced as `jvm-error` with this message.
+    Jni(jni::errors::Error),
 }
 
 /// Runs a synchronous TARGET.MEMBER call on the current (Emacs main) thread:
@@ -859,8 +884,11 @@ pub(crate) fn call_direct(
     target: &crate::commands::CallTarget,
     member: &str,
     args: &[crate::commands::LispArg],
-) -> jni::errors::Result<crate::commands::LispArg> {
+) -> Result<crate::commands::LispArg, DirectError> {
     ATTACH_DEPTH.with(|d| d.set(d.get() + 1));
+    // Clear any stale slot before this frame's invoke, so a `Some` seen after
+    // it can only be this frame's (each frame fills and takes its own).
+    PENDING_NLE.with(|s| *s.borrow_mut() = None);
     let result = vm.attach_current_thread(|env| resolve_and_invoke(env, loader, target, member, args));
     let depth = ATTACH_DEPTH.with(|d| {
         let n = d.get() - 1;
@@ -873,7 +901,13 @@ pub(crate) fn call_direct(
         // — so there is nothing to signal to the caller here.
         let _ = vm.detach_current_thread();
     }
-    result
+    match result {
+        Ok(arg) => Ok(arg),
+        // A `LispNonLocalExit` reconstructed by `describe_pending_java_exception`
+        // takes precedence over its flattened message: re-raise the original
+        // signal/throw. Otherwise it's a genuine JVM failure → `jvm-error`.
+        Err(e) => Err(PENDING_NLE.with(|s| s.borrow_mut().take()).unwrap_or(DirectError::Jni(e))),
+    }
 }
 
 /// Resolves NAME (a dotted binary class name, e.g. `"java.lang.String"` or
@@ -935,6 +969,22 @@ fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
         return caught;
     };
 
+    // Outbound half of the reentrant boundary: only inside a direct call
+    // (`ATTACH_DEPTH > 0`, i.e. never on the async worker thread). If this
+    // exception is, or wraps, a `LispNonLocalExit`, stash its classified
+    // fields so the enclosing `call_direct` re-raises the original Lisp
+    // signal/throw. Best-effort — any failure here just falls through to the
+    // flattened message below (a `jvm-error`).
+    if ATTACH_DEPTH.with(|d| d.get()) > 0 {
+        if let Ok(local) = env.new_local_ref(exception.as_obj()) {
+            if let Ok(throwable) = env.cast_local::<jni::objects::JThrowable>(local) {
+                if let Ok(Some(nle)) = extract_non_local_exit(env, throwable) {
+                    PENDING_NLE.with(|s| *s.borrow_mut() = Some(nle));
+                }
+            }
+        }
+    }
+
     let mut lines = vec![format!("{name}: {msg}")];
     if let Ok(local) = env.new_local_ref(exception.as_obj()) {
         if let Ok(mut current) = env.cast_local::<jni::objects::JThrowable>(local) {
@@ -966,6 +1016,42 @@ fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
         }
     }
     marshal_error(&lines.join("\n"))
+}
+
+/// Walks THROWABLE's `getCause()` chain for an `emacs_jni.core.LispNonLocalExit`
+/// and, if found, classifies its `kind`/`symbolOrTag`/`dataOrValue` back into a
+/// `DirectError::NonLocalExit`. The two fields run through the same
+/// `shim::object_to_lisp_request_arg` classifier the inbound direction built
+/// them with (`build_lisp_reply_object`), so the round trip is symmetric.
+/// `None` if no `LispNonLocalExit` is in the chain (a genuine Java/Clojure
+/// exception).
+fn extract_non_local_exit<'local>(
+    env: &mut jni::Env<'local>,
+    throwable: jni::objects::JThrowable<'local>,
+) -> jni::errors::Result<Option<DirectError>> {
+    let nle_class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
+    let mut current = throwable;
+    // Bounded like `describe_pending_java_exception`'s own walk: a normal cause
+    // chain can't cycle, but this is recovery code, not worth an unbounded loop.
+    for _ in 0..10 {
+        if current.is_null() {
+            break;
+        }
+        if env.is_instance_of(&current, &nle_class)? {
+            let kind = env.get_field(&current, jni::jni_str!("kind"), jni::jni_sig!(int))?.i()?;
+            let a_obj = env
+                .get_field(&current, jni::jni_str!("symbolOrTag"), jni::jni_sig!(java.lang.Object))?
+                .l()?;
+            let b_obj = env
+                .get_field(&current, jni::jni_str!("dataOrValue"), jni::jni_sig!(java.lang.Object))?
+                .l()?;
+            let a = crate::shim::object_to_lisp_request_arg(env, a_obj)?;
+            let b = crate::shim::object_to_lisp_request_arg(env, b_obj)?;
+            return Ok(Some(DirectError::NonLocalExit { kind, a, b }));
+        }
+        current = current.get_cause(env)?;
+    }
+    Ok(None)
 }
 
 /// Finds an overload of METHOD_NAME on CLASS whose parameter count matches

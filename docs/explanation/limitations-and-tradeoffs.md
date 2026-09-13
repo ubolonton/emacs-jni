@@ -155,7 +155,7 @@ returns to its event loop. This is inherent to Emacs's single-threaded
 execution model, not a choice this module made; a per-call timeout
 bounds the wait rather than letting a stalled call hang forever.
 
-## `jvm-call-direct` blocks Emacs, and its outbound errors are coarse
+## `jvm-call-direct` blocks Emacs while it runs
 
 `jvm-call-direct` runs the whole call on the Emacs main thread (attach,
 execute, return). While it runs, Emacs's main loop is frozen — so keep
@@ -165,12 +165,12 @@ detaches once per top-level direct call (nested reentrant calls share the
 attachment), a small per-call cost that also keeps `jvm-stop` from
 blocking in `DestroyJavaVM`.
 
-A Lisp signal raised in a same-thread callback *during* the call
-propagates correctly up through Clojure (as a `LispNonLocalExit`). But if
-it, or any other Clojure exception, reaches the top of `jvm-call-direct`
-uncaught, it surfaces as a generic `jvm-error` rather than the original
-Lisp signal symbol and data — reconstructing that is a documented
-follow-up (see the plan doc). `jvm-call`/`jvm-call-sync` are unaffected.
+A Lisp signal or throw raised in a same-thread callback *during* the call
+propagates through Clojure as a `LispNonLocalExit` and is reconstructed at
+the boundary as the original `(signal …)`/`(throw …)`, so an enclosing
+`condition-case`/`catch` sees the real symbol and data. A genuine Clojure
+or Java exception (with no `LispNonLocalExit` in its cause chain) still
+surfaces as a `jvm-error` carrying the flattened message.
 
 ## Lisp values held by Clojure are opaque
 

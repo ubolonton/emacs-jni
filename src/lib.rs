@@ -148,7 +148,22 @@ fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value)
     let _scope = reentry::enter(env);
     match jvm_thread::call_direct(&vm, &loader, &target, &member, &args) {
         Ok(arg) => lisp_requests::lisp_arg_to_value(env, &arg),
-        Err(e) => env.signal(jvm_error, (e.to_string(),)),
+        // A Lisp signal/throw raised in a reentrant callback, unwound back up
+        // through Clojure: rebind its symbol/data (or tag/value) to this
+        // frame's `Env` and re-raise the *original* non-local exit, so the
+        // round trip is transparent to the Lisp caller. `signal`/`throw` always
+        // return `Err` (the non-local exit), which the defun trampoline turns
+        // back into a real Emacs signal/throw.
+        Err(jvm_thread::DirectError::NonLocalExit { kind, a, b }) => {
+            let a = lisp_requests::arg_to_value(env, &a)?;
+            let b = lisp_requests::arg_to_value(env, &b)?;
+            if kind == 0 {
+                env.call("signal", (a, b))
+            } else {
+                env.call("throw", (a, b))
+            }
+        }
+        Err(jvm_thread::DirectError::Jni(e)) => env.signal(jvm_error, (e.to_string(),)),
     }
 }
 

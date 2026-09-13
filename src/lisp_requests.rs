@@ -104,7 +104,7 @@ fn borrow<'e>(env: &'e Env, ptr: i64) -> Value<'e> {
 
 /// Converts one already-classified apply argument to a real `Value`,
 /// mirroring spec "Argument conversion" for the main-thread side.
-fn arg_to_value<'e>(env: &'e Env, arg: &LispRequestArg) -> EmacsResult<Value<'e>> {
+pub(crate) fn arg_to_value<'e>(env: &'e Env, arg: &LispRequestArg) -> EmacsResult<Value<'e>> {
     match arg {
         LispRequestArg::Obj(ptr) => Ok(borrow(env, *ptr)),
         // A keyword interns with its leading `:`; a plain symbol by name.

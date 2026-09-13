@@ -630,7 +630,7 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
 ///   namespace wrapped) → `Symbol { name, keyword }`;
 /// - everything else → the same `marshal::jvm_value_to_lisp_arg` an
 ///   ordinary `jvm-call` argument would go through.
-fn object_to_lisp_request_arg<'local>(
+pub(crate) fn object_to_lisp_request_arg<'local>(
     env: &mut jni::Env<'local>,
     elem: JObject<'local>,
 ) -> jni::errors::Result<crate::lisp_requests::LispRequestArg> {

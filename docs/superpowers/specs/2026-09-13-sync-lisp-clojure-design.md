@@ -84,9 +84,14 @@ once. `FreeRef` stays queue-only (its `Cleaner` thread pushes no scope).
   propagates up the Clojure stack exactly like the async path's rethrow. The
   `emacs` safe API auto-clears the pending exit (`handle_exit`), so there is no
   stale-exit hazard.
-- Outbound (not implemented): a Clojure exception — including an uncaught
-  `LispNonLocalExit` — surfaces at `jvm--call-direct` as a generic `jvm-error`.
-  Reconstructing the original Lisp signal symbol/data is a follow-up.
+- Outbound (implemented): when an uncaught `LispNonLocalExit` reaches the top
+  of a direct call, `describe_pending_java_exception` (only while
+  `ATTACH_DEPTH > 0`) walks the cause chain, classifies its `symbolOrTag`/
+  `dataOrValue` back through `shim::object_to_lisp_request_arg`, and hands them
+  to `call_direct` as `DirectError::NonLocalExit`. `jvm--call-direct` rebinds
+  them to its `Env` and re-raises the original `(signal …)`/`(throw …)`. A
+  genuine Clojure/Java exception (no `LispNonLocalExit` in the chain) still
+  surfaces as `jvm-error`. The async worker (`ATTACH_DEPTH == 0`) is untouched.
 
 ## Components
 

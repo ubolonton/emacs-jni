@@ -120,12 +120,16 @@ durable Java before `env` drops; else fall back to enqueue + block for reply
    (`shim.rs`). ERT `test/jvm-clj-direct-test.el` (4 tests): same-thread
    Clojure→Lisp callback runs without the queue (would otherwise deadlock).
    Background-thread callback still uses the queue (all async tests still pass).
-5. [PARTIAL] Boundary unwinding. Inbound DONE: a Lisp signal/throw in a
-   reentrant callback is thrown as a `LispNonLocalExit` up the Clojure stack
-   (`throw_non_local_exit`). Outbound NOT done: `jvm--call-direct` surfaces a
-   Clojure exception (incl. an uncaught `LispNonLocalExit`) as a generic
-   `jvm-error`, rather than reconstructing the original Lisp signal symbol/data
-   — see Follow-ups.
+5. [DONE] Boundary unwinding, both directions. Inbound: a Lisp signal/throw in
+   a reentrant callback is thrown as a `LispNonLocalExit` up the Clojure stack
+   (`throw_non_local_exit`). Outbound: when such an exit reaches the top of a
+   direct call, `describe_pending_java_exception` (gated on `ATTACH_DEPTH > 0`)
+   extracts the `LispNonLocalExit`'s fields via `shim::object_to_lisp_request_arg`
+   into a `DirectError::NonLocalExit`; `jvm--call-direct` rebinds them and
+   re-raises the *original* `(signal …)`/`(throw …)`. A genuine Clojure/Java
+   exception still surfaces as `jvm-error`. ERT: `reentrant-lisp-signal-
+   propagates-out` (asserts symbol `error` + data), `reentrant-lisp-throw-
+   propagates-out` (caught by an enclosing `catch`).
 6. [DONE] Docs: this plan updated; design spec
    `docs/superpowers/specs/2026-09-13-sync-lisp-clojure-design.md`; README;
    `docs/explanation/limitations-and-tradeoffs.md`; elisp docstrings; dense
@@ -141,9 +145,6 @@ durable Java before `env` drops; else fall back to enqueue + block for reply
   reentrant calls sharing the one attachment.
 
 ## Follow-ups
-- Outbound signal reconstruction: unwrap a `LispNonLocalExit` returned to
-  `jvm--call-direct` back into the original Lisp `signal`/`throw`, instead of
-  `jvm-error`. Mirrors the async path's non-local-exit marshalling.
 - Consider adopting the reviewed emacs-module-rs reentry API in place of the
   raw `unsafe Env::new(raw)` once the user approves it.
 
