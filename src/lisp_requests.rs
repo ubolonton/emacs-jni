@@ -117,25 +117,37 @@ fn arg_to_value<'e>(env: &'e Env, arg: &LispRequestArg) -> EmacsResult<Value<'e>
                 env.intern(name)
             }
         }
-        LispRequestArg::Scalar(scalar) => match scalar {
-            LispArg::Nil => ().into_lisp(env),
-            LispArg::True => true.into_lisp(env),
-            LispArg::Int(n) => n.into_lisp(env),
-            LispArg::Float(f) => f.into_lisp(env),
-            // Emacs's own reader parses an arbitrary-precision decimal
-            // string into a bignum when it doesn't fit a fixnum — reusing
-            // it here avoids reimplementing bignum construction.
-            LispArg::BigInt(digits) => env.call("string-to-number", (digits.as_str(),)),
-            LispArg::Str(s) => s.as_str().into_lisp(env),
-            // Round-trips through the same `jvm--wrap-handle` primitive an
-            // ordinary `call-done`/`invoke` result does, rather than
-            // hand-rolling a second "build a JvmHandle user-ptr" path.
-            LispArg::Object(handle) => env.call("jvm--wrap-handle", (*handle as i64,)),
-            LispArg::Callback(_) => unreachable!(
-                "a Lisp-access apply argument is never classified as LispArg::Callback -- \
-                 see LispRequestArg::Scalar's doc comment"
-            ),
-        },
+        LispRequestArg::Scalar(scalar) => lisp_arg_to_value(env, scalar),
+    }
+}
+
+/// Converts a marshalled `LispArg` to a real Lisp `Value` on the main thread.
+///
+/// Shared by the Lisp-access apply path (`arg_to_value`'s `Scalar` arm) and
+/// the synchronous `jvm--call-direct` return path (`lib.rs`), which turns the
+/// `LispArg` `jvm_thread::call_direct` produced into the value the defun
+/// returns — the direct-call equivalent of the async path's sexp round trip
+/// through `marshal::lisp_arg_to_sexp` + Lisp's reader.
+pub fn lisp_arg_to_value<'e>(env: &'e Env, arg: &LispArg) -> EmacsResult<Value<'e>> {
+    match arg {
+        LispArg::Nil => ().into_lisp(env),
+        LispArg::True => true.into_lisp(env),
+        LispArg::Int(n) => n.into_lisp(env),
+        LispArg::Float(f) => f.into_lisp(env),
+        // Emacs's own reader parses an arbitrary-precision decimal
+        // string into a bignum when it doesn't fit a fixnum — reusing
+        // it here avoids reimplementing bignum construction.
+        LispArg::BigInt(digits) => env.call("string-to-number", (digits.as_str(),)),
+        LispArg::Str(s) => s.as_str().into_lisp(env),
+        // Round-trips through the same `jvm--wrap-handle` primitive an
+        // ordinary `call-done`/`invoke` result does, rather than
+        // hand-rolling a second "build a JvmHandle user-ptr" path.
+        LispArg::Object(handle) => env.call("jvm--wrap-handle", (*handle as i64,)),
+        LispArg::Callback(_) => unreachable!(
+            "neither a Lisp-access apply argument nor a JVM-call return value is ever \
+             classified as LispArg::Callback -- Callback is only produced on the \
+             Lisp-to-Java argument direction (see lib.rs's lisp_value_to_arg)"
+        ),
     }
 }
 

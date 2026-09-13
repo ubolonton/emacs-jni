@@ -293,6 +293,21 @@ JVM bytecode name, `\"<init>\"'."
   "Like `jvm-new', but blocks. See `jvm-call-sync'."
   (jvm-call-sync class-name "<init>" args timeout))
 
+(defun jvm-call-direct (target member args)
+  "Call TARGET.MEMBER(ARGS...) on the JVM synchronously, on this thread.
+Returns the result value directly; signals `jvm-error' on failure.
+
+Unlike `jvm-call-sync' (async `jvm-call' plus a blocking wait on the
+worker), this runs the call on the Emacs main thread itself, with no
+worker round trip. It blocks Emacs's main loop for the whole call, so
+keep heavy or blocking work on the Clojure side's own threads."
+  (jvm--call-direct target member args))
+
+(defun jvm-new-direct (class-name args)
+  "Construct CLASS-NAME(ARGS...) synchronously on this thread.
+Sugar over `jvm-call-direct' with MEMBER `\"<init>\"'."
+  (jvm-call-direct class-name "<init>" args))
+
 (defvar jvm--lisp-callbacks (make-hash-table :test 'eql)
   "Handle -> Lisp function, for functions wrapped as JVM LispFunction
 proxies. Entries are removed when the JVM notifies us via `(release

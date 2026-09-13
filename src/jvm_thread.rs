@@ -17,6 +17,9 @@ use crate::{channel, worker};
 pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>) {
     let vm = match create_jvm(&classpath, &options) {
         Ok(vm) => {
+            // Publish the VM so the Emacs main thread can attach for a
+            // synchronous `jvm--call-direct` (see `runtime` and `call_direct`).
+            crate::runtime::set_vm(vm.clone());
             STATUS.finish(Status::Ready);
             channel::send(&protocol::status_message(Status::Ready, None));
             vm
@@ -287,6 +290,10 @@ fn handle_stop(vm: JavaVM) {
     // exactly what follows.
     let result = unsafe { vm.destroy() };
     std::mem::drop(vm);
+    // Drop the shared handles the main thread reads for `call_direct`: the VM
+    // is gone now. A direct call detaches the main thread when its outermost
+    // frame returns, so no main-thread attachment is left to block `destroy`.
+    crate::runtime::clear();
     match result {
         Ok(()) => {
             STATUS.finish(Status::Stopped);
@@ -355,7 +362,16 @@ fn handle_load_jar(
     });
 
     match result {
-        Ok(()) => channel::send(&protocol::load_jar_done_message(id, true, None)),
+        Ok(()) => {
+            // Mirror the (now guaranteed to exist) shared classloader so the
+            // main-thread `call_direct` resolves jar-loaded classes the same
+            // way `handle_call` does. Idempotent -- cheap `Arc` clone each
+            // successful load.
+            if let Some(l) = loader.as_ref() {
+                crate::runtime::set_loader(l.clone());
+            }
+            channel::send(&protocol::load_jar_done_message(id, true, None));
+        }
         Err(e) => channel::send(&protocol::load_jar_done_message(id, false, Some(&e.to_string()))),
     }
 }
@@ -677,74 +693,8 @@ fn handle_call(
     member: String,
     args: Vec<crate::commands::LispArg>,
 ) {
-    let result: jni::errors::Result<crate::commands::LispArg> = vm.attach_current_thread(|env| {
-        // A freshly attached thread's context classloader is null. Plain
-        // JNI class resolution (find_class/loadClass, used just below)
-        // doesn't need it, but Clojure's own namespace loader
-        // (clojure.lang.RT, used internally by `require`) does: it loads
-        // .clj source files as classpath *resources*, not classes, and
-        // that resolution path falls back through
-        // Thread.currentThread().getContextClassLoader(). Left null, the
-        // first touch of Clojure's runtime throws
-        // ExceptionInInitializerError before clojure.core even finishes
-        // loading — verified empirically during Phase 3's design spike
-        // (see docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md,
-        // "Feasibility"). Harmless for calls that never touch Clojure.
-        if let Some(global) = &loader {
-            let loader_local = env.new_local_ref(global.as_obj())?;
-            let thread_class = env.find_class(jni::jni_str!("java/lang/Thread"))?;
-            let current_thread = env
-                .call_static_method(&thread_class, jni::jni_str!("currentThread"), jni::jni_sig!(() -> java.lang.Thread), &[])?
-                .l()?;
-            env.call_method(
-                &current_thread,
-                jni::jni_str!("setContextClassLoader"),
-                jni::jni_sig!((cl: java.lang.ClassLoader) -> void),
-                &[jni::objects::JValue::Object(&loader_local)],
-            )?;
-        }
-
-        let (class, instance): (jni::objects::JClass, Option<jni::objects::JObject>) = match &target {
-            crate::commands::CallTarget::ClassName(name) => {
-                let class = match &loader {
-                    // A jar has been loaded at least once: classes it
-                    // provides only live in *this* classloader's URL list,
-                    // not on the default `FindClass` search path (verified
-                    // empirically in Task 7 — see `add_jar_url`'s own test,
-                    // which resolves `Greeter` the same way, via
-                    // `loadClass`, not `find_class`). Routing every
-                    // class-name lookup through the shared loader once it
-                    // exists still finds plain JDK classes too, since
-                    // `URLClassLoader#loadClass` delegates to its parent
-                    // (the platform loader) before consulting its own URLs.
-                    Some(global) => {
-                        let loader_local = env.new_local_ref(global.as_obj())?;
-                        resolve_class_via_loader(env, &loader_local, name)?
-                    }
-                    // No jar ever loaded: fall back to a plain `FindClass`,
-                    // which covers plain JDK classes (e.g. "java.lang.Math")
-                    // without needing a classloader object at all.
-                    None => {
-                        let internal_name = name.replace('.', "/");
-                        env.find_class(jni::strings::JNIString::from(internal_name))?
-                    }
-                };
-                (class, None)
-            }
-            crate::commands::CallTarget::Object(handle) => {
-                let global = crate::handles::resolve(*handle)
-                    .ok_or_else(|| marshal_error(&format!("unknown JVM object handle {handle}")))?;
-                let local = env.new_local_ref(global.as_obj())?;
-                (env.get_object_class(&local)?, Some(local))
-            }
-        };
-
-        if member == "<init>" {
-            invoke_constructor(env, &class, &args)
-        } else {
-            invoke_method(env, &class, instance.as_ref(), &member, &args)
-        }
-    });
+    let result: jni::errors::Result<crate::commands::LispArg> =
+        vm.attach_current_thread(|env| resolve_and_invoke(env, &loader, &target, &member, &args));
 
     match result {
         Ok(value) => {
@@ -753,6 +703,128 @@ fn handle_call(
         }
         Err(e) => channel::send(&protocol::call_done_message(id, false, None, Some(&e.to_string()))),
     }
+}
+
+/// Resolves TARGET.MEMBER against the shared classloader and invokes it with
+/// ARGS on an already-attached thread, returning the marshalled result.
+///
+/// Shared by the async worker (`handle_call`, on a spawned thread) and the
+/// synchronous main-thread path (`call_direct`). Identical behaviour in both:
+/// the only differences are which thread runs it and what the caller does
+/// with the `LispArg` afterward (an sexp `call-done` message vs. a direct
+/// `Value`).
+pub(crate) fn resolve_and_invoke(
+    env: &mut jni::Env,
+    loader: &Option<crate::runtime::SharedLoader>,
+    target: &crate::commands::CallTarget,
+    member: &str,
+    args: &[crate::commands::LispArg],
+) -> jni::errors::Result<crate::commands::LispArg> {
+    // A freshly attached thread's context classloader is null. Plain
+    // JNI class resolution (find_class/loadClass, used just below)
+    // doesn't need it, but Clojure's own namespace loader
+    // (clojure.lang.RT, used internally by `require`) does: it loads
+    // .clj source files as classpath *resources*, not classes, and
+    // that resolution path falls back through
+    // Thread.currentThread().getContextClassLoader(). Left null, the
+    // first touch of Clojure's runtime throws
+    // ExceptionInInitializerError before clojure.core even finishes
+    // loading — verified empirically during Phase 3's design spike
+    // (see docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md,
+    // "Feasibility"). Harmless for calls that never touch Clojure.
+    if let Some(global) = loader {
+        let loader_local = env.new_local_ref(global.as_obj())?;
+        let thread_class = env.find_class(jni::jni_str!("java/lang/Thread"))?;
+        let current_thread = env
+            .call_static_method(&thread_class, jni::jni_str!("currentThread"), jni::jni_sig!(() -> java.lang.Thread), &[])?
+            .l()?;
+        env.call_method(
+            &current_thread,
+            jni::jni_str!("setContextClassLoader"),
+            jni::jni_sig!((cl: java.lang.ClassLoader) -> void),
+            &[jni::objects::JValue::Object(&loader_local)],
+        )?;
+    }
+
+    let (class, instance): (jni::objects::JClass, Option<jni::objects::JObject>) = match target {
+        crate::commands::CallTarget::ClassName(name) => {
+            let class = match loader {
+                // A jar has been loaded at least once: classes it
+                // provides only live in *this* classloader's URL list,
+                // not on the default `FindClass` search path (verified
+                // empirically in Task 7 — see `add_jar_url`'s own test,
+                // which resolves `Greeter` the same way, via
+                // `loadClass`, not `find_class`). Routing every
+                // class-name lookup through the shared loader once it
+                // exists still finds plain JDK classes too, since
+                // `URLClassLoader#loadClass` delegates to its parent
+                // (the platform loader) before consulting its own URLs.
+                Some(global) => {
+                    let loader_local = env.new_local_ref(global.as_obj())?;
+                    resolve_class_via_loader(env, &loader_local, name)?
+                }
+                // No jar ever loaded: fall back to a plain `FindClass`,
+                // which covers plain JDK classes (e.g. "java.lang.Math")
+                // without needing a classloader object at all.
+                None => {
+                    let internal_name = name.replace('.', "/");
+                    env.find_class(jni::strings::JNIString::from(internal_name))?
+                }
+            };
+            (class, None)
+        }
+        crate::commands::CallTarget::Object(handle) => {
+            let global = crate::handles::resolve(*handle)
+                .ok_or_else(|| marshal_error(&format!("unknown JVM object handle {handle}")))?;
+            let local = env.new_local_ref(global.as_obj())?;
+            (env.get_object_class(&local)?, Some(local))
+        }
+    };
+
+    if member == "<init>" {
+        invoke_constructor(env, &class, args)
+    } else {
+        invoke_method(env, &class, instance.as_ref(), member, args)
+    }
+}
+
+thread_local! {
+    /// Nesting depth of in-flight `call_direct` frames on this (the Emacs
+    /// main) thread. The main thread attaches to the JVM permanently — cheap
+    /// re-check when already attached — but jni 0.22 exposes no daemon
+    /// attach, and `DestroyJavaVM` blocks on any live non-daemon attachment.
+    /// So the outermost frame (depth back to 0) detaches the thread again, so
+    /// `jvm--stop` (always a separate, non-nested call) finds it detached.
+    /// Nested reentrant calls (Lisp→JVM→Lisp→JVM) share the one attachment.
+    static ATTACH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs a synchronous TARGET.MEMBER call on the current (Emacs main) thread:
+/// attach to the shared JVM, resolve + invoke via `resolve_and_invoke`,
+/// return the marshalled result. Detaches the thread when the outermost frame
+/// returns (see `ATTACH_DEPTH`). Called by the `jvm--call-direct` defun, which
+/// converts the `LispArg` to a real `Value` on the same thread's live `Env`.
+pub(crate) fn call_direct(
+    vm: &JavaVM,
+    loader: &Option<crate::runtime::SharedLoader>,
+    target: &crate::commands::CallTarget,
+    member: &str,
+    args: &[crate::commands::LispArg],
+) -> jni::errors::Result<crate::commands::LispArg> {
+    ATTACH_DEPTH.with(|d| d.set(d.get() + 1));
+    let result = vm.attach_current_thread(|env| resolve_and_invoke(env, loader, target, member, args));
+    let depth = ATTACH_DEPTH.with(|d| {
+        let n = d.get() - 1;
+        d.set(n);
+        n
+    });
+    if depth == 0 {
+        // Best-effort: a failed detach leaves the thread attached, which only
+        // risks a later `jvm--stop` blocking in `destroy` — not memory unsafety
+        // — so there is nothing to signal to the caller here.
+        let _ = vm.detach_current_thread();
+    }
+    result
 }
 
 /// Resolves NAME (a dotted binary class name, e.g. `"java.lang.String"` or

@@ -8,6 +8,7 @@ mod lisp_requests;
 mod marshal;
 mod pending;
 mod protocol;
+mod runtime;
 mod shim;
 mod status;
 mod worker;
@@ -30,6 +31,7 @@ use crate::status::{Status, STATUS};
 emacs::define_errors! {
     jvm_illegal_transition "JVM operation not allowed in the current state"
     jvm_invalid_argument "Unsupported Lisp value for a JVM call argument"
+    jvm_error "JVM call failed"
 }
 
 #[defun(mod_in_name = false, name = "jvm--init-channel")]
@@ -87,22 +89,60 @@ fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64
     if STATUS.get() != Status::Ready {
         return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
     }
-    let target = if let Ok(class_name) = target.into_rust::<String>() {
-        commands::CallTarget::ClassName(class_name)
-    } else {
-        // `JvmHandle` only has a `FromLisp` impl for `&JvmHandle` (the
-        // `emacs` crate's blanket `user-ptr` impl is `impl<'e, T: Transfer>
-        // FromLisp<'e> for &'e T`, not for a bare `T` — verified against
-        // the vendored emacs-0.21.0 source, `src/types/user_ptr.rs`), so
-        // this must ask for a reference, not an owned value.
-        let h: &handles::JvmHandle = target.into_rust()?;
-        commands::CallTarget::Object(h.0)
-    };
+    let target = parse_call_target(target)?;
     let args = lisp_list_to_args(args)?;
     let id = worker::next_request_id();
     match worker::send_command(commands::Cmd::Call { id, target, member, args }) {
         Ok(()) => Ok(id),
         Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
+    }
+}
+
+/// Interprets a `jvm-call`/`jvm-call-direct` TARGET argument: a string is a
+/// fully-qualified class name (for a static call or `<init>`); anything else
+/// must be a `JvmHandle` `user-ptr` naming a live JVM object.
+///
+/// `JvmHandle` only has a `FromLisp` impl for `&JvmHandle` (the `emacs`
+/// crate's blanket `user-ptr` impl is `impl<'e, T: Transfer> FromLisp<'e> for
+/// &'e T`, not for a bare `T` — verified against the vendored emacs-0.21.0
+/// source, `src/types/user_ptr.rs`), so this asks for a reference, not an
+/// owned value.
+fn parse_call_target(target: Value) -> Result<commands::CallTarget> {
+    if let Ok(class_name) = target.into_rust::<String>() {
+        Ok(commands::CallTarget::ClassName(class_name))
+    } else {
+        let h: &handles::JvmHandle = target.into_rust()?;
+        Ok(commands::CallTarget::Object(h.0))
+    }
+}
+
+/// Synchronous counterpart of `jvm--call`: resolves and invokes
+/// TARGET.MEMBER with ARGS on *this* (the Emacs main) thread, and returns the
+/// result value directly instead of a request id. Attaches the main thread to
+/// the running JVM, runs the call, detaches when its outermost frame returns
+/// (`jvm_thread::call_direct`). A failed call signals `jvm-error`.
+///
+/// Distinct from `jvm-call-sync` (`elisp/jvm.el`), which is the *async*
+/// `jvm--call` plus a blocking wait on the worker's `call-done` reply. This
+/// primitive never touches the worker thread or the channel: it is the
+/// experimental "attach, execute, return" path (see plan
+/// `docs/superpowers/plans/2026-09-13-sync-lisp-clojure-plan.md`). A long call
+/// blocks Emacs's main loop for its whole duration — the caller must keep
+/// heavy/blocking work on the Clojure side's own threads.
+#[defun(mod_in_name = false, name = "jvm--call-direct")]
+fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value) -> Result<Value<'e>> {
+    if STATUS.get() != Status::Ready {
+        return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
+    }
+    let Some(vm) = runtime::vm() else {
+        return env.signal(jvm_illegal_transition, ("no running JVM",));
+    };
+    let target = parse_call_target(target)?;
+    let args = lisp_list_to_args(args)?;
+    let loader = runtime::loader();
+    match jvm_thread::call_direct(&vm, &loader, &target, &member, &args) {
+        Ok(arg) => lisp_requests::lisp_arg_to_value(env, &arg),
+        Err(e) => env.signal(jvm_error, (e.to_string(),)),
     }
 }
 
