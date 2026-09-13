@@ -512,12 +512,16 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::
             let crate::commands::LispArg::Str(message) = result else {
                 return Ok(());
             };
-            complete_with_non_local_exit(
+            complete_future_with_reply(
                 env,
                 &future_local,
-                0,
-                crate::commands::LispReplyValue::Symbol { name: "error".to_string(), keyword: false },
-                crate::commands::LispReplyValue::Str(message),
+                crate::commands::LispReplyValue::Signal {
+                    symbol: Box::new(crate::commands::LispReplyValue::Symbol {
+                        name: "error".to_string(),
+                        keyword: false,
+                    }),
+                    data: Box::new(crate::commands::LispReplyValue::Str(message)),
+                },
             )?;
         }
         Ok(())
@@ -550,24 +554,7 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispReplyValu
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
         let future_local = env.new_local_ref(future.as_obj())?;
-        match value {
-            crate::commands::LispReplyValue::Signal { symbol, data } => {
-                complete_with_non_local_exit(env, &future_local, 0, *symbol, *data)?;
-            }
-            crate::commands::LispReplyValue::Throw { tag, value } => {
-                complete_with_non_local_exit(env, &future_local, 1, *tag, *value)?;
-            }
-            other => {
-                let obj = build_lisp_reply_object(env, other)?;
-                env.call_method(
-                    &future_local,
-                    jni::jni_str!("complete"),
-                    jni::jni_sig!((v: java.lang.Object) -> boolean),
-                    &[jni::objects::JValueOwned::Object(obj).borrow()],
-                )?;
-            }
-        }
-        Ok(())
+        complete_future_with_reply(env, &future_local, value)
     });
     if let Err(e) = result {
         channel::send(&protocol::log_message(
@@ -580,7 +567,11 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispReplyValu
 /// Builds the actual Java value a successful `LispReplyValue` becomes —
 /// factored out of `handle_lisp_reply` since the `LispReplyValue::Signal`/
 /// `Throw` cases (handled by that function's caller) never reach here.
-fn build_lisp_reply_object<'local>(
+///
+/// `pub(crate)` because the reentrant direct path (`shim.rs`) builds the same
+/// Java object on its own thread, from the `LispReplyValue`
+/// `lisp_requests::compute_reply` returns, instead of over the channel.
+pub(crate) fn build_lisp_reply_object<'local>(
     env: &mut jni::Env<'local>,
     value: crate::commands::LispReplyValue,
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
@@ -648,20 +639,64 @@ fn build_lisp_reply_object<'local>(
     }
 }
 
-/// Builds an `emacs_jni.core.LispNonLocalExit(kind, symbolOrTag,
-/// dataOrValue)` from two already-classified reply values and completes
-/// FUTURE exceptionally with it. `kind` is 0 (signal) or 1 (throw).
-fn complete_with_non_local_exit<'local>(
+/// Turns one `LispReplyValue` into a Java result: a `Signal`/`Throw`
+/// completes FUTURE exceptionally with the matching `LispNonLocalExit`, and
+/// anything else completes it normally with its built object.
+///
+/// Shared by the async worker (`handle_lisp_reply`, completing a registered
+/// future) and the reentrant direct path (`shim.rs`'s `applyAsync` fast path,
+/// completing a fresh, immediately-returned future) — Clojure's `apply`
+/// derefs that future either way, so both must produce the identical shape.
+pub(crate) fn complete_future_with_reply<'local>(
     env: &mut jni::Env<'local>,
     future: &jni::objects::JObject<'local>,
+    value: crate::commands::LispReplyValue,
+) -> jni::errors::Result<()> {
+    match value {
+        crate::commands::LispReplyValue::Signal { symbol, data } => {
+            let ex = build_non_local_exit(env, 0, *symbol, *data)?;
+            env.call_method(
+                future,
+                jni::jni_str!("completeExceptionally"),
+                jni::jni_sig!((ex: java.lang.Throwable) -> boolean),
+                &[jni::objects::JValueOwned::Object(ex).borrow()],
+            )?;
+        }
+        crate::commands::LispReplyValue::Throw { tag, value } => {
+            let ex = build_non_local_exit(env, 1, *tag, *value)?;
+            env.call_method(
+                future,
+                jni::jni_str!("completeExceptionally"),
+                jni::jni_sig!((ex: java.lang.Throwable) -> boolean),
+                &[jni::objects::JValueOwned::Object(ex).borrow()],
+            )?;
+        }
+        other => {
+            let obj = build_lisp_reply_object(env, other)?;
+            env.call_method(
+                future,
+                jni::jni_str!("complete"),
+                jni::jni_sig!((v: java.lang.Object) -> boolean),
+                &[jni::objects::JValueOwned::Object(obj).borrow()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Builds an `emacs_jni.core.LispNonLocalExit(kind, symbolOrTag,
+/// dataOrValue)` from two already-classified reply values. `kind` is 0
+/// (signal) or 1 (throw).
+fn build_non_local_exit<'local>(
+    env: &mut jni::Env<'local>,
     kind: i32,
     a: crate::commands::LispReplyValue,
     b: crate::commands::LispReplyValue,
-) -> jni::errors::Result<()> {
+) -> jni::errors::Result<jni::objects::JObject<'local>> {
     let a_obj = build_lisp_reply_object(env, a)?;
     let b_obj = build_lisp_reply_object(env, b)?;
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
-    let ex = env.new_object(
+    env.new_object(
         &class,
         jni::jni_sig!((kind: int, a: java.lang.Object, b: java.lang.Object) -> void),
         &[
@@ -669,14 +704,28 @@ fn complete_with_non_local_exit<'local>(
             jni::objects::JValue::Object(&a_obj),
             jni::objects::JValue::Object(&b_obj),
         ],
-    )?;
-    env.call_method(
-        future,
-        jni::jni_str!("completeExceptionally"),
-        jni::jni_sig!((ex: java.lang.Throwable) -> boolean),
-        &[jni::objects::JValueOwned::Object(ex).borrow()],
-    )?;
-    Ok(())
+    )
+}
+
+/// Throws a `LispNonLocalExit` for a Lisp signal/throw raised in a reentrant
+/// direct-path native (`shim.rs`'s synchronous natives), so it propagates up
+/// the Clojure stack exactly like the checked exception `block_on_lisp_reply`
+/// rethrows on the async path. Returns the `Error::JavaException` the caller
+/// hands back so the `native_method!` policy leaves this pending exception in
+/// place (rather than throwing a fresh `RuntimeException` over it).
+pub(crate) fn throw_non_local_exit(
+    env: &mut jni::Env,
+    kind: i32,
+    a: crate::commands::LispReplyValue,
+    b: crate::commands::LispReplyValue,
+) -> jni::errors::Error {
+    let thrown = build_non_local_exit(env, kind, a, b)
+        .and_then(|ex| env.cast_local::<jni::objects::JThrowable>(ex))
+        .and_then(|ex| env.throw(&ex));
+    match thrown {
+        Err(e) => e,
+        Ok(()) => marshal_error("env.throw unexpectedly left no pending exception"),
+    }
 }
 
 /// Handles a `Cmd::Call`: resolves TARGET.MEMBER reflectively and invokes

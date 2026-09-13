@@ -8,6 +8,7 @@ mod lisp_requests;
 mod marshal;
 mod pending;
 mod protocol;
+mod reentry;
 mod runtime;
 mod shim;
 mod status;
@@ -140,6 +141,11 @@ fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value)
     let target = parse_call_target(target)?;
     let args = lisp_list_to_args(args)?;
     let loader = runtime::loader();
+    // Record this frame's `Env` so any Clojure -> Lisp callback made *during*
+    // the call runs directly on it (`reentry`/`shim`), rather than deadlocking
+    // on the async queue this blocked main thread cannot drain. Dropped when
+    // the call returns or unwinds.
+    let _scope = reentry::enter(env);
     match jvm_thread::call_direct(&vm, &loader, &target, &member, &args) {
         Ok(arg) => lisp_requests::lisp_arg_to_value(env, &arg),
         Err(e) => env.signal(jvm_error, (e.to_string(),)),
