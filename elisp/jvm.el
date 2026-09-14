@@ -366,6 +366,35 @@ come back as an opaque wrapped JVM object, same limitation as any other
 non-scalar `jvm-call' result."
   (jvm-clojure--invoke-with-form "clojure.core" "eval" code timeout))
 
+(defun jvm-clojure--invoke-with-form-direct (var-ns var-name form-string)
+  "Direct (main-thread, synchronous) counterpart of
+`jvm-clojure--invoke-with-form': resolve VAR-NS/VAR-NAME, read FORM-STRING,
+and invoke the resolved IFn with it, every step via `jvm-call-direct'. Returns
+the result value directly (not an (OK RESULT ERR) tuple); a failure signals
+`jvm-error', and a Lisp signal/throw from a reentrant callback propagates out
+as itself. Because the main thread stays attached across these calls, thread-
+locals (e.g. `*ns*') set by one persist into the next."
+  (let* ((fn (jvm-call-direct "clojure.java.api.Clojure" "var" (list var-ns var-name)))
+         (form (jvm-call-direct "clojure.java.api.Clojure" "read" (list form-string))))
+    (jvm-call-direct fn "invoke" (list form))))
+
+(defun jvm-clojure-require-direct (namespace)
+  "Direct counterpart of `jvm-clojure-require'. Requires the Clojure
+NAMESPACE synchronously on this thread; returns the result value directly and
+signals `jvm-error' on failure."
+  (jvm-clojure--invoke-with-form-direct "clojure.core" "require" namespace))
+
+(defun jvm-clojure-eval-string-direct (code)
+  "Direct counterpart of `jvm-clojure-eval-string': evaluate CODE (a string of
+Clojure source) synchronously on the Emacs main thread and return its result
+value directly (signalling `jvm-error' on failure), with no worker round trip.
+
+Unlike `jvm-clojure-eval-string', successive calls run on the *same*, always-
+attached JVM thread, so a thread-local effect (e.g. `*ns*' after `in-ns', or a
+dynamic binding) does persist across calls. It blocks Emacs's main loop for the
+whole eval, so keep heavy or blocking work on the Clojure side's own threads."
+  (jvm-clojure--invoke-with-form-direct "clojure.core" "eval" code))
+
 (defun jvm-nrepl-start (&optional port bind timeout)
   "Start an nREPL server (requiring `nrepl.server' first if needed).
 PORT defaults to 0, letting the OS pick a free port. BIND, if non-nil,

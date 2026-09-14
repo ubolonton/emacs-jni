@@ -8,7 +8,9 @@
 //! and shared classloader to the main thread, so a direct call resolves
 //! jar-loaded classes exactly as `handle_call` does.
 
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::ThreadId;
 
 use jni::objects::JObject;
 use jni::refs::Global;
@@ -22,6 +24,20 @@ pub type SharedLoader = Arc<Global<JObject<'static>>>;
 
 static VM: Mutex<Option<JavaVM>> = Mutex::new(None);
 static LOADER: Mutex<Option<SharedLoader>> = Mutex::new(None);
+
+/// The Emacs main thread — the thread that loaded the module (`init` runs on
+/// it). Recorded once so `call_direct` can permanently attach *only* this
+/// thread to the JVM, giving it a stable `java.lang.Thread` peer (hence a
+/// stable `Thread.currentThread()` identity and persistent thread-locals such
+/// as Clojure dynamic bindings). A direct call on any other thread (a
+/// `make-thread` Lisp thread) is never recorded here, so it uses a scoped
+/// attach that detaches on return — transient, no leaked attachment.
+static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
+
+/// Whether the main thread currently holds its one-time permanent attachment.
+/// Set true after `call_direct` attaches it, reset when the JVM stops (so a
+/// later restart re-attaches on the next direct call).
+static MAIN_ATTACHED: AtomicBool = AtomicBool::new(false);
 
 /// Stores the `JavaVM` (Clone in jni 0.22) once the worker creates it.
 pub fn set_vm(vm: JavaVM) {
@@ -44,9 +60,35 @@ pub fn loader() -> Option<SharedLoader> {
     LOADER.lock().unwrap().clone()
 }
 
-/// Clears both handles when the JVM stops. The main thread must not keep a
-/// stale `JavaVM` after `destroy`.
+/// Records the Emacs main thread. Called from module `init`, which runs on
+/// it. Idempotent — a second call (e.g. a reload) keeps the first id.
+pub fn set_main_thread() {
+    let _ = MAIN_THREAD.set(std::thread::current().id());
+}
+
+/// Whether the caller is the Emacs main thread. False before `init` ran, and
+/// on every other thread (a `make-thread` Lisp thread, or the worker).
+pub fn on_main_thread() -> bool {
+    MAIN_THREAD.get().is_some_and(|id| *id == std::thread::current().id())
+}
+
+/// Whether the main thread holds its permanent JVM attachment.
+pub fn main_attached() -> bool {
+    MAIN_ATTACHED.load(Ordering::SeqCst)
+}
+
+/// Records that the main thread now holds (true) or has dropped (false) its
+/// permanent attachment.
+pub fn set_main_attached(attached: bool) {
+    MAIN_ATTACHED.store(attached, Ordering::SeqCst);
+}
+
+/// Clears the shared handles when the JVM stops. The main thread must not keep
+/// a stale `JavaVM` after `destroy`. Also clears `MAIN_ATTACHED` so a restart
+/// re-attaches the main thread on its next direct call (the main thread itself
+/// is detached separately, in the `jvm--stop` defun, which runs on it).
 pub fn clear() {
     *VM.lock().unwrap() = None;
     *LOADER.lock().unwrap() = None;
+    MAIN_ATTACHED.store(false, Ordering::SeqCst);
 }

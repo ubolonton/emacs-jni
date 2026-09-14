@@ -138,11 +138,38 @@ durable Java before `env` drops; else fall back to enqueue + block for reply
 ## Deviations from the original design notes
 - Named `jvm--call-direct`/`jvm-call-direct` (not `-sync`): `jvm-call-sync`
   already exists (async `jvm-call` + a blocking wait on the worker).
-- No daemon attach: jni 0.22 exposes none, and `DestroyJavaVM` blocks on a
-  live non-daemon attachment. So the main thread attaches permanently but
-  `call_direct` detaches when its outermost frame returns (thread-local depth
-  counter) — the "attach, execute, detach, return" shape, with nested
-  reentrant calls sharing the one attachment.
+
+## Attach model (revised — supersedes the first-cut detach-per-call)
+The first cut detached the main thread when the outermost `call_direct` frame
+returned, to keep `DestroyJavaVM` from blocking on a live non-daemon
+attachment. That re-minted the thread's `java.lang.Thread` peer every call, so
+`Thread.currentThread().threadId()` changed and thread-locals (`*ns*`, Clojure
+dynamic bindings) never persisted. Revised, because in-process `DestroyJavaVM`
+was never reliable anyway and does not justify the churn:
+- Module `init` records the main thread's id (`runtime::set_main_thread`).
+- `call_direct` permanently attaches the main thread **once**
+  (`runtime::main_attached` flag), then always runs the invoke through a
+  **scoped** attach (`attach_current_thread_for_scope`). jni scoped-attach
+  detaches on return only if it *owns* the attachment (`java_vm.rs:1651`), so on
+  the permanently-attached main thread it is a no-op → stable identity +
+  persistent thread-locals; on any *other* thread (a `make-thread` Lisp thread)
+  it owns and detaches on return → transient, no leaked attachment.
+- `jvm--stop` (runs on the main thread) detaches the main thread best-effort
+  (`detach_current_thread` is a no-op if never attached) and resets the flag
+  before sending `Cmd::Stop`; the worker's `destroy` then waits only for its
+  own (caller-exempt) attachment. Stop stays best-effort.
+- `ATTACH_DEPTH` no longer drives detaching — it only gates the outbound
+  reentrant boundary (`describe_pending_java_exception`).
+- ERT `test/jvm-call-direct-test.el/thread-identity-is-stable-across-calls`.
+
+## Direct Clojure eval from Lisp
+`jvm-clojure-eval-string-direct` / `jvm-clojure-require-direct` (`elisp/jvm.el`)
+mirror the async `jvm-clojure-*`, but route every step through `jvm-call-direct`
+(no worker). They return the value directly (signal `jvm-error` on failure)
+rather than an `(OK RESULT ERR)` tuple. Because the main thread stays attached,
+a thread-local set by one direct eval persists into the next — ERT
+`test/jvm-clojure-direct-test.el` (eval scalar, require, and a `ThreadLocal`
+that persists across direct evals but not async ones).
 
 ## Follow-ups
 - Consider adopting the reviewed emacs-module-rs reentry API in place of the

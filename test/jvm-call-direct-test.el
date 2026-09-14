@@ -56,5 +56,17 @@ See `jvm-call-test--ensure-ready' for why every test does this itself."
   (should-error (jvm-call-direct "Calc" "noSuchMethod" '())
                 :type 'jvm-error))
 
+(ert-deftest emacs-jni-jvm-call-direct-test/thread-identity-is-stable-across-calls ()
+  "The main thread stays permanently attached across direct calls, so its
+`java.lang.Thread' peer -- hence `Thread.currentThread().threadId()' -- is
+identical for two separate top-level calls. (When each call detached the
+thread, a fresh peer with a new id was minted every time.)"
+  (jvm-call-direct-test--ensure-ready)
+  (let ((id1 (jvm-call-direct
+              (jvm-call-direct "java.lang.Thread" "currentThread" nil) "threadId" nil))
+        (id2 (jvm-call-direct
+              (jvm-call-direct "java.lang.Thread" "currentThread" nil) "threadId" nil)))
+    (should (equal id1 id2))))
+
 (provide 'jvm-call-direct-test)
 ;;; jvm-call-direct-test.el ends here

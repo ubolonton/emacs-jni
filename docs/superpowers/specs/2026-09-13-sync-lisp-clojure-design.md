@@ -7,9 +7,9 @@ phase status and follow-ups.
 ## Goal
 
 A Lisp → JVM call that runs on the Emacs **main thread**: attach to the
-running JVM, resolve + invoke, return the value, detach — no worker thread,
-no channel round trip. Same-thread Clojure → Lisp callbacks made *during* such
-a call run directly, not over the async request queue.
+running JVM, resolve + invoke, return the value — no worker thread, no channel
+round trip. Same-thread Clojure → Lisp callbacks made *during* such a call run
+directly, not over the async request queue.
 
 Public entry: `jvm-call-direct` (and `jvm-new-direct`). The primitive is
 `jvm--call-direct`. It returns the value directly and signals `jvm-error` on
@@ -37,12 +37,27 @@ both into process globals so the main thread can attach and resolve jar
 classes exactly as `jvm_thread::resolve_and_invoke` does (shared with the async
 `handle_call`).
 
-jni 0.22 has no daemon attach, and `DestroyJavaVM` blocks on any live
-non-daemon attachment. So `call_direct` attaches the main thread permanently
-(cheap re-check when already attached) but **detaches when its outermost frame
-returns** — tracked by a thread-local depth counter. Between top-level direct
-calls the main thread is detached, so `jvm-stop`'s `destroy` never blocks;
-nested reentrant calls share the one attachment.
+The main thread is attached to the JVM **permanently, once** (`init` records
+its id; `call_direct` attaches it on the first direct call and sets
+`runtime::main_attached`). Every direct call then runs the invoke through a
+**scoped** attach (`attach_current_thread_for_scope`), which detaches on return
+only if it *owns* the attachment (`java_vm.rs:1651`):
+
+- Main thread: already permanently attached → the scoped attach is a cheap
+  no-op → its `java.lang.Thread` peer is stable, so `Thread.currentThread()`
+  identity and thread-locals (`*ns*`, Clojure dynamic bindings) persist across
+  calls.
+- Any other thread (a `make-thread` Lisp thread): never permanently attached →
+  the scoped attach owns and detaches on return → transient, no leaked
+  attachment.
+
+`jvm-stop` runs on the main thread and detaches it best-effort before sending
+`Cmd::Stop` (a no-op if never attached), so the worker's `destroy` — which
+waits only for *other* non-daemon threads, itself being the exempt caller —
+does not block on it. In-process `DestroyJavaVM` is unreliable regardless, so
+stop is best-effort by design; we do not contort the call path (the earlier
+detach-per-call) to avoid non-daemon attachments. The `ATTACH_DEPTH` counter
+now only gates the outbound reentrant boundary, not detaching.
 
 ## Reentrancy: the Env stack
 
@@ -109,13 +124,18 @@ once. `FreeRef` stays queue-only (its `Cleaner` thread pushes no scope).
 - `test/jvm-call-direct-test.el` — forward calls (static/instance, nil→false,
   bignum, overload, error paths), parity with `jvm-call-sync`.
 - `test/jvm-clj-direct-test.el` — reentrant Clojure→Lisp (sync natives, apply,
-  require-symbol, signal-propagates) with no deadlock; gated behind
+  require-symbol, signal + throw propagate) with no deadlock; gated behind
   `EMACS_JNI_CLOJURE_JARS_DIR` + `test-support`.
+- `test/jvm-call-direct-test.el/thread-identity-is-stable-across-calls` — the
+  main thread's `Thread.currentThread().threadId()` is identical across two
+  separate direct calls (regression guard for the permanent-attach model).
+- `test/jvm-clojure-direct-test.el` — `jvm-clojure-eval-string-direct` /
+  `jvm-clojure-require-direct`: scalar eval, require, and a `ThreadLocal` that
+  persists across direct evals but not across async ones.
 
 ## Risks and tradeoffs
 
 - A long direct call freezes Emacs's main loop for its duration.
-- Attach/detach per top-level direct call has a small cost (no daemon attach).
 - The reentrant `unsafe Env::new(raw)` rests on the same-thread /
   deeper-on-stack invariant; a Clojure callback deferred to a background thread
   correctly falls back to the async queue (its thread's Env stack is empty).

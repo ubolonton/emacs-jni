@@ -18,6 +18,10 @@ emacs::plugin_is_GPL_compatible!();
 
 #[emacs::module(defun_prefix = "", separator = "")]
 fn init(env: &Env) -> Result<Value<'_>> {
+    // Module load runs on the Emacs main thread; record it so `jvm--call-direct`
+    // permanently attaches only this thread to the JVM (stable thread identity),
+    // and lets any other caller fall back to a transient scoped attach.
+    runtime::set_main_thread();
     let feature = env.intern("emacs-jni")?;
     env.call("provide", (feature,))
 }
@@ -65,10 +69,23 @@ fn jvm_pause(env: &Env) -> Result<()> {
 #[defun(mod_in_name = false, name = "jvm--stop")]
 fn jvm_stop(env: &Env) -> Result<()> {
     match STATUS.begin_stop() {
-        Ok(()) => match worker::send_command(commands::Cmd::Stop) {
-            Ok(()) => Ok(()),
-            Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
-        },
+        Ok(()) => {
+            // This defun runs on the main thread — the one `call_direct` may
+            // have permanently attached. Detach it here (best-effort, and a
+            // no-op if it was never attached) so the worker's `destroy` does
+            // not block waiting for it (`destroy` waits only for *other*
+            // non-daemon threads; the worker itself is the caller, exempt).
+            // Reset the flag so a later restart re-attaches on its next
+            // direct call.
+            if let Some(vm) = runtime::vm() {
+                let _ = vm.detach_current_thread();
+            }
+            runtime::set_main_attached(false);
+            match worker::send_command(commands::Cmd::Stop) {
+                Ok(()) => Ok(()),
+                Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
+            }
+        }
         Err(current) => env.signal(jvm_illegal_transition, (current.as_tag(),)),
     }
 }
@@ -119,9 +136,10 @@ fn parse_call_target(target: Value) -> Result<commands::CallTarget> {
 
 /// Synchronous counterpart of `jvm--call`: resolves and invokes
 /// TARGET.MEMBER with ARGS on *this* (the Emacs main) thread, and returns the
-/// result value directly instead of a request id. Attaches the main thread to
-/// the running JVM, runs the call, detaches when its outermost frame returns
-/// (`jvm_thread::call_direct`). A failed call signals `jvm-error`.
+/// result value directly instead of a request id. The main thread stays
+/// permanently attached to the running JVM across calls (stable thread
+/// identity + persistent thread-locals); see `jvm_thread::call_direct`. A
+/// failed call signals `jvm-error`.
 ///
 /// Distinct from `jvm-call-sync` (`elisp/jvm.el`), which is the *async*
 /// `jvm--call` plus a blocking wait on the worker's `call-done` reply. This

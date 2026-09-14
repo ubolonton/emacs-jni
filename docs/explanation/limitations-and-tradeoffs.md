@@ -139,6 +139,12 @@ dispatch model that everything else in this module uses. See
 [How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md#switch-namespaces-inside-a-single-call)
 for the workaround.
 
+The direct counterpart, `jvm-clojure-eval-string-direct`, does *not* have
+this limitation: it runs on the Emacs main thread, which stays permanently
+attached to the JVM across calls, so `*ns*` and other thread-locals set by
+one direct eval persist into the next. The trade-off is the opposite one —
+it blocks Emacs for the whole eval (see below) and offers no concurrency.
+
 ## A synchronous Clojure-to-Lisp call waits for Emacs to be free
 
 Every `emacs-jni.clj` call — `intern`, `apply`, `type-of`, and so
@@ -160,10 +166,19 @@ bounds the wait rather than letting a stalled call hang forever.
 `jvm-call-direct` runs the whole call on the Emacs main thread (attach,
 execute, return). While it runs, Emacs's main loop is frozen — so keep
 any heavy or blocking work on Clojure's own threads and return promptly.
-Because jni 0.22 offers no daemon attach, the main thread attaches and
-detaches once per top-level direct call (nested reentrant calls share the
-attachment), a small per-call cost that also keeps `jvm-stop` from
-blocking in `DestroyJavaVM`.
+This holds even from a `make-thread` Lisp thread: a direct call blocking
+in the JVM holds Emacs's global thread lock the whole time (no module API
+releases it), so it freezes every Lisp thread, not just its own — a
+`make-thread` cannot run a blocking direct call "in the background".
+
+The main thread stays permanently attached to the JVM across direct calls,
+so its `Thread.currentThread()` identity and thread-locals are stable (see
+`jvm-clojure-eval-string-direct` above). `jvm-stop`, which runs on the main
+thread, detaches it before shutdown so `DestroyJavaVM` does not block on it.
+`DestroyJavaVM` is unreliable in-process regardless, so `jvm-stop` is
+best-effort either way — the design does not contort the call path to avoid
+non-daemon attachments. A direct call from any *other* thread uses a scoped
+attach that detaches on return, so it leaves no attachment behind.
 
 A Lisp signal or throw raised in a same-thread callback *during* the call
 propagates through Clojure as a `LispNonLocalExit` and is reconstructed at

@@ -291,8 +291,10 @@ fn handle_stop(vm: JavaVM) {
     let result = unsafe { vm.destroy() };
     std::mem::drop(vm);
     // Drop the shared handles the main thread reads for `call_direct`: the VM
-    // is gone now. A direct call detaches the main thread when its outermost
-    // frame returns, so no main-thread attachment is left to block `destroy`.
+    // is gone now. The main thread already detached itself in the `jvm--stop`
+    // defun (before this `Cmd::Stop` was sent), so no main-thread attachment
+    // was left to block this `destroy`. `clear` also resets the
+    // main-attached flag so a restart re-attaches on the next direct call.
     crate::runtime::clear();
     match result {
         Ok(()) => {
@@ -838,13 +840,13 @@ pub(crate) fn resolve_and_invoke(
 }
 
 thread_local! {
-    /// Nesting depth of in-flight `call_direct` frames on this (the Emacs
-    /// main) thread. The main thread attaches to the JVM permanently — cheap
-    /// re-check when already attached — but jni 0.22 exposes no daemon
-    /// attach, and `DestroyJavaVM` blocks on any live non-daemon attachment.
-    /// So the outermost frame (depth back to 0) detaches the thread again, so
-    /// `jvm--stop` (always a separate, non-nested call) finds it detached.
-    /// Nested reentrant calls (Lisp→JVM→Lisp→JVM) share the one attachment.
+    /// Nesting depth of in-flight `call_direct` frames on this thread. Used
+    /// only to gate the reentrant-boundary outbound path
+    /// (`describe_pending_java_exception` classifies a `LispNonLocalExit` into
+    /// `PENDING_NLE` only when `> 0`, i.e. inside a direct call — never on the
+    /// async worker thread). It no longer drives detaching: the main thread
+    /// stays permanently attached, and non-main callers rely on the scoped
+    /// attach in `call_direct` to detach on return.
     static ATTACH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 
     /// Side channel from `describe_pending_java_exception` back to
@@ -875,9 +877,11 @@ pub(crate) enum DirectError {
 
 /// Runs a synchronous TARGET.MEMBER call on the current (Emacs main) thread:
 /// attach to the shared JVM, resolve + invoke via `resolve_and_invoke`,
-/// return the marshalled result. Detaches the thread when the outermost frame
-/// returns (see `ATTACH_DEPTH`). Called by the `jvm--call-direct` defun, which
-/// converts the `LispArg` to a real `Value` on the same thread's live `Env`.
+/// return the marshalled result. The main thread stays permanently attached
+/// (for a stable thread identity); the per-call attach is scoped, so on any
+/// *other* thread it detaches on return (see the attach comments in the body).
+/// Called by the `jvm--call-direct` defun, which converts the `LispArg` to a
+/// real `Value` on the same thread's live `Env`.
 pub(crate) fn call_direct(
     vm: &JavaVM,
     loader: &Option<crate::runtime::SharedLoader>,
@@ -889,18 +893,31 @@ pub(crate) fn call_direct(
     // Clear any stale slot before this frame's invoke, so a `Some` seen after
     // it can only be this frame's (each frame fills and takes its own).
     PENDING_NLE.with(|s| *s.borrow_mut() = None);
-    let result = vm.attach_current_thread(|env| resolve_and_invoke(env, loader, target, member, args));
-    let depth = ATTACH_DEPTH.with(|d| {
-        let n = d.get() - 1;
-        d.set(n);
-        n
-    });
-    if depth == 0 {
-        // Best-effort: a failed detach leaves the thread attached, which only
-        // risks a later `jvm--stop` blocking in `destroy` — not memory unsafety
-        // — so there is nothing to signal to the caller here.
-        let _ = vm.detach_current_thread();
+
+    // Attach the Emacs main thread to the JVM *permanently*, once. A permanent
+    // attach installs a thread-local guard that keeps the thread attached
+    // until it terminates (or `jvm--stop` detaches it), so its
+    // `java.lang.Thread` peer — hence `Thread.currentThread()` identity and any
+    // thread-locals (Clojure dynamic bindings, `*ns*`) — stays stable across
+    // calls. The scoped attach below is then a cheap no-op on it (it does not
+    // own the attachment, so it never detaches on return). Only the main
+    // thread gets this: a direct call from any other thread (e.g. a
+    // `make-thread` Lisp thread) is never recorded as main, so its scoped
+    // attach owns the attachment and detaches on return — transient, no leaked
+    // attachment to block a later `destroy`.
+    if crate::runtime::on_main_thread() && !crate::runtime::main_attached() {
+        if vm.attach_current_thread(|_env| Ok::<(), jni::errors::Error>(())).is_ok() {
+            crate::runtime::set_main_attached(true);
+        }
     }
+
+    // The actual invoke always goes through a *scoped* attach: a no-op on the
+    // permanently-attached main thread, an owning attach-and-detach on any
+    // other thread.
+    let result =
+        vm.attach_current_thread_for_scope(|env| resolve_and_invoke(env, loader, target, member, args));
+
+    ATTACH_DEPTH.with(|d| d.set(d.get() - 1));
     match result {
         Ok(arg) => Ok(arg),
         // A `LispNonLocalExit` reconstructed by `describe_pending_java_exception`
