@@ -168,7 +168,7 @@ mirror the async `jvm-clj-*`, but route every step through `jvm-call-direct`
 (no worker). They return the value directly (signal `jvm-error` on failure)
 rather than an `(OK RESULT ERR)` tuple. Because the main thread stays attached,
 a thread-local set by one direct eval persists into the next — ERT
-`test/jvm-clojure-direct-test.el` (eval scalar, require, and a `ThreadLocal`
+`test/jvm-clj-eval-direct-test.el` (eval scalar, require, and a `ThreadLocal`
 that persists across direct evals but not async ones).
 
 ## Follow-ups

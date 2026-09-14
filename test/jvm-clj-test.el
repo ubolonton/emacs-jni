@@ -6,7 +6,7 @@
 
 (defvar jvm-clj-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR")
   "Directory containing Clojure/nREPL jars, or nil if unset. See
-`jvm-clojure-test--jars-dir' in test/jvm-clojure-test.el for why tests in
+`jvm-clj-eval-test--jars-dir' in test/jvm-clj-eval-test.el for why tests in
 this file skip cleanly (not fail) when this isn't configured.")
 
 (defvar jvm-clj-test--ready nil

@@ -5,7 +5,7 @@
 | Variable | Read by | Effect |
 |---|---|---|
 | `EMACS_JNI_MODULE_PATH` | `elisp/jvm.el`, at `require` time. | Overrides the path to the built `.so` module. Without it, the path defaults to a location relative to `elisp/jvm.el` itself (`../target/debug/libemacs_jni.so`). |
-| `EMACS_JNI_CLOJURE_JARS_DIR` | `test/run-ert-tests.sh`, `test/jvm-clojure-test.el`, and `test/fetch-clojure-jars.sh`'s printed usage line. Not read by the module itself. | Points the test suite at a directory of Clojure/nREPL jars. Application code that wants the same convention reads it with `getenv`, as the tutorials do — the module does not read it automatically. |
+| `EMACS_JNI_CLOJURE_JARS_DIR` | `test/run-ert-tests.sh`, `test/jvm-clj-eval-test.el`, and `test/fetch-clojure-jars.sh`'s printed usage line. Not read by the module itself. | Points the test suite at a directory of Clojure/nREPL jars. Application code that wants the same convention reads it with `getenv`, as the tutorials do — the module does not read it automatically. |
 | `EMACS_JNI_TEST_FEATURES` | `test/run-ert-tests.sh`. | Set to `test-support` to build the module with its `test-support` Cargo feature, which enables the crash-recovery test in `test/jvm-crash-test.el`. |
 | `JAVA_HOME` | The `jni` crate's `invocation` feature, at runtime. | Locates `libjvm.so`. If unset, `jni` falls back to finding `java` on `PATH`. |
 

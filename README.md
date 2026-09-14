@@ -77,7 +77,7 @@ Each `test/*.el` file runs in its own `emacs --batch` process (the
 embedded JVM is a per-process singleton, so test files can't safely
 share one).
 
-The Clojure tests in `test/jvm-clojure-test.el`, `test/jvm-clj-test.el`
+The Clojure tests in `test/jvm-clj-eval-test.el`, `test/jvm-clj-test.el`
 (Lisp access), and `test/jvm-clj-direct-test.el` (reentrant callbacks
 over `jvm-call-direct`) are gated behind `EMACS_JNI_CLOJURE_JARS_DIR` —
 they skip cleanly, not fail, when it's unset, so the rest of the suite
