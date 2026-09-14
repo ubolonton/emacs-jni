@@ -124,7 +124,7 @@ it.
 
 ## `*ns*` does not persist across separate Clojure eval calls
 
-Because each `jvm-clojure-eval-string` call runs on its own freshly
+Because each `jvm-clj-eval-string` call runs on its own freshly
 spawned thread, and Clojure's current-namespace pointer is
 thread-local, a namespace switch made by `(in-ns ...)` in one call is
 invisible to the next call — that call runs on a different thread,
@@ -139,7 +139,7 @@ dispatch model that everything else in this module uses. See
 [How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md#switch-namespaces-inside-a-single-call)
 for the workaround.
 
-The direct counterpart, `jvm-clojure-eval-string-direct`, does *not* have
+The direct counterpart, `jvm-clj-eval-string-direct`, does *not* have
 this limitation: it runs on the Emacs main thread, which stays permanently
 attached to the JVM across calls, so `*ns*` and other thread-locals set by
 one direct eval persist into the next. The trade-off is the opposite one —
@@ -173,7 +173,7 @@ releases it), so it freezes every Lisp thread, not just its own — a
 
 The main thread stays permanently attached to the JVM across direct calls,
 so its `Thread.currentThread()` identity and thread-locals are stable (see
-`jvm-clojure-eval-string-direct` above). `jvm-stop`, which runs on the main
+`jvm-clj-eval-string-direct` above). `jvm-stop`, which runs on the main
 thread, detaches it before shutdown so `DestroyJavaVM` does not block on it.
 `DestroyJavaVM` is unreliable in-process regardless, so `jvm-stop` is
 best-effort either way — the design does not contort the call path to avoid
@@ -208,7 +208,7 @@ cycle through one would leak, the same as any other cross-runtime cycle
 
 ## The nREPL server ships unhardened
 
-`jvm-nrepl-start` uses nREPL's own defaults: loopback-only usage
+`jvm-clj-nrepl-start` uses nREPL's own defaults: loopback-only usage
 assumed, no authentication, no TLS, no middleware selection. Anyone
 who can reach the port can evaluate arbitrary code with the
 permissions of the Emacs process. Hardening an nREPL server —

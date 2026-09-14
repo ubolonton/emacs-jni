@@ -26,9 +26,9 @@ regardless of ERT's execution order.")
     (setq jvm-clj-test--ready t)))
 
 (defun jvm-clj-test--eval (code)
-  "Evaluate CODE (Clojure source) via `jvm-clojure-eval-string', asserting
+  "Evaluate CODE (Clojure source) via `jvm-clj-eval-string', asserting
 success, and return its RESULT."
-  (let ((result (jvm-clojure-eval-string code)))
+  (let ((result (jvm-clj-eval-string code)))
     (should (car result))
     (nth 1 result)))
 
@@ -111,7 +111,7 @@ non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
 (ert-deftest emacs-jni-jvm-clj-test/apply-integer-result-becomes-a-clojure-value ()
   (jvm-clj-test--ensure-ready)
   ;; `+' returns an integer -> a Clojure Long, not an opaque LispObject.
-  ;; `jvm-clojure-eval-string' then marshals that Long back to Lisp as 3.
+  ;; `jvm-clj-eval-string' then marshals that Long back to Lisp as 3.
   (should (equal (jvm-clj-test--eval
                   "(emacs-jni.clj/apply (emacs-jni.clj/intern \"+\") 1 2)")
                  3)))
@@ -211,14 +211,14 @@ carrying tag and value."
               nil)))
 
 (ert-deftest emacs-jni-jvm-clj-test/clojure-calls-lisp-back-inside-a-lisp-to-clojure-call ()
-  "Reentrancy: this test's OWN call is Lisp -> Clojure (`jvm-clojure-eval-
+  "Reentrancy: this test's OWN call is Lisp -> Clojure (`jvm-clj-eval-
 string', serviced by `jvm-call-sync's `accept-process-output' loop). The
 Clojure code below itself calls back into Lisp twice (`apply', then
 `is-not-nil?' on the result) *during* that same outer call -- each inner
 round trip sends its own `(lisp-request)' wakeup, serviced by the SAME
 still-running outer `accept-process-output' loop, before the outer
 `eval' itself returns. See design spec, \"Core constraint\": \"a
-`clj/apply' issued from inside a `jvm-clojure-eval-string' is serviced by
+`clj/apply' issued from inside a `jvm-clj-eval-string' is serviced by
 the outer `-sync' wrapper's own `accept-process-output' loop.\""
   (jvm-clj-test--ensure-ready)
   (should (eq (jvm-clj-test--eval
@@ -268,7 +268,7 @@ does not change the imported function, while require-symbol tracks it."
               (str (early lst) \"|\" (str (late lst))))))")
     ;; early still `car' -> 1; late now `cdr' -> opaque LispObject (2 3),
     ;; whose prin1 is "(2 3)". Returned as a string to avoid depending on
-    ;; vector return marshaling in jvm-clojure-eval-string.
+    ;; vector return marshaling in jvm-clj-eval-string.
     "1|(2 3)")))
 
 (provide 'jvm-clj-test)

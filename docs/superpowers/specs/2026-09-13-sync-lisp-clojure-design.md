@@ -129,8 +129,8 @@ once. `FreeRef` stays queue-only (its `Cleaner` thread pushes no scope).
 - `test/jvm-call-direct-test.el/thread-identity-is-stable-across-calls` — the
   main thread's `Thread.currentThread().threadId()` is identical across two
   separate direct calls (regression guard for the permanent-attach model).
-- `test/jvm-clojure-direct-test.el` — `jvm-clojure-eval-string-direct` /
-  `jvm-clojure-require-direct`: scalar eval, require, and a `ThreadLocal` that
+- `test/jvm-clojure-direct-test.el` — `jvm-clj-eval-string-direct` /
+  `jvm-clj-require-direct`: scalar eval, require, and a `ThreadLocal` that
   persists across direct evals but not across async ones.
 
 ## Risks and tradeoffs

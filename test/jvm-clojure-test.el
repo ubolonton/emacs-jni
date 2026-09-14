@@ -1,7 +1,7 @@
 ;;; jvm-clojure-test.el --- Tests for Clojure eval + nREPL -*- lexical-binding: t; -*-
 
 (require 'ert)
-(require 'jvm)
+(require 'jvm-clj)
 
 (defvar jvm-clojure-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR")
   "Directory containing Clojure/nREPL jars, or nil if unset.
@@ -42,19 +42,19 @@ ExceptionInInitializerError the first time Clojure's runtime is touched
 
 (ert-deftest emacs-jni-jvm-clojure-test/require-a-namespace ()
   (jvm-clojure-test--ensure-ready)
-  (should (equal (jvm-clojure-require "clojure.set") '(t nil nil))))
+  (should (equal (jvm-clj-require "clojure.set") '(t nil nil))))
 
 (ert-deftest emacs-jni-jvm-clojure-test/eval-string-returns-marshalled-scalar ()
   (jvm-clojure-test--ensure-ready)
-  (should (equal (jvm-clojure-eval-string "(+ 40 (* 2 1))") '(t 42 nil))))
+  (should (equal (jvm-clj-eval-string "(+ 40 (* 2 1))") '(t 42 nil))))
 
 (ert-deftest emacs-jni-jvm-clojure-test/eval-string-propagates-clojure-error ()
   (jvm-clojure-test--ensure-ready)
-  (let ((result (jvm-clojure-eval-string "(/ 1 0)")))
+  (let ((result (jvm-clj-eval-string "(/ 1 0)")))
     (should (eq (nth 0 result) nil))
     (should (string-match-p "Divide by zero" (nth 2 result)))))
 
-(ert-deftest emacs-jni-jvm-nrepl-test/start-serves-real-bencode-protocol ()
+(ert-deftest emacs-jni-jvm-clj-nrepl-test/start-serves-real-bencode-protocol ()
   "Starts a real nREPL server and connects to it from a SEPARATE OS
 process (bash + /dev/tcp) speaking the real bencode wire protocol -- this
 is deliberately not Emacs's own network stack, since that's what an
@@ -62,7 +62,7 @@ actual external nREPL client does, and it's the exact mechanism verified
 working during the Phase 3 design spike (see the spec's Feasibility
 section)."
   (jvm-clojure-test--ensure-ready)
-  (let ((start-result (jvm-nrepl-start)))
+  (let ((start-result (jvm-clj-nrepl-start)))
     (should (car start-result))
     (let* ((port (car (nth 1 start-result)))
            (server (cdr (nth 1 start-result)))
@@ -83,9 +83,9 @@ section)."
       ;; server thread running for the rest of this batch process. Low
       ;; impact (the process exits right after), but a real gap if this
       ;; test is extended.
-      (jvm-nrepl-stop server))))
+      (jvm-clj-nrepl-stop server))))
 
-(ert-deftest emacs-jni-jvm-nrepl-test/bind-opens-the-server-beyond-loopback ()
+(ert-deftest emacs-jni-jvm-clj-nrepl-test/bind-opens-the-server-beyond-loopback ()
   "Passing BIND makes the server listen on the given interface instead
 of nREPL's loopback default. A loopback-only server is unreachable
 through VM/NAT port forwarding, which delivers the connection to a
@@ -94,7 +94,7 @@ socket for the bound port is a wildcard address, not loopback."
   (jvm-clojure-test--ensure-ready)
   (unless (executable-find "ss")
     (ert-skip "needs `ss' to inspect the listening socket's bind address"))
-  (let ((start-result (jvm-nrepl-start 0 "0.0.0.0")))
+  (let ((start-result (jvm-clj-nrepl-start 0 "0.0.0.0")))
     (should (car start-result))
     (let ((port (car (nth 1 start-result)))
           (server (cdr (nth 1 start-result))))
@@ -109,7 +109,7 @@ socket for the bound port is a wildcard address, not loopback."
             ;; ...and specifically NOT loopback-only, which is what the
             ;; default (no BIND) produces and what this option fixes.
             (should-not (string-match-p (format "127\\.0\\.0\\.1:%d\\b" port) listen)))
-        (jvm-nrepl-stop server)))))
+        (jvm-clj-nrepl-stop server)))))
 
 (provide 'jvm-clojure-test)
 ;;; jvm-clojure-test.el ends here

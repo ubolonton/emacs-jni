@@ -7,8 +7,8 @@ names are in the
 
 ## Check the result of a `-sync` call before using it
 
-`jvm-call-sync`, `jvm-new-sync`, `jvm-clojure-eval-string`,
-`jvm-nrepl-start`, and similar functions return `(OK RESULT ERR)`.
+`jvm-call-sync`, `jvm-new-sync`, `jvm-clj-eval-string`,
+`jvm-clj-nrepl-start`, and similar functions return `(OK RESULT ERR)`.
 `jvm-load-jar-sync` returns the shorter `(OK . ERR)`. Always check `OK`
 first:
 

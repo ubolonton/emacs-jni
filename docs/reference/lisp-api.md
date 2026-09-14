@@ -28,12 +28,6 @@ defaults to 30. Past the deadline, a `-sync` function signals
 | `jvm-new-sync` | `(class-name args &optional timeout)` | `(OK RESULT ERR)`. | |
 | `jvm-call-direct` | `(target member args)` | The `RESULT` value itself. | Like `jvm-call`, but runs the whole call synchronously on the Emacs main thread — no worker round trip — and returns the value directly. A genuine Java/Clojure failure signals `jvm-error`; a Lisp signal/throw raised in a same-thread callback is reconstructed and re-raised as its original `(signal …)`/`(throw …)`. Blocks Emacs's main loop for the call's duration; a same-thread Clojure→Lisp callback made during the call runs directly (no deadlock). Experimental — see [Synchronous Lisp → Clojure calls](../explanation/limitations-and-tradeoffs.md#jvm-call-direct-blocks-emacs-while-it-runs). |
 | `jvm-new-direct` | `(class-name args)` | The new instance. | `jvm-call-direct` with `member` fixed to `"<init>"`. |
-| `jvm-clojure-require` | `(namespace &optional timeout)` | `(OK RESULT ERR)`. | Calls Clojure's `require` on `NAMESPACE`, a string. Synchronous only — see [Known limitations](#known-limitations) below. |
-| `jvm-clojure-eval-string` | `(code &optional timeout)` | `(OK RESULT ERR)`. | Evaluates `CODE`, a string of Clojure source. Synchronous only. See [Known limitations](#known-limitations) below. |
-| `jvm-clojure-eval-string-direct` | `(code)` | The `RESULT` value itself. | Like `jvm-clojure-eval-string`, but runs every step on the Emacs main thread via `jvm-call-direct` (no worker round trip) and returns the value directly; a failure signals `jvm-error`. Because the main thread stays attached across calls, a thread-local effect (e.g. `*ns*` after `in-ns`) *does* persist between successive direct evals. Blocks Emacs's main loop for the eval; keep heavy work on Clojure's own threads. |
-| `jvm-clojure-require-direct` | `(namespace)` | The `RESULT` value itself. | Direct counterpart of `jvm-clojure-require`: requires the Clojure `NAMESPACE` synchronously on the main thread, returning the value directly and signalling `jvm-error` on failure. |
-| `jvm-nrepl-start` | `(&optional port bind timeout)` | `(OK RESULT ERR)`, where `RESULT` is `(ACTUAL-PORT . SERVER)` on success. | `PORT` defaults to 0 (the OS picks a free port). `BIND`, if non-nil, is the interface address to listen on (e.g. `"0.0.0.0"`); it defaults to nREPL's loopback. Bind beyond loopback only when needed — see [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md#bind-to-a-routable-interface). `ACTUAL-PORT` is an integer. `SERVER` is a wrapped JVM object, needed by `jvm-nrepl-stop`. Synchronous only. |
-| `jvm-nrepl-stop` | `(server &optional timeout)` | `(OK RESULT ERR)`. | `SERVER` is the value `jvm-nrepl-start` returned. Synchronous only. |
 | `jvm-ping` | `()` | `t`. | A module sanity check. Does not touch the JVM. |
 
 ## Clojure Lisp-access library (`jvm-clj.el`)
@@ -44,9 +38,24 @@ hold and manipulate Lisp values — see
 
 | Function | Arguments | Returns | Notes |
 |---|---|---|---|
+Each blocking function has a `-direct` counterpart that runs every JVM/Clojure
+step on the Emacs main thread via `jvm-call-direct` — no worker round trip,
+one always-attached thread (so thread-locals persist), and a reentrant
+Clojure→Lisp callback cannot deadlock. A `-direct` function returns the value
+directly and signals `jvm-error` on failure, rather than an `(OK RESULT ERR)`
+tuple. Lifecycle (JVM start, jar loading) stays synchronous — it has no
+main-thread form.
+
 | `jvm-clj-start` | `(&optional timeout)` | `(OK RESULT ERR)` from the namespace `require`, on success. | Starts the JVM if needed, loads `jvm-clj-classpath` plus this package's `clojure-src` directory, and requires `emacs-jni.clj`. Signals an error if any step fails. |
-| `jvm-clj-nrepl-start` | `(&optional port bind timeout)` | Same as `jvm-nrepl-start`. | `jvm-nrepl-start` (including its `bind` argument) after ensuring `emacs-jni.clj` is loaded. |
-| `jvm-clj-nrepl-stop` | `(server &optional timeout)` | Same as `jvm-nrepl-stop`. | Passes through to `jvm-nrepl-stop`. |
+| `jvm-clj-start-direct` | `(&optional timeout)` | The `require` `RESULT` value itself. | Like `jvm-clj-start`, but requires `emacs-jni.clj` through the direct (main-thread) path. JVM start and jar loading stay synchronous; a require failure signals `jvm-error`. |
+| `jvm-clj-require` | `(namespace &optional timeout)` | `(OK RESULT ERR)`. | Calls Clojure's `require` on `NAMESPACE`, a string. |
+| `jvm-clj-require-direct` | `(namespace)` | The `RESULT` value itself. | Direct counterpart of `jvm-clj-require`. |
+| `jvm-clj-eval-string` | `(code &optional timeout)` | `(OK RESULT ERR)`. | Evaluates `CODE`, a string of Clojure source. Each call may run on a different worker thread, so a thread-local (e.g. `*ns*`) does not persist between calls — see [Known limitations](#known-limitations). |
+| `jvm-clj-eval-string-direct` | `(code)` | The `RESULT` value itself. | Direct counterpart. Because the main thread stays attached across calls, a thread-local effect (e.g. `*ns*` after `in-ns`) *does* persist between successive direct evals. Blocks Emacs's main loop for the eval. |
+| `jvm-clj-nrepl-start` | `(&optional port bind timeout)` | `(OK RESULT ERR)`, where `RESULT` is `(ACTUAL-PORT . SERVER)` on success. | Ensures `emacs-jni.clj` is loaded (via `jvm-clj-start`), then starts an nREPL server. `PORT` defaults to 0 (the OS picks a free port). `BIND`, if non-nil, is the interface address (e.g. `"0.0.0.0"`); defaults to nREPL's loopback — bind beyond loopback only when needed, see [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md#restrict-who-can-connect). `SERVER` is a wrapped JVM object, needed by `jvm-clj-nrepl-stop`. |
+| `jvm-clj-nrepl-start-direct` | `(&optional port bind)` | `(ACTUAL-PORT . SERVER)`. | Direct counterpart: ensures `emacs-jni.clj` is loaded (via `jvm-clj-start-direct`) and starts the server, every step via `jvm-call-direct`. |
+| `jvm-clj-nrepl-stop` | `(server &optional timeout)` | `(OK RESULT ERR)`. | `SERVER` is the value `jvm-clj-nrepl-start` returned. |
+| `jvm-clj-nrepl-stop-direct` | `(server)` | The `RESULT` value itself. | Direct counterpart of `jvm-clj-nrepl-stop`. |
 
 ### Clojure API: `emacs-jni.clj`
 
@@ -209,9 +218,9 @@ string in the `ERR` position of `(OK RESULT ERR)` (or `(OK . ERR)` for
 
 ## Known limitations
 
-- `jvm-clojure-eval-string`: a namespace switch made by `(in-ns ...)`
+- `jvm-clj-eval-string`: a namespace switch made by `(in-ns ...)`
   in one call does not carry over to the next call. See
   [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).
-- `jvm-clojure-require`/`jvm-clojure-eval-string`/`jvm-nrepl-start`/
-  `jvm-nrepl-stop` have no async form. Each one always blocks the
+- `jvm-clj-require`/`jvm-clj-eval-string`/`jvm-clj-nrepl-start`/
+  `jvm-clj-nrepl-stop` have no async form. Each one always blocks the
   calling thread.

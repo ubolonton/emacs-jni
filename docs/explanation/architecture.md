@@ -60,7 +60,7 @@ that depends on JVM-side thread-local state does not carry over from
 one call to the next.
 
 That tradeoff is exactly what causes Clojure's `*ns*` to reset between
-separate `jvm-clojure-eval-string` calls, and it is why the
+separate `jvm-clj-eval-string` calls, and it is why the
 context-classloader fix (below) had to apply per spawned thread, not
 once at JVM start. See
 [Limitations and trade-offs](limitations-and-tradeoffs.md) for the
@@ -124,7 +124,7 @@ same worker-to-Lisp pipe, and blocks. Emacs services the queue on its
 main thread, the next time it pumps that pipe — either while idle, or
 inside a `-sync` wrapper's own `accept-process-output` loop. That
 second case is what makes these calls reentrant: a Clojure call that
-reaches back into Lisp from inside a `jvm-clojure-eval-string` is
+reaches back into Lisp from inside a `jvm-clj-eval-string` is
 serviced by the very `accept-process-output` loop that is already
 blocked waiting for that `eval` to finish.
 

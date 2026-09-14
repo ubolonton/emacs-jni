@@ -8,7 +8,7 @@ for the setup steps.
 ## Start a server on a specific port
 
 ```elisp
-(setq my-nrepl (jvm-nrepl-start 7888))
+(setq my-nrepl (jvm-clj-nrepl-start 7888))
 ;; => (t (7888 . #<user-ptr ...>) nil)
 ```
 
@@ -18,11 +18,11 @@ You need `SERVER` later, to stop the server.
 ## Let the OS pick a free port
 
 ```elisp
-(setq my-nrepl (jvm-nrepl-start))
+(setq my-nrepl (jvm-clj-nrepl-start))
 ;; => (t (54321 . #<user-ptr ...>) nil)
 ```
 
-Calling `jvm-nrepl-start` with no argument passes port `0`, which
+Calling `jvm-clj-nrepl-start` with no argument passes port `0`, which
 means "any free port." Read the real port back from `RESULT`'s `car`:
 
 ```elisp
@@ -42,7 +42,7 @@ the connection is refused and the client sees an empty `clone` response
 Pass a bind address as the second argument to listen beyond loopback:
 
 ```elisp
-(setq my-nrepl (jvm-nrepl-start 8000 "0.0.0.0"))
+(setq my-nrepl (jvm-clj-nrepl-start 8000 "0.0.0.0"))
 ;; => (t (8000 . #<user-ptr ...>) nil)
 ```
 
@@ -62,25 +62,28 @@ for a minimal `nc`-based example that needs no extra tooling.
 ## Stop the server
 
 ```elisp
-(jvm-nrepl-stop (cdr (nth 1 my-nrepl)))
+(jvm-clj-nrepl-stop (cdr (nth 1 my-nrepl)))
 ;; => (t nil nil)
 ```
 
 `(cdr (nth 1 my-nrepl))` pulls `SERVER` out of the value
-`jvm-nrepl-start` returned.
+`jvm-clj-nrepl-start` returned.
 
-## Preload the Lisp-access namespace
+## Reach Emacs Lisp from connected clients
 
-If you want connected nREPL clients to reach Emacs Lisp through
-`emacs-jni.clj`, start the server with `jvm-clj-nrepl-start`
-(from `jvm-clj.el`) instead of `jvm-nrepl-start`. It is the same call,
-but it loads that namespace first. Stop it with `jvm-clj-nrepl-stop`,
-or `jvm-nrepl-stop` — they are equivalent. See
+`jvm-clj-nrepl-start` (from `jvm-clj.el`) loads `emacs-jni.clj` before it
+starts the server, so a connected nREPL client reaches Emacs Lisp through
+that namespace out of the box. See
 [How to access Emacs Lisp from Clojure](access-lisp-from-clojure.md).
+
+A direct (main-thread) counterpart, `jvm-clj-nrepl-start-direct` (stopped
+with `jvm-clj-nrepl-stop-direct`), runs the start/stop calls on the Emacs
+main thread instead of the worker; it returns the `(PORT . SERVER)` pair
+directly and signals `jvm-error' on failure.
 
 ## Restrict who can connect
 
-`jvm-nrepl-start` uses nREPL's defaults throughout: loopback bind, no
+`jvm-clj-nrepl-start` uses nREPL's defaults throughout: loopback bind, no
 authentication, no TLS, no middleware configuration. Anyone who can
 reach the port can evaluate arbitrary code with the permissions of
 your Emacs process. Binding beyond loopback (the `bind` argument above)
@@ -91,4 +94,4 @@ on a network you trust, and prefer a specific routable address over
 If you need authentication or TLS, configure them through nREPL's own
 middleware, by starting the server with `jvm-call`/`jvm-new` directly
 against `nrepl.server/start-server` instead of through
-`jvm-nrepl-start`.
+`jvm-clj-nrepl-start`.

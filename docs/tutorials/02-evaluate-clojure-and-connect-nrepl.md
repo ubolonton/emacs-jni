@@ -36,7 +36,7 @@ find the jars by reading this environment variable back from Lisp.
 In `*scratch*`, evaluate each form one at a time.
 
 ```elisp
-(require 'jvm)
+(require 'jvm-clj)
 
 (jvm-start-sync)
 ;; => ready
@@ -51,7 +51,7 @@ classloader.
 ## Step 4: Evaluate Clojure code
 
 ```elisp
-(jvm-clojure-eval-string "(+ 40 (* 2 1))")
+(jvm-clj-eval-string "(+ 40 (* 2 1))")
 ;; => (t 42 nil)
 ```
 
@@ -61,7 +61,7 @@ returns. Clojure evaluated the expression and returned `42`.
 ## Step 5: Start an nREPL server
 
 ```elisp
-(setq my-nrepl (jvm-nrepl-start 7888))
+(setq my-nrepl (jvm-clj-nrepl-start 7888))
 ;; => (t (7888 . #<user-ptr ...>) nil)
 ```
 
@@ -95,7 +95,7 @@ network to this separate terminal.
 Back in Emacs:
 
 ```elisp
-(jvm-nrepl-stop (cdr (nth 1 my-nrepl)))
+(jvm-clj-nrepl-stop (cdr (nth 1 my-nrepl)))
 ;; => (t nil nil)
 ```
 

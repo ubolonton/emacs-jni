@@ -27,7 +27,7 @@
   "Evaluate CODE (Clojure source) with `jvm-call-direct' at every step, so
 the whole Lisp->Clojure call runs synchronously on this thread. Reads CODE
 via `clojure.java.api.Clojure/read' (edn), resolves `clojure.core/eval',
-and invokes it -- the direct-call equivalent of `jvm-clojure-eval-string'."
+and invokes it -- the direct-call equivalent of `jvm-clj-eval-string'."
   (let ((evalfn (jvm-call-direct "clojure.java.api.Clojure" "var"
                                  (list "clojure.core" "eval")))
         (form (jvm-call-direct "clojure.java.api.Clojure" "read" (list code))))

@@ -163,8 +163,8 @@ was never reliable anyway and does not justify the churn:
 - ERT `test/jvm-call-direct-test.el/thread-identity-is-stable-across-calls`.
 
 ## Direct Clojure eval from Lisp
-`jvm-clojure-eval-string-direct` / `jvm-clojure-require-direct` (`elisp/jvm.el`)
-mirror the async `jvm-clojure-*`, but route every step through `jvm-call-direct`
+`jvm-clj-eval-string-direct` / `jvm-clj-require-direct` (`elisp/jvm.el`)
+mirror the async `jvm-clj-*`, but route every step through `jvm-call-direct`
 (no worker). They return the value directly (signal `jvm-error` on failure)
 rather than an `(OK RESULT ERR)` tuple. Because the main thread stays attached,
 a thread-local set by one direct eval persists into the next — ERT

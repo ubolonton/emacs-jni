@@ -101,7 +101,7 @@ again — not a plan, not scoped, not designed:
 - **Richer Clojure value marshalling.** Teaching `jvm-call`'s
   marshalling about Clojure keywords, vectors, and maps directly,
   instead of the generic opaque-handle fallback, would remove the
-  biggest practical friction in `jvm-clojure-eval-string` — at the
+  biggest practical friction in `jvm-clj-eval-string` — at the
   cost of picking a Lisp-side representation for each, a real design
   question rather than a bounded addition.
 - Addressing any item in
