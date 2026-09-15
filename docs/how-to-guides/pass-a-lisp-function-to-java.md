@@ -8,7 +8,7 @@ plain method — see
 ## Pass a lambda as an argument
 
 ```elisp
-(jvm-call-sync "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
+(jvm-call-await "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
 ;; => (t 40 nil)
 ```
 
@@ -21,12 +21,12 @@ Java runs the Lisp function and returns the result asynchronously.
 
 ## Receive a real Java object as a callback argument
 
-`my-calc` here is a `(jvm-new-sync "Calc" (list 100))` result, already
+`my-calc` here is a `(jvm-new-await "Calc" (list 100))` result, already
 in scope:
 
 ```elisp
-(jvm-call-sync (nth 1 my-calc) "callWithSelf"
-               (list (lambda (self) (jvm-call-sync self "addToBase" (list 1)))))
+(jvm-call-await (nth 1 my-calc) "callWithSelf"
+               (list (lambda (self) (jvm-call-await self "addToBase" (list 1)))))
 ```
 
 When Java calls your Lisp function with a real object argument (not a
@@ -37,7 +37,7 @@ yourself.
 ## Signal an error from inside a callback
 
 ```elisp
-(jvm-call-sync "Calc" "callWithArg"
+(jvm-call-await "Calc" "callWithArg"
                (list (lambda (_n) (error "something went wrong")) 4))
 ```
 

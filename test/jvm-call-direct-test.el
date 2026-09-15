@@ -16,8 +16,8 @@
   "Ensure the JVM is running and the Calc fixture jar is loaded.
 See `jvm-call-test--ensure-ready' for why every test does this itself."
   (unless (eq (jvm-status) 'ready)
-    (should (eq (jvm-start-sync) 'ready)))
-  (should (equal (jvm-load-jar-sync jvm-call-direct-test--calc-jar) '(t))))
+    (should (eq (jvm-start-await) 'ready)))
+  (should (equal (jvm-load-jar-await jvm-call-direct-test--calc-jar) '(t))))
 
 (ert-deftest emacs-jni-jvm-call-direct-test/static-call-and-instance-call ()
   (jvm-call-direct-test--ensure-ready)
@@ -40,11 +40,11 @@ See `jvm-call-test--ensure-ready' for why every test does this itself."
   (should (equal (jvm-call-direct "Calc" "pick" '("hello")) "string"))
   (should (equal (jvm-call-direct "Calc" "pick" '(42)) "long")))
 
-(ert-deftest emacs-jni-jvm-call-direct-test/result-matches-jvm-call-sync ()
+(ert-deftest emacs-jni-jvm-call-direct-test/result-matches-jvm-call-await ()
   "The direct value must match the RESULT the async blocking wrapper reports."
   (jvm-call-direct-test--ensure-ready)
   (should (equal (jvm-call-direct "Calc" "addLong" '(20 22))
-                 (nth 1 (jvm-call-sync "Calc" "addLong" '(20 22))))))
+                 (nth 1 (jvm-call-await "Calc" "addLong" '(20 22))))))
 
 (ert-deftest emacs-jni-jvm-call-direct-test/unsupported-argument-value-signals ()
   (jvm-call-direct-test--ensure-ready)

@@ -8,9 +8,9 @@
                      (file-name-directory (or load-file-name buffer-file-name))))
 
 (ert-deftest emacs-jni-jvm-invoke-test/java-calls-lisp-and-gets-the-result-back ()
-  (should (eq (jvm-start-sync) 'ready))
-  (should (equal (jvm-load-jar-sync jvm-invoke-test--calc-jar) '(t)))
-  (should (equal (jvm-call-sync "Calc" "callWithArg" (list (lambda (n) (* n 2)) 21))
+  (should (eq (jvm-start-await) 'ready))
+  (should (equal (jvm-load-jar-await jvm-invoke-test--calc-jar) '(t)))
+  (should (equal (jvm-call-await "Calc" "callWithArg" (list (lambda (n) (* n 2)) 21))
                   '(t 42 nil))))
 
 (ert-deftest emacs-jni-jvm-invoke-test/lisp-error-propagates-as-java-exception ()
@@ -21,7 +21,7 @@ old `LispError', `LispNonLocalExit' carries no plain-text message of its
 own (its `dataOrValue' field holds \"boom\" instead, not introspectable
 from this coarse exception-chain rendering)."
   (should (eq (jvm-status) 'ready))
-  (let ((result (jvm-call-sync "Calc" "callWithArg"
+  (let ((result (jvm-call-await "Calc" "callWithArg"
                                  (list (lambda (_n) (error "boom")) 1))))
     (should (eq (nth 0 result) nil))
     (should (string-match-p "LispNonLocalExit" (nth 2 result)))))
@@ -35,10 +35,10 @@ wire tag `(jvm-handle N)'. Before the fix, `jvm--dispatch-message''s
 OBJ below would have been the 2-element list `(jvm-handle N)' and
 `user-ptrp' would have returned nil."
   (should (eq (jvm-status) 'ready))
-  (should (equal (jvm-load-jar-sync jvm-invoke-test--calc-jar) '(t)))
-  (let ((obj (nth 1 (jvm-new-sync "Calc" '(7)))))
+  (should (equal (jvm-load-jar-await jvm-invoke-test--calc-jar) '(t)))
+  (let ((obj (nth 1 (jvm-new-await "Calc" '(7)))))
     (should (user-ptrp obj))
-    (should (equal (jvm-call-sync obj "callWithSelf"
+    (should (equal (jvm-call-await obj "callWithSelf"
                                     (list (lambda (received)
                                             (if (user-ptrp received) "yes" "no"))))
                     '(t "yes" nil)))))

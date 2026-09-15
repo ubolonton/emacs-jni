@@ -7,13 +7,13 @@ names are in the
 
 ## Check the result of a `-sync` call before using it
 
-`jvm-call-sync`, `jvm-new-sync`, `jvm-clj-eval-string`,
-`jvm-clj-nrepl-start`, and similar functions return `(OK RESULT ERR)`.
-`jvm-load-jar-sync` returns the shorter `(OK . ERR)`. Always check `OK`
+`jvm-call-await`, `jvm-new-await`, `jvm-clj-eval-string-await`,
+`jvm-clj-nrepl-start-await`, and similar functions return `(OK RESULT ERR)`.
+`jvm-load-jar-await` returns the shorter `(OK . ERR)`. Always check `OK`
 first:
 
 ```elisp
-(let ((result (jvm-call-sync "Calc" "addLong" (list 2 3))))
+(let ((result (jvm-call-await "Calc" "addLong" (list 2 3))))
   (if (car result)
       (message "got: %s" (nth 1 result))
     (message "call failed: %s" (nth 2 result))))
@@ -41,7 +41,7 @@ Catch these the normal way:
 
 ```elisp
 (condition-case err
-    (jvm-call-sync "SlowClass" "slowMethod" nil 5)
+    (jvm-call-await "SlowClass" "slowMethod" nil 5)
   (jvm-timeout
    (message "timed out after 5 seconds"))
   (jvm-invalid-argument
@@ -54,7 +54,7 @@ Every `-sync` function's last argument is a timeout, in seconds. It
 defaults to 30:
 
 ```elisp
-(jvm-call-sync "SlowClass" "slowMethod" nil 120)
+(jvm-call-await "SlowClass" "slowMethod" nil 120)
 ```
 
 ## Tell a Java exception apart from a marshalling failure

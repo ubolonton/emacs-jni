@@ -7,7 +7,7 @@ It assumes you can already evaluate Clojure — see
 [How to evaluate Clojure code](evaluate-clojure-code.md).
 
 The Clojure snippets below run wherever Clojure runs: at an nREPL
-client connected to your Emacs, or inside a `jvm-clj-eval-string`
+client connected to your Emacs, or inside a `jvm-clj-eval-string-await`
 call.
 
 ## Start the Clojure side
@@ -16,16 +16,16 @@ call.
 (require 'jvm-clj)
 (setq jvm-clj-classpath
       (directory-files (getenv "EMACS_JNI_CLOJURE_JARS_DIR") t "\\.jar\\'"))
-(jvm-clj-start)
+(jvm-clj-start-await)
 ```
 
-`jvm-clj-start` starts the JVM if needed, loads `jvm-clj-classpath`
+`jvm-clj-start-await` starts the JVM if needed, loads `jvm-clj-classpath`
 plus this package's own `clojure-src` directory, and requires
 `emacs-jni.clj`. It signals an error if any step fails — for
 example, if no Clojure jar is on `jvm-clj-classpath`.
 
 To start an nREPL server with the namespace already loaded, use
-`jvm-clj-nrepl-start` in place of `jvm-clj-nrepl-start`.
+`jvm-clj-nrepl-start-await` in place of `jvm-clj-nrepl-start-await`.
 
 ## Alias the namespace
 

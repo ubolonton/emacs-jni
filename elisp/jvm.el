@@ -46,10 +46,10 @@ docs/explanation/architecture.md).")
   "Accumulates partial output from `jvm--pipe-process' between newlines.")
 
 (defvar jvm--pending-load-jar nil
-  "Alist of request-id -> callback for in-flight `jvm-load-jar' calls.")
+  "Alist of request-id -> callback for in-flight `jvm-load-jar-async' calls.")
 
 (defvar jvm--pending-call nil
-  "Alist of request-id -> callback for in-flight `jvm-call'/`jvm-new' calls.")
+  "Alist of request-id -> callback for in-flight `jvm-call-async'/`jvm-new-async' calls.")
 
 (defvar jvm--log-buffer-name "*jvm-log*"
   "Name of the buffer that accumulates JVM log and status-failure messages.")
@@ -143,7 +143,7 @@ into its final Lisp-visible form."
            :name "emacs-jni-channel"
            :filter #'jvm--process-filter
            :noquery t))
-    ;; Multiple Lisp threads may independently call a `-sync' wrapper;
+    ;; Multiple Lisp threads may independently call a `-await' wrapper;
     ;; without this, any thread other than whichever one created the
     ;; process hard-errors on its first `accept-process-output' (verified
     ;; empirically — see .probe/lisp-thread-filter-probe/).
@@ -154,7 +154,7 @@ into its final Lisp-visible form."
   "Return the current JVM lifecycle status symbol."
   jvm--status)
 
-(defun jvm-start (&optional classpath options)
+(defun jvm-start-async (&optional classpath options)
   "Start (or resume) the JVM asynchronously.
 CLASSPATH and OPTIONS default to `jvm-classpath' and `jvm-options'.
 If the `jvm--start' primitive signals an error (e.g. because the current
@@ -173,17 +173,21 @@ before this call, so it doesn't get stuck at `starting'."
 
 (define-error 'jvm-timeout "Timed out waiting for the JVM")
 
-(defun jvm-start-sync (&optional classpath options timeout)
-  "Like `jvm-start', but blocks until the JVM is ready or TIMEOUT (default 30s) elapses."
-  (jvm-start classpath options)
+(defun jvm-start-await (&optional classpath options timeout)
+  "Like `jvm-start-async', but blocks until the JVM is ready or TIMEOUT (default 30s) elapses."
+  (jvm-start-async classpath options)
   (let ((deadline (+ (float-time) (or timeout 30))))
     (while (eq (jvm-status) 'starting)
       (unless (accept-process-output jvm--pipe-process 0.1)
         (when (> (float-time) deadline)
-          (signal 'jvm-timeout (list 'jvm-start-sync))))))
+          (signal 'jvm-timeout (list 'jvm-start-await))))))
   (jvm-status))
 
-(defun jvm-pause ()
+(defalias 'jvm-start 'jvm-start-await
+  "Canonical `jvm-start' is the synchronous variant. See `jvm-start-async' for
+the non-blocking form.")
+
+(defun jvm-pause-async ()
   "Pause the JVM asynchronously (detaches the worker thread; JVM state is retained).
 If the `jvm--pause' primitive signals an error (e.g. because the current
 status doesn't allow pausing), `jvm--status' is reverted to what it was
@@ -198,17 +202,21 @@ before this call, so it doesn't get stuck at `pausing'."
        (run-hook-with-args 'jvm-status-hook previous-status)
        (signal (car err) (cdr err))))))
 
-(defun jvm-pause-sync (&optional timeout)
-  "Like `jvm-pause', but blocks until paused or TIMEOUT (default 30s) elapses."
-  (jvm-pause)
+(defun jvm-pause-await (&optional timeout)
+  "Like `jvm-pause-async', but blocks until paused or TIMEOUT (default 30s) elapses."
+  (jvm-pause-async)
   (let ((deadline (+ (float-time) (or timeout 30))))
     (while (eq (jvm-status) 'pausing)
       (unless (accept-process-output jvm--pipe-process 0.1)
         (when (> (float-time) deadline)
-          (signal 'jvm-timeout (list 'jvm-pause-sync))))))
+          (signal 'jvm-timeout (list 'jvm-pause-await))))))
   (jvm-status))
 
-(defun jvm-stop ()
+(defalias 'jvm-pause 'jvm-pause-await
+  "Canonical `jvm-pause' is the synchronous variant. See `jvm-pause-async' for
+the non-blocking form.")
+
+(defun jvm-stop-async ()
   "Attempt to fully tear down the JVM asynchronously. Experimental.
 
 Restarting the JVM in the same process after a stop is NOT supported: the
@@ -232,17 +240,21 @@ before this call, so it doesn't get stuck at `stopping'."
        (run-hook-with-args 'jvm-status-hook previous-status)
        (signal (car err) (cdr err))))))
 
-(defun jvm-stop-sync (&optional timeout)
-  "Like `jvm-stop', but blocks until stopped/stop-failed or TIMEOUT (default 30s)."
-  (jvm-stop)
+(defun jvm-stop-await (&optional timeout)
+  "Like `jvm-stop-async', but blocks until stopped/stop-failed or TIMEOUT (default 30s)."
+  (jvm-stop-async)
   (let ((deadline (+ (float-time) (or timeout 30))))
     (while (eq (jvm-status) 'stopping)
       (unless (accept-process-output jvm--pipe-process 0.1)
         (when (> (float-time) deadline)
-          (signal 'jvm-timeout (list 'jvm-stop-sync))))))
+          (signal 'jvm-timeout (list 'jvm-stop-await))))))
   (jvm-status))
 
-(defun jvm-load-jar (path &optional callback)
+(defalias 'jvm-stop 'jvm-stop-await
+  "Canonical `jvm-stop' is the synchronous variant. See `jvm-stop-async' for
+the non-blocking form.")
+
+(defun jvm-load-jar-async (path &optional callback)
   "Load the jar at PATH into the shared classloader asynchronously.
 Returns a request id immediately. If CALLBACK is given, it is called as
 \(CALLBACK OK ERR) once loading finishes."
@@ -251,17 +263,17 @@ Returns a request id immediately. If CALLBACK is given, it is called as
       (push (cons id callback) jvm--pending-load-jar))
     id))
 
-(defun jvm-load-jar-sync (path &optional timeout)
-  "Like `jvm-load-jar', but blocks until it finishes or TIMEOUT (default 30s).
+(defun jvm-load-jar-await (path &optional timeout)
+  "Like `jvm-load-jar-async', but blocks until it finishes or TIMEOUT (default 30s).
 Returns a cons (OK . ERR); signals `jvm-timeout' if TIMEOUT elapses first."
   (let* ((result :pending)
-         (id (jvm-load-jar path (lambda (ok err) (setq result (cons ok err)))))
+         (id (jvm-load-jar-async path (lambda (ok err) (setq result (cons ok err)))))
          (deadline (+ (float-time) (or timeout 30))))
     (while (eq result :pending)
       (unless (accept-process-output jvm--pipe-process 0.1)
         (when (> (float-time) deadline)
           (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
-          (signal 'jvm-timeout (list 'jvm-load-jar-sync path)))))
+          (signal 'jvm-timeout (list 'jvm-load-jar-await path)))))
     result))
 
 (defun jvm-load-jar-direct (path)
@@ -269,11 +281,16 @@ Returns a cons (OK . ERR); signals `jvm-timeout' if TIMEOUT elapses first."
 synchronously, on this thread. Returns nil; signals `jvm-error' on failure.
 
 Like `jvm-call-direct', this runs on the Emacs main thread with no worker
-round trip. It shares one classloader with `jvm-load-jar', so a jar loaded
-either way is visible to both the async and the direct call paths."
+round trip. It shares one classloader with `jvm-load-jar-async', so a jar
+loaded either way is visible to both the async and the direct call paths."
   (jvm--load-jar-direct path))
 
-(defun jvm-call (target member args &optional callback)
+(defalias 'jvm-load-jar 'jvm-load-jar-direct
+  "Canonical `jvm-load-jar' is the direct (main-thread) variant. See
+`jvm-load-jar-async' for the non-blocking form and `jvm-load-jar-await' for
+the worker-blocking form.")
+
+(defun jvm-call-async (target member args &optional callback)
   "Call TARGET.MEMBER(ARGS...) on the JVM asynchronously.
 TARGET is a class-name string (static call) or a wrapped JVM object
 \(instance call). ARGS is a list. Returns a request id immediately. If
@@ -284,36 +301,36 @@ finishes."
       (push (cons id callback) jvm--pending-call))
     id))
 
-(defun jvm-call-sync (target member args &optional timeout)
-  "Like `jvm-call', but blocks until it finishes or TIMEOUT (default 30s).
+(defun jvm-call-await (target member args &optional timeout)
+  "Like `jvm-call-async', but blocks until it finishes or TIMEOUT (default 30s).
 Returns (OK RESULT ERR) as a 3-element list; signals `jvm-timeout' if
 TIMEOUT elapses first."
   (let* ((result :pending)
-         (id (jvm-call target member args
-                        (lambda (ok res err) (setq result (list ok res err)))))
+         (id (jvm-call-async target member args
+                              (lambda (ok res err) (setq result (list ok res err)))))
          (deadline (+ (float-time) (or timeout 30))))
     (while (eq result :pending)
       (unless (accept-process-output jvm--pipe-process 0.1)
         (when (> (float-time) deadline)
           (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
-          (signal 'jvm-timeout (list 'jvm-call-sync target member)))))
+          (signal 'jvm-timeout (list 'jvm-call-await target member)))))
     result))
 
-(defun jvm-new (class-name args &optional callback)
+(defun jvm-new-async (class-name args &optional callback)
   "Construct a new CLASS-NAME(ARGS...) instance on the JVM asynchronously.
-Sugar over `jvm-call' with MEMBER set to the constructor's actual internal
+Sugar over `jvm-call-async' with MEMBER set to the constructor's actual internal
 JVM bytecode name, `\"<init>\"'."
-  (jvm-call class-name "<init>" args callback))
+  (jvm-call-async class-name "<init>" args callback))
 
-(defun jvm-new-sync (class-name args &optional timeout)
-  "Like `jvm-new', but blocks. See `jvm-call-sync'."
-  (jvm-call-sync class-name "<init>" args timeout))
+(defun jvm-new-await (class-name args &optional timeout)
+  "Like `jvm-new-async', but blocks. See `jvm-call-await'."
+  (jvm-call-await class-name "<init>" args timeout))
 
 (defun jvm-call-direct (target member args)
   "Call TARGET.MEMBER(ARGS...) on the JVM synchronously, on this thread.
 Returns the result value directly; signals `jvm-error' on failure.
 
-Unlike `jvm-call-sync' (async `jvm-call' plus a blocking wait on the
+Unlike `jvm-call-await' (async `jvm-call-async' plus a blocking wait on the
 worker), this runs the call on the Emacs main thread itself, with no
 worker round trip. It blocks Emacs's main loop for the whole call, so
 keep heavy or blocking work on the Clojure side's own threads."
@@ -323,6 +340,15 @@ keep heavy or blocking work on the Clojure side's own threads."
   "Construct CLASS-NAME(ARGS...) synchronously on this thread.
 Sugar over `jvm-call-direct' with MEMBER `\"<init>\"'."
   (jvm-call-direct class-name "<init>" args))
+
+(defalias 'jvm-call 'jvm-call-direct
+  "Canonical `jvm-call' is the direct (main-thread) variant. See
+`jvm-call-async' for the non-blocking form and `jvm-call-await' for the
+worker-blocking form.")
+
+(defalias 'jvm-new 'jvm-new-direct
+  "Canonical `jvm-new' is the direct (main-thread) variant. See `jvm-new-async'
+for the non-blocking form and `jvm-new-await' for the worker-blocking form.")
 
 (defvar jvm--lisp-callbacks (make-hash-table :test 'eql)
   "Handle -> Lisp function, for functions wrapped as JVM LispFunction

@@ -21,13 +21,13 @@
     (ert-skip "Set EMACS_JNI_CLOJURE_JARS_DIR (see test/fetch-clojure-jars.sh)"))
   (unless (eq (jvm-status) 'ready)
     (setq jvm-clj-classpath (directory-files jvm-clj-direct-test--jars-dir t "\\.jar\\'"))
-    (jvm-clj-start)))
+    (jvm-clj-start-await)))
 
 (defun jvm-clj-direct-test--eval (code)
   "Evaluate CODE (Clojure source) with `jvm-call-direct' at every step, so
 the whole Lisp->Clojure call runs synchronously on this thread. Reads CODE
 via `clojure.java.api.Clojure/read' (edn), resolves `clojure.core/eval',
-and invokes it -- the direct-call equivalent of `jvm-clj-eval-string'."
+and invokes it -- the direct-call equivalent of `jvm-clj-eval-string-await'."
   (let ((evalfn (jvm-call-direct "clojure.java.api.Clojure" "var"
                                  (list "clojure.core" "eval")))
         (form (jvm-call-direct "clojure.java.api.Clojure" "read" (list code))))

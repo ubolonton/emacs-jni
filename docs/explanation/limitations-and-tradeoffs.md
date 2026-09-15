@@ -134,7 +134,7 @@ it.
 
 ## `*ns*` does not persist across separate Clojure eval calls
 
-Because each `jvm-clj-eval-string` call runs on its own freshly
+Because each `jvm-clj-eval-string-await` call runs on its own freshly
 spawned thread, and Clojure's current-namespace pointer is
 thread-local, a namespace switch made by `(in-ns ...)` in one call is
 invisible to the next call — that call runs on a different thread,

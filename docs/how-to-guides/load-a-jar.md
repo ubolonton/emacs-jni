@@ -6,7 +6,7 @@ The JVM must be `ready` before you load a jar. See
 ## Load one jar and wait for the result
 
 ```elisp
-(jvm-load-jar-sync (expand-file-name "~/path/to/your.jar"))
+(jvm-load-jar-await (expand-file-name "~/path/to/your.jar"))
 ;; => (t)              on success -- a cons (OK . ERR), nil ERR prints as nothing
 ;; => (nil . "jar file not found: ...")   on failure
 ```
@@ -17,21 +17,21 @@ absolute one before passing it.
 ## Load a jar without blocking
 
 ```elisp
-(jvm-load-jar "~/path/to/your.jar"
-              (lambda (ok err)
-                (if ok
-                    (message "loaded")
-                  (message "load failed: %s" err))))
+(jvm-load-jar-async "~/path/to/your.jar"
+                    (lambda (ok err)
+                      (if ok
+                          (message "loaded")
+                        (message "load failed: %s" err))))
 ```
 
-`jvm-load-jar` returns a request ID immediately. The callback runs
+`jvm-load-jar-async` returns a request ID immediately. The callback runs
 later, once the JVM worker thread finishes the load.
 
 ## Load every jar in a directory
 
 ```elisp
 (dolist (jar (directory-files "/path/to/jar-dir" t "\\.jar\\'"))
-  (jvm-load-jar-sync jar))
+  (jvm-load-jar-await jar))
 ```
 
 ## Make classes from one jar visible to another
@@ -43,10 +43,10 @@ long as both are loaded, in either order.
 ## Set a timeout longer than the default 30 seconds
 
 ```elisp
-(jvm-load-jar-sync "~/big.jar" 120)
+(jvm-load-jar-await "~/big.jar" 120)
 ```
 
-The second argument to `jvm-load-jar-sync` is the timeout, in seconds.
+The second argument to `jvm-load-jar-await` is the timeout, in seconds.
 Past it, the call signals `jvm-timeout` instead of returning.
 
 ## Remove a jar

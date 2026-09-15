@@ -48,7 +48,7 @@ Open `*scratch*` (or `M-x ielm`). Evaluate each form one at a time.
 ```elisp
 (require 'jvm)
 
-(jvm-start-sync)
+(jvm-start-await)
 ```
 
 This blocks until the JVM is ready. On a normal machine, it takes
@@ -71,7 +71,7 @@ reason:
 ## Step 4: Load the jar and call a static method
 
 ```elisp
-(jvm-load-jar-sync (expand-file-name "target/test-fixtures/greeter.jar"))
+(jvm-load-jar-await (expand-file-name "target/test-fixtures/greeter.jar"))
 ;; => (t)
 ```
 
@@ -81,7 +81,7 @@ prints a `nil` cdr as nothing, so success prints as `(t)`.
 Now call `Greeter.greet()`:
 
 ```elisp
-(jvm-call-sync "Greeter" "greet" nil)
+(jvm-call-await "Greeter" "greet" nil)
 ;; => (t "hello from Greeter" nil)
 ```
 
@@ -105,24 +105,24 @@ parameter.
 Load the new jar:
 
 ```elisp
-(jvm-load-jar-sync (expand-file-name "target/test-fixtures/calc.jar"))
+(jvm-load-jar-await (expand-file-name "target/test-fixtures/calc.jar"))
 ;; => (t)
 ```
 
 ## Step 6: Construct an object and call an instance method
 
 ```elisp
-(jvm-new-sync "Calc" (list 100))
+(jvm-new-await "Calc" (list 100))
 ;; => (t #<user-ptr ...> nil)
 ```
 
-`jvm-new-sync` constructs a `Calc` object with `base` set to 100. The
+`jvm-new-await` constructs a `Calc` object with `base` set to 100. The
 result is a wrapped JVM object, printed as `#<user-ptr ...>`. Store it:
 
 ```elisp
-(setq my-calc (jvm-new-sync "Calc" (list 100)))
+(setq my-calc (jvm-new-await "Calc" (list 100)))
 
-(jvm-call-sync (nth 1 my-calc) "addToBase" (list 23))
+(jvm-call-await (nth 1 my-calc) "addToBase" (list 23))
 ;; => (t 123 nil)
 ```
 
@@ -133,7 +133,7 @@ one.
 ## Step 7: Let Java call a Lisp function back
 
 ```elisp
-(jvm-call-sync "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
+(jvm-call-await "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
 ;; => (t 40 nil)
 ```
 

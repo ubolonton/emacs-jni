@@ -38,11 +38,11 @@ In `*scratch*`, evaluate each form one at a time.
 ```elisp
 (require 'jvm-clj)
 
-(jvm-start-sync)
+(jvm-start-await)
 ;; => ready
 
 (dolist (jar (directory-files (getenv "EMACS_JNI_CLOJURE_JARS_DIR") t "\\.jar\\'"))
-  (jvm-load-jar-sync jar))
+  (jvm-load-jar-await jar))
 ```
 
 The `dolist` loads all four jars, one at a time, into the JVM's shared
@@ -51,17 +51,17 @@ classloader.
 ## Step 4: Evaluate Clojure code
 
 ```elisp
-(jvm-clj-eval-string "(+ 40 (* 2 1))")
+(jvm-clj-eval-string-await "(+ 40 (* 2 1))")
 ;; => (t 42 nil)
 ```
 
-The result is `(OK RESULT ERR)`, the same shape `jvm-call-sync`
+The result is `(OK RESULT ERR)`, the same shape `jvm-call-await`
 returns. Clojure evaluated the expression and returned `42`.
 
 ## Step 5: Start an nREPL server
 
 ```elisp
-(setq my-nrepl (jvm-clj-nrepl-start 7888))
+(setq my-nrepl (jvm-clj-nrepl-start-await 7888))
 ;; => (t (7888 . #<user-ptr ...>) nil)
 ```
 
@@ -95,7 +95,7 @@ network to this separate terminal.
 Back in Emacs:
 
 ```elisp
-(jvm-clj-nrepl-stop (cdr (nth 1 my-nrepl)))
+(jvm-clj-nrepl-stop-await (cdr (nth 1 my-nrepl)))
 ;; => (t nil nil)
 ```
 
