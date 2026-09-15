@@ -102,6 +102,26 @@ fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
     }
 }
 
+/// Synchronous counterpart of `jvm--load-jar`: adds PATH to the shared
+/// classloader on *this* (the Emacs main) thread and returns `nil`, instead of
+/// a request id. Signals `jvm-error` on failure (missing path, or a JNI error).
+/// Shares the one classloader with the async `jvm--load-jar` path through a
+/// single get-or-create in `runtime`, so whichever path loads the first jar
+/// wins and both see every later jar (see `jvm_thread::load_jar_direct`).
+#[defun(mod_in_name = false, name = "jvm--load-jar-direct")]
+fn jvm_load_jar_direct(env: &Env, path: String) -> Result<()> {
+    if STATUS.get() != Status::Ready {
+        return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
+    }
+    let Some(vm) = runtime::vm() else {
+        return env.signal(jvm_illegal_transition, ("no running JVM",));
+    };
+    match jvm_thread::load_jar_direct(&vm, &path) {
+        Ok(()) => Ok(()),
+        Err(e) => env.signal(jvm_error, (e,)),
+    }
+}
+
 #[defun(mod_in_name = false, name = "jvm--call")]
 fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64> {
     if STATUS.get() != Status::Ready {

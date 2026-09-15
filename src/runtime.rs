@@ -3,10 +3,12 @@
 //! that needs them for the synchronous `jvm--call-direct` path (see plan
 //! `docs/superpowers/plans/2026-09-13-sync-lisp-clojure-plan.md`).
 //!
-//! The async `jvm--call` path never reads these: the worker keeps its own
-//! `vm`/`loader` on its stack. These exist only to hand the *same* `JavaVM`
-//! and shared classloader to the main thread, so a direct call resolves
-//! jar-loaded classes exactly as `handle_call` does.
+//! The `JavaVM` is created by the worker and published here for the main
+//! thread. The shared classloader is the single source of truth for *both*
+//! threads (`get_or_create_loader`): the worker's async load and the main
+//! thread's direct load get-or-create the one loader here, so a direct call
+//! resolves jar-loaded classes exactly as `handle_call` does, no matter which
+//! path loaded the jar.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -49,10 +51,22 @@ pub fn vm() -> Option<JavaVM> {
     VM.lock().unwrap().clone()
 }
 
-/// Mirrors the worker's shared classloader once a jar/classpath entry is
-/// loaded (`handle_load_jar`); `None` until then.
-pub fn set_loader(loader: SharedLoader) {
-    *LOADER.lock().unwrap() = Some(loader);
+/// Returns the shared classloader, creating it with CREATE (which needs a live
+/// JNI `Env` on the calling thread) if none exists yet. The whole get-or-create
+/// is serialized under the `LOADER` mutex, so the worker's async load
+/// (`handle_load_jar`) and the main thread's direct load (`load_jar_direct`)
+/// can never build two divergent loaders -- the first to run wins, and both
+/// paths then add their jars to that one loader.
+pub fn get_or_create_loader<E>(
+    create: impl FnOnce() -> Result<SharedLoader, E>,
+) -> Result<SharedLoader, E> {
+    let mut guard = LOADER.lock().unwrap();
+    if let Some(loader) = guard.as_ref() {
+        return Ok(loader.clone());
+    }
+    let created = create()?;
+    *guard = Some(created.clone());
+    Ok(created)
 }
 
 /// A clone of the shared classloader `Arc`, or `None` if no jar was loaded.

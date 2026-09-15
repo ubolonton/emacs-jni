@@ -32,14 +32,6 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
         }
     };
 
-    // Lazily created on the first LoadJar command, then reused so every
-    // loaded jar shares one classloader (see spec: "Jar loading"). `Arc`-
-    // wrapped (not a bare `Global`, which has no `Clone` impl in jni 0.22 —
-    // same reasoning as `handles::TABLE`) so `Cmd::Call`'s per-call thread
-    // (Task 5) can cheaply clone out a reference to it without needing a
-    // live `Env` on this thread.
-    let mut loader: Option<Arc<jni::refs::Global<jni::objects::JObject<'static>>>> = None;
-
     for cmd in receiver {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd {
             Cmd::Resume => {
@@ -52,7 +44,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
             }
             Cmd::Stop => true, // signal "stop after this iteration" below
             Cmd::LoadJar { id, path } => {
-                handle_load_jar(&vm, &mut loader, id, path);
+                handle_load_jar(&vm, id, path);
                 false
             }
             Cmd::Call { id, target, member, args } => {
@@ -61,7 +53,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 // reasons unrelated to callbacks, and must not stall other
                 // pending commands on this dispatch loop.
                 let vm = vm.clone();
-                let loader = loader.clone();
+                let loader = crate::runtime::loader();
                 std::thread::spawn(move || handle_call(&vm, loader, id, target, member, args));
                 false
             }
@@ -326,12 +318,7 @@ fn handle_resume(vm: &JavaVM) {
     }
 }
 
-fn handle_load_jar(
-    vm: &JavaVM,
-    loader: &mut Option<Arc<jni::refs::Global<jni::objects::JObject<'static>>>>,
-    id: u64,
-    path: String,
-) {
+fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     // `URLClassLoader#addURL` is lazy: it just appends to the loader's
     // internal URL list and never inspects the target until a class is
     // actually looked up, so it does not itself fail for a nonexistent
@@ -356,26 +343,41 @@ fn handle_load_jar(
     }
 
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
-        if loader.is_none() {
-            *loader = Some(Arc::new(create_shared_classloader(env)?));
-        }
-        let loader_local = env.new_local_ref(loader.as_ref().unwrap().as_obj())?;
+        let loader =
+            crate::runtime::get_or_create_loader(|| create_shared_classloader(env).map(Arc::new))?;
+        let loader_local = env.new_local_ref(loader.as_obj())?;
         add_jar_url(env, &loader_local, &path)
     });
 
     match result {
-        Ok(()) => {
-            // Mirror the (now guaranteed to exist) shared classloader so the
-            // main-thread `call_direct` resolves jar-loaded classes the same
-            // way `handle_call` does. Idempotent -- cheap `Arc` clone each
-            // successful load.
-            if let Some(l) = loader.as_ref() {
-                crate::runtime::set_loader(l.clone());
-            }
-            channel::send(&protocol::load_jar_done_message(id, true, None));
-        }
+        Ok(()) => channel::send(&protocol::load_jar_done_message(id, true, None)),
         Err(e) => channel::send(&protocol::load_jar_done_message(id, false, Some(&e.to_string()))),
     }
+}
+
+/// Synchronous main-thread counterpart of `handle_load_jar`: adds PATH to the
+/// shared classloader on *this* thread, sharing the one loader with the async
+/// path through `runtime::get_or_create_loader`. Returns an error string (a
+/// missing path, or a JNI failure) instead of sending a `load-jar-done`
+/// message, since the caller (`jvm--load-jar-direct`) returns or signals
+/// directly. See `call_direct` for the main-thread attach model.
+pub(crate) fn load_jar_direct(vm: &JavaVM, path: &str) -> Result<(), String> {
+    // Same up-front existence check as `handle_load_jar`: `addURL` is lazy and
+    // never fails for a nonexistent path on its own.
+    if !std::path::Path::new(path).exists() {
+        return Err(format!("jar/classpath entry not found: {path}"));
+    }
+    // A *scoped* attach: a no-op on the permanently-attached main thread, an
+    // owning attach-and-detach on any other caller. Unlike `call_direct`, this
+    // never takes the permanent attach -- `addURL` needs no stable thread
+    // identity, so there is no reason to touch the main-attachment state.
+    let result: jni::errors::Result<()> = vm.attach_current_thread_for_scope(|env| {
+        let loader =
+            crate::runtime::get_or_create_loader(|| create_shared_classloader(env).map(Arc::new))?;
+        let loader_local = env.new_local_ref(loader.as_obj())?;
+        add_jar_url(env, &loader_local, path)
+    });
+    result.map_err(|e| e.to_string())
 }
 
 /// Creates a `URLClassLoader` with an empty URL list, parented on the

@@ -22,6 +22,7 @@ defaults to 30. Past the deadline, a `-sync` function signals
 | `jvm-stop-sync` | `(&optional timeout)` | The status once stopping finishes: `stopped` or `stop-failed`. | |
 | `jvm-load-jar` | `(path &optional callback)` | A request ID. | Adds `path` to the shared classloader. `callback`, if given, is called as `(callback OK ERR)`. Legal only when `ready`. Does not change `jvm-status`. |
 | `jvm-load-jar-sync` | `(path &optional timeout)` | `(OK . ERR)`. | |
+| `jvm-load-jar-direct` | `(path)` | `nil`. | Direct (main-thread) counterpart of `jvm-load-jar`: adds `path` on this thread, no worker round trip. Shares one classloader with `jvm-load-jar`, so a jar loaded either way is visible to both paths. Signals `jvm-error` on failure. Legal only when `ready`. |
 | `jvm-call` | `(target member args &optional callback)` | A request ID. | Reflectively invokes `TARGET.MEMBER(ARGS...)`. `TARGET` is a class-name string for a static call, or a wrapped JVM object for an instance call. `callback`, if given, is called as `(callback OK RESULT ERR)`. |
 | `jvm-call-sync` | `(target member args &optional timeout)` | `(OK RESULT ERR)`. | |
 | `jvm-new` | `(class-name args &optional callback)` | A request ID. | `jvm-call` with `member` fixed to the constructor's internal name, `"<init>"`. |

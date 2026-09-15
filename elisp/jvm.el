@@ -264,6 +264,15 @@ Returns a cons (OK . ERR); signals `jvm-timeout' if TIMEOUT elapses first."
           (signal 'jvm-timeout (list 'jvm-load-jar-sync path)))))
     result))
 
+(defun jvm-load-jar-direct (path)
+  "Load the jar or classpath directory at PATH into the shared classloader
+synchronously, on this thread. Returns nil; signals `jvm-error' on failure.
+
+Like `jvm-call-direct', this runs on the Emacs main thread with no worker
+round trip. It shares one classloader with `jvm-load-jar', so a jar loaded
+either way is visible to both the async and the direct call paths."
+  (jvm--load-jar-direct path))
+
 (defun jvm-call (target member args &optional callback)
   "Call TARGET.MEMBER(ARGS...) on the JVM asynchronously.
 TARGET is a class-name string (static call) or a wrapped JVM object
