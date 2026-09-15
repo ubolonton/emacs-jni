@@ -18,7 +18,7 @@ defaults to 30. Past the deadline, a `-sync` function signals
 | `jvm-start-sync` | `(&optional classpath options timeout)` | The status once starting finishes: `ready` or `start-failed`. | |
 | `jvm-pause` | `()` | Not meaningful. | Detaches the worker thread. The JVM and its state stay alive. Legal only from `ready`. |
 | `jvm-pause-sync` | `(&optional timeout)` | The status once pausing finishes: `paused`. | |
-| `jvm-stop` | `()` | Not meaningful. | Attempts a full JVM teardown. Legal from `ready` or `paused`. Best-effort — see [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md). |
+| `jvm-stop` | `()` | Not meaningful. | Attempts a full JVM teardown. Legal from `ready` or `paused`. Best-effort, and restart-in-process is unsupported — see [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md). |
 | `jvm-stop-sync` | `(&optional timeout)` | The status once stopping finishes: `stopped` or `stop-failed`. | |
 | `jvm-load-jar` | `(path &optional callback)` | A request ID. | Adds `path` to the shared classloader. `callback`, if given, is called as `(callback OK ERR)`. Legal only when `ready`. Does not change `jvm-status`. |
 | `jvm-load-jar-sync` | `(path &optional timeout)` | `(OK . ERR)`. | |

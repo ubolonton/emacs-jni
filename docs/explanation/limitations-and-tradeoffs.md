@@ -5,16 +5,26 @@ each one costs. For the bare facts, see the
 [Lisp API reference](../reference/lisp-api.md). For workarounds, see
 the relevant how-to guide.
 
-## `jvm-stop` is best-effort
+## `jvm-stop` is best-effort, and restart-in-process is unsupported
 
 `jvm-stop` tears the JVM down through `JNI_DestroyJavaVM`. Some JVM
 builds handle this call unreliably — a JVM is not designed with the
 expectation that an embedding host will ask it to shut down and then
 keep running itself. Rather than have `jvm-stop` hang indefinitely
 waiting for a guarantee the JVM specification does not make, both
-`stopped` and `stop-failed` count as "the operation finished." This
-means a caller has to treat `jvm-stop` as a best-effort request, not a
-promise, and should not assume `jvm-start` afterward will succeed.
+`stopped` and `stop-failed` count as "the operation finished." So a
+caller has to treat `jvm-stop` as a best-effort request, not a promise.
+
+Restarting after a stop, in the same process, is **not supported**. The
+JVM does not support re-initialization once a process has destroyed one.
+After a `jvm-stop`, a later `jvm-start` typically hands back a
+non-functional "zombie" VM: it accepts the create/attach calls but fails
+any real JNI work — the first `jvm-load-jar` or `jvm-call` on it errors
+with `"JNI call failed"`. This is a JVM/JNI limitation, independent of
+which thread runs the teardown; no arrangement in this module works
+around it. A fresh Emacs process is the only reliable reset. To release
+JVM resources temporarily and resume later in the same session, use
+`jvm-pause` instead of `jvm-stop`.
 
 ## One JVM per Emacs process
 

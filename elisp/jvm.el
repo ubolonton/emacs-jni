@@ -209,9 +209,16 @@ before this call, so it doesn't get stuck at `pausing'."
   (jvm-status))
 
 (defun jvm-stop ()
-  "Attempt to fully tear down the JVM asynchronously. Experimental: this
-relies on JNI_DestroyJavaVM, which some JVM builds handle unreliably (see
-the design spec's Risks section). `jvm-start' afterward is best-effort.
+  "Attempt to fully tear down the JVM asynchronously. Experimental.
+
+Restarting the JVM in the same process after a stop is NOT supported: the
+JVM does not support re-initialization in a process that already destroyed
+one. `jvm--stop' calls JNI_DestroyJavaVM, after which a later `jvm-start'
+typically yields a non-functional \"zombie\" VM whose calls fail with
+\"JNI call failed\". A fresh Emacs process is the only reliable reset. To
+release JVM resources temporarily and resume later, use `jvm-pause', not
+`jvm-stop'.
+
 If the `jvm--stop' primitive signals an error (e.g. because the current
 status doesn't allow stopping), `jvm--status' is reverted to what it was
 before this call, so it doesn't get stuck at `stopping'."

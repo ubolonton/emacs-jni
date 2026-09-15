@@ -55,8 +55,11 @@ it ignores `jvm-classpath`/`jvm-options` on this call.
 
 Both `stopped` and `stop-failed` mean the operation finished, not that
 it hung. `jvm-stop` is best-effort: some JVM builds handle the
-underlying teardown call unreliably. Do not rely on `jvm-start` after
-`jvm-stop` succeeding — see
+underlying teardown call unreliably. Restarting the JVM in the same
+process after a stop is **not supported** — `jvm-start` afterward
+typically returns a non-functional "zombie" VM whose calls fail with
+`"JNI call failed"`. A fresh Emacs process is the only reliable reset —
+see
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).
 
 If you need to release JVM resources temporarily and come back later
