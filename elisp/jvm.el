@@ -264,8 +264,9 @@ Returns a request id immediately. If CALLBACK is given, it is called as
     id))
 
 (defun jvm-load-jar-await (path &optional timeout)
-  "Like `jvm-load-jar-async', but blocks until it finishes or TIMEOUT (default 30s).
-Returns a cons (OK . ERR); signals `jvm-timeout' if TIMEOUT elapses first."
+  "Like `jvm-load-jar-async', but blocks until it finishes (or TIMEOUT,
+default 30s). Returns nil; signals `jvm-error' on failure, or `jvm-timeout'
+if TIMEOUT elapses first."
   (let* ((result :pending)
          (id (jvm-load-jar-async path (lambda (ok err) (setq result (cons ok err)))))
          (deadline (+ (float-time) (or timeout 30))))
@@ -274,7 +275,8 @@ Returns a cons (OK . ERR); signals `jvm-timeout' if TIMEOUT elapses first."
         (when (> (float-time) deadline)
           (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
           (signal 'jvm-timeout (list 'jvm-load-jar-await path)))))
-    result))
+    (unless (car result)
+      (signal 'jvm-error (list (cdr result))))))
 
 (defun jvm-load-jar-direct (path)
   "Load the jar or classpath directory at PATH into the shared classloader
@@ -302,9 +304,9 @@ finishes."
     id))
 
 (defun jvm-call-await (target member args &optional timeout)
-  "Like `jvm-call-async', but blocks until it finishes or TIMEOUT (default 30s).
-Returns (OK RESULT ERR) as a 3-element list; signals `jvm-timeout' if
-TIMEOUT elapses first."
+  "Like `jvm-call-async', but blocks until the call finishes (or TIMEOUT,
+default 30s). Returns the result value directly; signals `jvm-error' on a
+Java/Clojure failure, or `jvm-timeout' if TIMEOUT elapses first."
   (let* ((result :pending)
          (id (jvm-call-async target member args
                               (lambda (ok res err) (setq result (list ok res err)))))
@@ -314,7 +316,9 @@ TIMEOUT elapses first."
         (when (> (float-time) deadline)
           (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
           (signal 'jvm-timeout (list 'jvm-call-await target member)))))
-    result))
+    (if (car result)
+        (nth 1 result)
+      (signal 'jvm-error (list (nth 2 result))))))
 
 (defun jvm-new-async (class-name args &optional callback)
   "Construct a new CLASS-NAME(ARGS...) instance on the JVM asynchronously.

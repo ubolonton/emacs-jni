@@ -21,7 +21,7 @@
   (unless jvm-clj-eval-direct-test--ready
     (should (eq (jvm-start-await) 'ready))
     (dolist (jar (directory-files jvm-clj-eval-direct-test--jars-dir t "\\.jar\\'"))
-      (should (car (jvm-load-jar-await jar))))
+      (jvm-load-jar-await jar))
     (setq jvm-clj-eval-direct-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-marshalled-scalar ()
@@ -51,7 +51,7 @@ differs."
   ;; Async: set on one worker thread, read on another → nil result.
   (jvm-clj-eval-string-await "(def tl-async (java.lang.ThreadLocal.))")
   (jvm-clj-eval-string-await "(.set tl-async 99)")
-  (should (equal (jvm-clj-eval-string-await "(.get tl-async)") '(t nil nil))))
+  (should (null (jvm-clj-eval-string-await "(.get tl-async)"))))
 
 (ert-deftest emacs-jni-jvm-clj-eval-direct-test/nrepl-start-stop-roundtrip ()
   "The direct nREPL path starts a server on the main thread and stops it,

@@ -17,7 +17,7 @@
 See `jvm-call-test--ensure-ready' for why every test does this itself."
   (unless (eq (jvm-status) 'ready)
     (should (eq (jvm-start-await) 'ready)))
-  (should (equal (jvm-load-jar-await jvm-call-direct-test--calc-jar) '(t))))
+  (jvm-load-jar-await jvm-call-direct-test--calc-jar))
 
 (ert-deftest emacs-jni-jvm-call-direct-test/static-call-and-instance-call ()
   (jvm-call-direct-test--ensure-ready)
@@ -44,7 +44,7 @@ See `jvm-call-test--ensure-ready' for why every test does this itself."
   "The direct value must match the RESULT the async blocking wrapper reports."
   (jvm-call-direct-test--ensure-ready)
   (should (equal (jvm-call-direct "Calc" "addLong" '(20 22))
-                 (nth 1 (jvm-call-await "Calc" "addLong" '(20 22))))))
+                 (jvm-call-await "Calc" "addLong" '(20 22)))))
 
 (ert-deftest emacs-jni-jvm-call-direct-test/unsupported-argument-value-signals ()
   (jvm-call-direct-test--ensure-ready)

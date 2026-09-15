@@ -25,7 +25,7 @@ problem Phase 2's Task 5 already hit for `jvm-call-test.el'.")
   (unless jvm-clj-eval-test--ready
     (should (eq (jvm-start-await) 'ready))
     (dolist (jar (directory-files jvm-clj-eval-test--jars-dir t "\\.jar\\'"))
-      (should (car (jvm-load-jar-await jar))))
+      (jvm-load-jar-await jar))
     (setq jvm-clj-eval-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/context-classloader-fix-lets-clojure-bootstrap ()
@@ -33,26 +33,22 @@ problem Phase 2's Task 5 already hit for `jvm-call-test.el'.")
 ExceptionInInitializerError the first time Clojure's runtime is touched
 \(see the spec's Feasibility section for the exact failure)."
   (jvm-clj-eval-test--ensure-ready)
-  (let ((require-result (jvm-call-await "clojure.java.api.Clojure" "var" (list "clojure.core" "require"))))
-    (should (eq (nth 0 require-result) t))
-    (let* ((require-fn (nth 1 require-result))
-           (sym-result (jvm-call-await "clojure.java.api.Clojure" "read" (list "clojure.set"))))
-      (should (eq (nth 0 sym-result) t))
-      (should (equal (jvm-call-await require-fn "invoke" (list (nth 1 sym-result))) '(t nil nil))))))
+  (let* ((require-fn (jvm-call-await "clojure.java.api.Clojure" "var" (list "clojure.core" "require")))
+         (sym (jvm-call-await "clojure.java.api.Clojure" "read" (list "clojure.set"))))
+    (should (null (jvm-call-await require-fn "invoke" (list sym))))))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/require-a-namespace ()
   (jvm-clj-eval-test--ensure-ready)
-  (should (equal (jvm-clj-require-await "clojure.set") '(t nil nil))))
+  (should (null (jvm-clj-require-await "clojure.set"))))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/eval-string-returns-marshalled-scalar ()
   (jvm-clj-eval-test--ensure-ready)
-  (should (equal (jvm-clj-eval-string-await "(+ 40 (* 2 1))") '(t 42 nil))))
+  (should (equal (jvm-clj-eval-string-await "(+ 40 (* 2 1))") 42)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/eval-string-propagates-clojure-error ()
   (jvm-clj-eval-test--ensure-ready)
-  (let ((result (jvm-clj-eval-string-await "(/ 1 0)")))
-    (should (eq (nth 0 result) nil))
-    (should (string-match-p "Divide by zero" (nth 2 result)))))
+  (let ((err (should-error (jvm-clj-eval-string-await "(/ 1 0)") :type 'jvm-error)))
+    (should (string-match-p "Divide by zero" (cadr err)))))
 
 (ert-deftest emacs-jni-jvm-clj-nrepl-test/start-serves-real-bencode-protocol ()
   "Starts a real nREPL server and connects to it from a SEPARATE OS
@@ -62,17 +58,16 @@ actual external nREPL client does, and it's the exact mechanism verified
 working during the Phase 3 design spike (see the spec's Feasibility
 section)."
   (jvm-clj-eval-test--ensure-ready)
-  (let ((start-result (jvm-clj-nrepl-start-await)))
-    (should (car start-result))
-    (let* ((port (car (nth 1 start-result)))
-           (server (cdr (nth 1 start-result)))
-           (code "(+ 40 (* 2 1))")
-           (script (format
-                    "exec 3<>/dev/tcp/127.0.0.1/%d; printf '%%s' 'd2:op4:eval4:code%d:%s2:id1:1e' >&3; timeout 5 cat <&3; exec 3<&-; exec 3>&-"
-                    port (length code) code))
-           (response (with-temp-buffer
-                       (call-process "bash" nil t nil "-c" script)
-                       (buffer-string))))
+  (let* ((start-result (jvm-clj-nrepl-start-await))
+         (port (car start-result))
+         (server (cdr start-result))
+         (code "(+ 40 (* 2 1))")
+         (script (format
+                  "exec 3<>/dev/tcp/127.0.0.1/%d; printf '%%s' 'd2:op4:eval4:code%d:%s2:id1:1e' >&3; timeout 5 cat <&3; exec 3<&-; exec 3>&-"
+                  port (length code) code))
+         (response (with-temp-buffer
+                     (call-process "bash" nil t nil "-c" script)
+                     (buffer-string))))
       ;; Bencode has no quoting: a correct eval response contains the
       ;; literal substring "5:value2:42" (the "value" key's 5-char length
       ;; prefix, then the "42" result's 2-char length prefix) -- this is
@@ -83,7 +78,7 @@ section)."
       ;; server thread running for the rest of this batch process. Low
       ;; impact (the process exits right after), but a real gap if this
       ;; test is extended.
-      (jvm-clj-nrepl-stop-await server))))
+      (jvm-clj-nrepl-stop-await server)))
 
 (ert-deftest emacs-jni-jvm-clj-nrepl-test/bind-opens-the-server-beyond-loopback ()
   "Passing BIND makes the server listen on the given interface instead
@@ -94,22 +89,21 @@ socket for the bound port is a wildcard address, not loopback."
   (jvm-clj-eval-test--ensure-ready)
   (unless (executable-find "ss")
     (ert-skip "needs `ss' to inspect the listening socket's bind address"))
-  (let ((start-result (jvm-clj-nrepl-start-await 0 "0.0.0.0")))
-    (should (car start-result))
-    (let ((port (car (nth 1 start-result)))
-          (server (cdr (nth 1 start-result))))
-      (unwind-protect
-          (let ((listen (with-temp-buffer
-                          (call-process "ss" nil t nil "-tlnH")
-                          (buffer-string))))
-            ;; Bound to a wildcard address (`*'/`0.0.0.0'/`[::]'), the
-            ;; forms `ss' prints for an all-interfaces bind -- verified
-            ;; empirically against nREPL 1.7.0.
-            (should (string-match-p (format "\\(\\*\\|0\\.0\\.0\\.0\\|\\[::\\]\\):%d\\b" port) listen))
-            ;; ...and specifically NOT loopback-only, which is what the
-            ;; default (no BIND) produces and what this option fixes.
-            (should-not (string-match-p (format "127\\.0\\.0\\.1:%d\\b" port) listen)))
-        (jvm-clj-nrepl-stop-await server)))))
+  (let* ((start-result (jvm-clj-nrepl-start-await 0 "0.0.0.0"))
+         (port (car start-result))
+         (server (cdr start-result)))
+    (unwind-protect
+        (let ((listen (with-temp-buffer
+                        (call-process "ss" nil t nil "-tlnH")
+                        (buffer-string))))
+          ;; Bound to a wildcard address (`*'/`0.0.0.0'/`[::]'), the
+          ;; forms `ss' prints for an all-interfaces bind -- verified
+          ;; empirically against nREPL 1.7.0.
+          (should (string-match-p (format "\\(\\*\\|0\\.0\\.0\\.0\\|\\[::\\]\\):%d\\b" port) listen))
+          ;; ...and specifically NOT loopback-only, which is what the
+          ;; default (no BIND) produces and what this option fixes.
+          (should-not (string-match-p (format "127\\.0\\.0\\.1:%d\\b" port) listen)))
+      (jvm-clj-nrepl-stop-await server))))
 
 (provide 'jvm-clj-eval-test)
 ;;; jvm-clj-eval-test.el ends here

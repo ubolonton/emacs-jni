@@ -22,36 +22,32 @@ pattern).")
 
 (defun jvm-clj--var-await (ns name)
   "Resolve the wrapped IFn for NS/NAME via `clojure.java.api.Clojure/var'.
-Returns (OK IFN ERR), same shape as `jvm-call-await'."
+Returns the IFn value; signals `jvm-error' on failure."
   (jvm-call-await "clojure.java.api.Clojure" "var" (list ns name)))
 
 (defun jvm-clj--read-await (form-string)
   "Parse FORM-STRING as Clojure data via `clojure.java.api.Clojure/read'.
-Returns (OK DATA ERR), same shape as `jvm-call-await'."
+Returns the data value; signals `jvm-error' on failure."
   (jvm-call-await "clojure.java.api.Clojure" "read" (list form-string)))
 
 (defun jvm-clj--invoke-with-form-await (var-ns var-name form-string &optional timeout)
   "Resolve VAR-NS/VAR-NAME, read FORM-STRING as Clojure data, and invoke
-the resolved IFn with it as its sole argument. Returns (OK RESULT ERR) --
-whichever step fails first short-circuits the rest. Shared plumbing for
+the resolved IFn with it as its sole argument. Returns the result value;
+signals `jvm-error' on the first failing step. Shared plumbing for
 `jvm-clj-require-await' and `jvm-clj-eval-string-await', both of which are
 \"resolve a var, read one form, invoke\"."
-  (let ((fn (jvm-clj--var-await var-ns var-name)))
-    (if (not (car fn))
-        fn
-      (let ((form (jvm-clj--read-await form-string)))
-        (if (not (car form))
-            form
-          (jvm-call-await (nth 1 fn) "invoke" (list (nth 1 form)) timeout))))))
+  (let ((fn (jvm-clj--var-await var-ns var-name))
+        (form (jvm-clj--read-await form-string)))
+    (jvm-call-await fn "invoke" (list form) timeout)))
 
 (defun jvm-clj-require-await (namespace &optional timeout)
   "Require the Clojure NAMESPACE (a string, e.g. \"clojure.set\").
-Returns (OK RESULT ERR), same shape as `jvm-call-await'."
+Returns the result value; signals `jvm-error' on failure."
   (jvm-clj--invoke-with-form-await "clojure.core" "require" namespace timeout))
 
 (defun jvm-clj-eval-string-await (code &optional timeout)
-  "Evaluate CODE (a string of Clojure source) and return its result.
-Returns (OK RESULT ERR), same shape as `jvm-call-await'.
+  "Evaluate CODE (a string of Clojure source) and return its result value.
+Signals `jvm-error' on failure.
 
 Each call may run on a different underlying JVM thread (the async per-call
 dispatch model), so `*ns*' set by a previous call (e.g. via `in-ns') does
@@ -119,21 +115,16 @@ threads."
 
 (defun jvm-clj-start-await (&optional timeout)
   "Start the JVM (if needed), load `jvm-clj-classpath' plus this
-package's `clojure-src' directory, and require `emacs-jni.clj'.
-Signals an error if the JVM fails to start, a classpath entry fails to
-load, or the namespace fails to require (e.g. no Clojure jar on
-`jvm-clj-classpath')."
+package's `clojure-src' directory, and require `emacs-jni.clj'. Returns the
+`require' result value; signals an error if the JVM fails to start, a
+classpath entry fails to load, or the namespace fails to require (e.g. no
+Clojure jar on `jvm-clj-classpath')."
   (unless (eq (jvm-status) 'ready)
     (unless (eq (jvm-start-await nil nil timeout) 'ready)
       (error "jvm-clj-start-await: JVM failed to start (status: %s)" (jvm-status))))
   (dolist (path (append jvm-clj-classpath (list jvm-clj--source-dir)))
-    (let ((result (jvm-load-jar-await path timeout)))
-      (unless (car result)
-        (error "jvm-clj-start-await: failed to load %s: %s" path (cdr result)))))
-  (let ((required (jvm-clj-require-await "emacs-jni.clj" timeout)))
-    (unless (car required)
-      (error "jvm-clj-start-await: failed to require emacs-jni.clj: %s" (nth 2 required)))
-    required))
+    (jvm-load-jar-await path timeout))
+  (jvm-clj-require-await "emacs-jni.clj" timeout))
 
 (defun jvm-clj-start-direct (&optional timeout)
   "Like `jvm-clj-start-await', but require `emacs-jni.clj' through the direct
@@ -146,9 +137,7 @@ directly; signals `jvm-error' (or a lifecycle error) on failure."
     (unless (eq (jvm-start-await nil nil timeout) 'ready)
       (error "jvm-clj-start-direct: JVM failed to start (status: %s)" (jvm-status))))
   (dolist (path (append jvm-clj-classpath (list jvm-clj--source-dir)))
-    (let ((result (jvm-load-jar-await path timeout)))
-      (unless (car result)
-        (error "jvm-clj-start-direct: failed to load %s: %s" path (cdr result)))))
+    (jvm-load-jar-await path timeout))
   (jvm-clj-require-direct "emacs-jni.clj"))
 
 (defalias 'jvm-clj-start 'jvm-clj-start-direct
@@ -167,39 +156,28 @@ beyond loopback only when you need it -- a loopback-only server is
 unreachable through VM/NAT port forwarding, which delivers the
 connection to a routable interface, not the guest's `127.0.0.1'. See
 docs/how-to-guides/run-an-nrepl-server.md for that and the security
-cost. Returns (OK RESULT ERR); if OK, RESULT is (cons ACTUAL-PORT
-SERVER) -- the real bound port and a wrapped JVM object
-`jvm-clj-nrepl-stop-await' needs later."
+cost. Returns (cons ACTUAL-PORT SERVER) -- the real bound port and a
+wrapped JVM object `jvm-clj-nrepl-stop-await' needs later; signals
+`jvm-error' on failure."
   (jvm-clj-start-await timeout)
-  (catch 'jvm-clj-nrepl-start-await
-    (let ((required (jvm-clj-require-await "nrepl.server" timeout)))
-      (unless (car required) (throw 'jvm-clj-nrepl-start-await required))
-      (let ((start-fn (jvm-clj--var-await "nrepl.server" "start-server")))
-        (unless (car start-fn) (throw 'jvm-clj-nrepl-start-await start-fn))
-        (let ((port-kw (jvm-clj--read-await ":port")))
-          (unless (car port-kw) (throw 'jvm-clj-nrepl-start-await port-kw))
-          (let ((start-args (list (nth 1 port-kw) (or port 0))))
-            ;; `start-server' takes keyword options; add `:bind BIND' to
-            ;; its argument list only when a bind address was requested,
-            ;; so the default path stays a plain `:port' call.
-            (when bind
-              (let ((bind-kw (jvm-clj--read-await ":bind")))
-                (unless (car bind-kw) (throw 'jvm-clj-nrepl-start-await bind-kw))
-                (setq start-args (append start-args (list (nth 1 bind-kw) bind)))))
-            (let ((server (jvm-call-await (nth 1 start-fn) "invoke" start-args timeout)))
-              (unless (car server) (throw 'jvm-clj-nrepl-start-await server))
-              (let ((bound-port (jvm-call-await (nth 1 port-kw) "invoke"
-                                                (list (nth 1 server)) timeout)))
-                (unless (car bound-port) (throw 'jvm-clj-nrepl-start-await bound-port))
-                (list t (cons (nth 1 bound-port) (nth 1 server)) nil)))))))))
+  (jvm-clj-require-await "nrepl.server" timeout)
+  (let* ((start-fn (jvm-clj--var-await "nrepl.server" "start-server"))
+         (port-kw (jvm-clj--read-await ":port"))
+         (start-args (list port-kw (or port 0))))
+    ;; `start-server' takes keyword options; add `:bind BIND' to its
+    ;; argument list only when a bind address was requested, so the
+    ;; default path stays a plain `:port' call.
+    (when bind
+      (setq start-args (append start-args (list (jvm-clj--read-await ":bind") bind))))
+    (let* ((server (jvm-call-await start-fn "invoke" start-args timeout))
+           (bound-port (jvm-call-await port-kw "invoke" (list server) timeout)))
+      (cons bound-port server))))
 
 (defun jvm-clj-nrepl-stop-await (server &optional timeout)
-  "Stop SERVER (the cdr of `jvm-clj-nrepl-start-await''s RESULT). Returns
-\(OK RESULT ERR), same shape as `jvm-call-await'."
-  (let ((stop-fn (jvm-clj--var-await "nrepl.server" "stop-server")))
-    (if (not (car stop-fn))
-        stop-fn
-      (jvm-call-await (nth 1 stop-fn) "invoke" (list server) timeout))))
+  "Stop SERVER (from `jvm-clj-nrepl-start-await'). Returns the result value;
+signals `jvm-error' on failure."
+  (jvm-call-await (jvm-clj--var-await "nrepl.server" "stop-server")
+                  "invoke" (list server) timeout))
 
 (defun jvm-clj-nrepl-start-direct (&optional port bind)
   "Direct (main-thread) counterpart of `jvm-clj-nrepl-start-await': ensure

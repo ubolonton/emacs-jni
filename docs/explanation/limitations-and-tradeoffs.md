@@ -146,7 +146,7 @@ chose not to special-case Clojure eval calls that way. The nREPL
 server does not share this limitation: once started, it manages its
 own session and thread state internally, independent of the per-call
 dispatch model that everything else in this module uses. See
-[How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md#switch-namespaces-inside-a-single-call)
+[How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md#switch-namespaces-across-calls)
 for the workaround.
 
 The direct counterpart, `jvm-clj-eval-string-direct`, does *not* have

@@ -7,6 +7,9 @@ name is a `defalias` for the recommended one:
   thread, delivering the result to a callback.
 - `-await` dispatches to the worker like `-async`, then blocks the
   calling thread until the reply arrives (or `timeout` seconds pass).
+  Like `-direct`, it returns the value and signals `jvm-error` on
+  failure — the only difference from `-direct` is that the call runs on
+  the worker, not the main thread.
 - `-direct` runs the whole operation synchronously on the Emacs main
   thread, with no worker round trip; it returns the value and signals on
   failure.
@@ -33,12 +36,12 @@ signals `jvm-timeout` instead of returning.
 | `jvm-stop-async` | `()` | Not meaningful. | Attempts a full JVM teardown. Legal from `ready` or `paused`. Best-effort, and restart-in-process is unsupported — see [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md). |
 | `jvm-stop-await` | `(&optional timeout)` | The status once stopping finishes: `stopped` or `stop-failed`. | **`jvm-stop` aliases this.** |
 | `jvm-load-jar-async` | `(path &optional callback)` | A request ID. | Adds `path` to the shared classloader. `callback`, if given, is called as `(callback OK ERR)`. Legal only when `ready`. Does not change `jvm-status`. |
-| `jvm-load-jar-await` | `(path &optional timeout)` | `(OK . ERR)`. | |
+| `jvm-load-jar-await` | `(path &optional timeout)` | `nil`. | Signals `jvm-error` on failure. |
 | `jvm-load-jar-direct` | `(path)` | `nil`. | Adds `path` on the Emacs main thread, no worker round trip. Shares one classloader with `jvm-load-jar-async`, so a jar loaded either way is visible to both paths. Signals `jvm-error` on failure. Legal only when `ready`. **`jvm-load-jar` aliases this.** |
 | `jvm-call-async` | `(target member args &optional callback)` | A request ID. | Reflectively invokes `TARGET.MEMBER(ARGS...)`. `TARGET` is a class-name string for a static call, or a wrapped JVM object for an instance call. `callback`, if given, is called as `(callback OK RESULT ERR)`. |
-| `jvm-call-await` | `(target member args &optional timeout)` | `(OK RESULT ERR)`. | |
+| `jvm-call-await` | `(target member args &optional timeout)` | The `RESULT` value itself. | Signals `jvm-error` on a Java/Clojure failure. |
 | `jvm-new-async` | `(class-name args &optional callback)` | A request ID. | `jvm-call-async` with `member` fixed to the constructor's internal name, `"<init>"`. |
-| `jvm-new-await` | `(class-name args &optional timeout)` | `(OK RESULT ERR)`. | |
+| `jvm-new-await` | `(class-name args &optional timeout)` | The new instance. | Signals `jvm-error` on failure. |
 | `jvm-call-direct` | `(target member args)` | The `RESULT` value itself. | Runs the whole call synchronously on the Emacs main thread — no worker round trip — and returns the value directly. A genuine Java/Clojure failure signals `jvm-error`; a Lisp signal/throw raised in a same-thread callback is reconstructed and re-raised as its original `(signal …)`/`(throw …)`. Blocks Emacs's main loop for the call's duration; a same-thread Clojure→Lisp callback made during the call runs directly (no deadlock). Experimental — see [Synchronous Lisp → Clojure calls](../explanation/limitations-and-tradeoffs.md#jvm-call-direct-blocks-emacs-while-it-runs). **`jvm-call` aliases this.** |
 | `jvm-new-direct` | `(class-name args)` | The new instance. | `jvm-call-direct` with `member` fixed to `"<init>"`. **`jvm-new` aliases this.** |
 | `jvm-ping` | `()` | `t`. | A module sanity check. Does not touch the JVM. |
@@ -56,19 +59,19 @@ fire-and-forget Clojure call): an `-await` form dispatches to the worker
 and blocks for the reply; a `-direct` form runs every JVM/Clojure step
 on the Emacs main thread via `jvm-call-direct` — no worker round trip,
 one always-attached thread (so thread-locals persist), and a reentrant
-Clojure→Lisp callback cannot deadlock. A `-direct` function returns the
-value directly and signals `jvm-error` on failure, rather than an
-`(OK RESULT ERR)` tuple. The **bare name aliases `-direct`.**
+Clojure→Lisp callback cannot deadlock. Both forms return the value
+directly and signal `jvm-error` on failure. The **bare name aliases
+`-direct`.**
 
-| `jvm-clj-start-await` | `(&optional timeout)` | `(OK RESULT ERR)` from the namespace `require`, on success. | Starts the JVM if needed, loads `jvm-clj-classpath` plus this package's `clojure-src` directory, and requires `emacs-jni.clj`. Signals an error if any step fails. |
+| `jvm-clj-start-await` | `(&optional timeout)` | The `require` `RESULT` value. | Starts the JVM if needed, loads `jvm-clj-classpath` plus this package's `clojure-src` directory, and requires `emacs-jni.clj`. Signals an error if any step fails. |
 | `jvm-clj-start-direct` | `(&optional timeout)` | The `require` `RESULT` value itself. | Like `jvm-clj-start-await`, but requires `emacs-jni.clj` through the direct (main-thread) path. JVM start and jar loading stay synchronous; a require failure signals `jvm-error`. **`jvm-clj-start` aliases this.** |
-| `jvm-clj-require-await` | `(namespace &optional timeout)` | `(OK RESULT ERR)`. | Calls Clojure's `require` on `NAMESPACE`, a string. |
+| `jvm-clj-require-await` | `(namespace &optional timeout)` | The `RESULT` value. | Calls Clojure's `require` on `NAMESPACE`, a string. Signals `jvm-error` on failure. |
 | `jvm-clj-require-direct` | `(namespace)` | The `RESULT` value itself. | Direct counterpart of `jvm-clj-require-await`. **`jvm-clj-require` aliases this.** |
-| `jvm-clj-eval-string-await` | `(code &optional timeout)` | `(OK RESULT ERR)`. | Evaluates `CODE`, a string of Clojure source. Each call may run on a different worker thread, so a thread-local (e.g. `*ns*`) does not persist between calls — see [Known limitations](#known-limitations). |
+| `jvm-clj-eval-string-await` | `(code &optional timeout)` | The `RESULT` value. | Evaluates `CODE`, a string of Clojure source; signals `jvm-error` on failure. Each call may run on a different worker thread, so a thread-local (e.g. `*ns*`) does not persist between calls — see [Known limitations](#known-limitations). |
 | `jvm-clj-eval-string-direct` | `(code)` | The `RESULT` value itself. | Direct counterpart. Because the main thread stays attached across calls, a thread-local effect (e.g. `*ns*` after `in-ns`) *does* persist between successive direct evals. Blocks Emacs's main loop for the eval. **`jvm-clj-eval-string` aliases this.** |
-| `jvm-clj-nrepl-start-await` | `(&optional port bind timeout)` | `(OK RESULT ERR)`, where `RESULT` is `(ACTUAL-PORT . SERVER)` on success. | Ensures `emacs-jni.clj` is loaded (via `jvm-clj-start-await`), then starts an nREPL server. `PORT` defaults to 0 (the OS picks a free port). `BIND`, if non-nil, is the interface address (e.g. `"0.0.0.0"`); defaults to nREPL's loopback — bind beyond loopback only when needed, see [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md#restrict-who-can-connect). `SERVER` is a wrapped JVM object, needed by `jvm-clj-nrepl-stop-await`. |
+| `jvm-clj-nrepl-start-await` | `(&optional port bind timeout)` | `(ACTUAL-PORT . SERVER)`. | Ensures `emacs-jni.clj` is loaded (via `jvm-clj-start-await`), then starts an nREPL server; signals `jvm-error` on failure. `PORT` defaults to 0 (the OS picks a free port). `BIND`, if non-nil, is the interface address (e.g. `"0.0.0.0"`); defaults to nREPL's loopback — bind beyond loopback only when needed, see [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md#restrict-who-can-connect). `SERVER` is a wrapped JVM object, needed by `jvm-clj-nrepl-stop-await`. |
 | `jvm-clj-nrepl-start-direct` | `(&optional port bind)` | `(ACTUAL-PORT . SERVER)`. | Direct counterpart: ensures `emacs-jni.clj` is loaded (via `jvm-clj-start-direct`) and starts the server, every step via `jvm-call-direct`. **`jvm-clj-nrepl-start` aliases this.** |
-| `jvm-clj-nrepl-stop-await` | `(server &optional timeout)` | `(OK RESULT ERR)`. | `SERVER` is the value `jvm-clj-nrepl-start-await` returned. |
+| `jvm-clj-nrepl-stop-await` | `(server &optional timeout)` | The `RESULT` value. | `SERVER` is the value `jvm-clj-nrepl-start-await` returned. Signals `jvm-error` on failure. |
 | `jvm-clj-nrepl-stop-direct` | `(server)` | The `RESULT` value itself. | Direct counterpart of `jvm-clj-nrepl-stop-await`. **`jvm-clj-nrepl-stop` aliases this.** |
 
 ### Clojure API: `emacs-jni.clj`
@@ -222,13 +225,14 @@ Java value returned, or passed as an argument into a Lisp callback:
 | `jvm-timeout` | Any `-await` function, once its `timeout` elapses before the operation finishes. | The operation may still finish later. The caller stopped waiting for it. |
 | `jvm-invalid-argument` | `jvm-call`/`jvm-new` in any variant (`-async`/`-await`/`-direct`). | An argument's Lisp value has no marshalling rule for any of the target member's parameter types. |
 | `jvm-illegal-transition` | The lifecycle functions (`jvm-start`/`jvm-pause`/`jvm-stop` and their `-async`/`-await` forms); `jvm-call-direct`/`jvm-new-direct`/`jvm-load-jar-direct` with no running JVM. | The current `jvm-status` does not allow this transition. |
-| `jvm-error` | `jvm-call-direct`/`jvm-new-direct`/`jvm-load-jar-direct`. | The synchronous call failed (missing class/method or jar, a Java exception, or a Clojure exception — including an uncaught Lisp signal that unwound through Clojure). Unlike the `-async`/`-await` forms, which report failures in their return value, the direct forms signal. |
+| `jvm-error` | The `-await` and `-direct` forms of `jvm-call`/`jvm-new`/`jvm-load-jar`, and the `jvm-clj-*` functions. | The call failed (missing class/method or jar, a Java exception, or a Clojure exception — including an uncaught Lisp signal that unwound through Clojure). Only the `-async` forms report a failure to a callback instead of signalling. |
 
-A Java exception, or a call to a nonexistent class or method, is
-**not** signaled as a Lisp condition by the `-async`/`-await` forms. It
-comes back as a descriptive string in the `ERR` position of
-`(OK RESULT ERR)` (or `(OK . ERR)` for `jvm-load-jar-await`), with `OK`
-set to `nil`.
+A Java exception, or a call to a nonexistent class or method, is not a
+Lisp condition for the `-async` forms: it reaches the callback as a
+descriptive string in the `ERR` argument (`(callback OK RESULT ERR)`, or
+`(callback OK ERR)` for `jvm-load-jar-async`), with `OK` set to `nil`.
+The `-await` and `-direct` forms signal `jvm-error` carrying that string
+instead.
 
 ## Known limitations
 

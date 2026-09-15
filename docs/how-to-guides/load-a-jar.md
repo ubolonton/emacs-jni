@@ -6,12 +6,13 @@ The JVM must be `ready` before you load a jar. See
 ## Load one jar and wait for the result
 
 ```elisp
-(jvm-load-jar-await (expand-file-name "~/path/to/your.jar"))
-;; => (t)              on success -- a cons (OK . ERR), nil ERR prints as nothing
-;; => (nil . "jar file not found: ...")   on failure
+(jvm-load-jar (expand-file-name "~/path/to/your.jar"))
+;; => nil          on success
+;; signals jvm-error, e.g. "jar file not found: ...", on failure
 ```
 
-Use `expand-file-name` to turn a relative or `~`-prefixed path into an
+`jvm-load-jar` runs synchronously on the Emacs main thread. Use
+`expand-file-name` to turn a relative or `~`-prefixed path into an
 absolute one before passing it.
 
 ## Load a jar without blocking
@@ -31,7 +32,7 @@ later, once the JVM worker thread finishes the load.
 
 ```elisp
 (dolist (jar (directory-files "/path/to/jar-dir" t "\\.jar\\'"))
-  (jvm-load-jar-await jar))
+  (jvm-load-jar jar))
 ```
 
 ## Make classes from one jar visible to another
@@ -42,12 +43,16 @@ long as both are loaded, in either order.
 
 ## Set a timeout longer than the default 30 seconds
 
+The bare `jvm-load-jar` has no timeout. To bound the wait, use the
+`-await` variant, which dispatches to the worker and takes a timeout:
+
 ```elisp
 (jvm-load-jar-await "~/big.jar" 120)
 ```
 
 The second argument to `jvm-load-jar-await` is the timeout, in seconds.
-Past it, the call signals `jvm-timeout` instead of returning.
+Past it, the call signals `jvm-timeout`; a load failure signals
+`jvm-error`; on success it returns nil.
 
 ## Remove a jar
 

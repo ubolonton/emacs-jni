@@ -8,72 +8,72 @@ for the setup steps.
 ## Evaluate an expression
 
 ```elisp
-(jvm-clj-eval-string-await "(+ 40 (* 2 1))")
-;; => (t 42 nil)
+(jvm-clj-eval-string "(+ 40 (* 2 1))")
+;; => 42
 ```
 
-The result is `(OK RESULT ERR)`, the same shape `jvm-call-await`
-returns.
+`jvm-clj-eval-string` returns the result value directly and signals
+`jvm-error` on failure.
 
 ## Require a namespace
 
 ```elisp
-(jvm-clj-require-await "clojure.set")
-;; => (t nil nil)
+(jvm-clj-require "clojure.set")
+;; => nil
 ```
 
-Do this before evaluating code that depends on that namespace.
+`require` returns nil on success. Do this before evaluating code that
+depends on that namespace.
 
 ## Read a Clojure error
 
+A failing eval signals `jvm-error`, carrying Clojure's own exception
+message:
+
 ```elisp
-(jvm-clj-eval-string-await "(/ 1 0)")
-;; => (nil nil "... Divide by zero ...")
+(condition-case err
+    (jvm-clj-eval-string "(/ 1 0)")
+  (jvm-error
+   (message "%s" (cadr err))))   ; "... Divide by zero ..."
 ```
 
-`OK` is `nil`. `ERR` holds Clojure's own exception message.
+## Switch namespaces across calls
 
-## Switch namespaces inside a single call
+The bare `jvm-clj-eval-string` runs on the Emacs main thread, which
+stays attached to one JVM thread between calls, so `*ns*` set by
+`(in-ns ...)` in one call persists to the next.
+
+The `-await` variant does **not** persist it: each
+`jvm-clj-eval-string-await` call may run on a different underlying JVM
+thread, and Clojure's current-namespace pointer is thread-local. If you
+use `-await`, put `(in-ns ...)` and the code that depends on it inside
+the same call, wrapped in a `do`:
 
 ```elisp
 (jvm-clj-eval-string-await "(do (in-ns 'clojure.set) (ns-name *ns*))")
 ```
 
-Put `(in-ns ...)` and the code that depends on it inside the same
-`jvm-clj-eval-string-await` call, wrapped in a `do` if you need more than
-one form.
-
-Do not rely on a namespace switch from one call carrying over to the
-next call. Each `jvm-clj-eval-string-await` call may run on a different
-underlying JVM thread, and Clojure's current-namespace pointer is
-thread-local. `(def x 5)` in one call, then reading `x` in a later
-call, does work — `def` mutates a genuinely global `Var`. Relying on an
-earlier `in-ns` does not. See
+`(def x 5)` carries across `-await` calls either way — `def` mutates a
+genuinely global `Var` — only an earlier `in-ns` (or any thread-local)
+does not. See
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md)
 for why.
-
-If you do need a namespace switch (or any thread-local) to carry across
-calls, use `jvm-clj-eval-string-direct` instead: it runs on the Emacs main
-thread, which stays attached to one JVM thread between calls, so `*ns*` and
-other thread-locals persist. It returns the value directly (signalling
-`jvm-error` on failure) and blocks Emacs's main loop for the eval.
 
 ## Get a printable form of a non-scalar result
 
 ```elisp
-(let ((result (jvm-clj-eval-string-await "[1 2 3]")))
-  (jvm-call-await (nth 1 result) "toString" nil))
-;; => (t "[1 2 3]" nil)
+(jvm-call (jvm-clj-eval-string "[1 2 3]") "toString" nil)
+;; => "[1 2 3]"
 ```
 
 A keyword, symbol, vector, map, or lazy sequence comes back as an
 opaque wrapped JVM object, not a Lisp-visible structure. Call
-`toString` on it through `jvm-call-await`, as shown above, or evaluate
+`toString` on it through `jvm-call`, as shown above, or evaluate
 `pr-str` around the original expression instead:
 
 ```elisp
-(jvm-clj-eval-string-await "(pr-str [1 2 3])")
-;; => (t "[1 2 3]" nil)
+(jvm-clj-eval-string "(pr-str [1 2 3])")
+;; => "[1 2 3]"
 ```
 
 The second form returns a real Lisp string directly, since `pr-str`

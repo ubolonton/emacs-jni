@@ -26,11 +26,9 @@ regardless of ERT's execution order.")
     (setq jvm-clj-test--ready t)))
 
 (defun jvm-clj-test--eval (code)
-  "Evaluate CODE (Clojure source) via `jvm-clj-eval-string-await', asserting
-success, and return its RESULT."
-  (let ((result (jvm-clj-eval-string-await code)))
-    (should (car result))
-    (nth 1 result)))
+  "Evaluate CODE (Clojure source) via `jvm-clj-eval-string-await' and return
+its result value (signalling `jvm-error' on failure)."
+  (jvm-clj-eval-string-await code))
 
 (defun jvm-clj-test--prin1 (lisp-object)
   "Call `prin1ToString' on the wrapped Java LISP-OBJECT via plain
@@ -38,9 +36,7 @@ success, and return its RESULT."
 method call uses -- a Java `emacs_jni.core.LispObject' has no special status on
 the Lisp side, it's just an opaque wrapped handle, per the design spec's
 non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
-  (let ((result (jvm-call-await lisp-object "prin1ToString" nil)))
-    (should (car result))
-    (nth 1 result)))
+  (jvm-call-await lisp-object "prin1ToString" nil))
 
 (ert-deftest emacs-jni-jvm-clj-test/intern-returns-a-clojure-symbol ()
   (jvm-clj-test--ensure-ready)

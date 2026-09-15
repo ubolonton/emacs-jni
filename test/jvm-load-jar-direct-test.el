@@ -29,7 +29,7 @@
 resolves from an async `jvm-call-await' too."
   (jvm-load-jar-direct-test--ensure-ready)
   (should (null (jvm-load-jar-direct jvm-load-jar-direct-test--calc-jar)))
-  (should (equal (nth 1 (jvm-call-await "Calc" "addLong" '(7 8))) 15)))
+  (should (equal (jvm-call-await "Calc" "addLong" '(7 8)) 15)))
 
 (ert-deftest emacs-jni-jvm-load-jar-direct-test/missing-jar-signals-jvm-error ()
   (jvm-load-jar-direct-test--ensure-ready)
