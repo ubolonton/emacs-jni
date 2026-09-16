@@ -31,9 +31,12 @@ problem Phase 2's Task 5 already hit for `jvm-call-test.el'.")
     (setq jvm-clj-eval-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/context-classloader-fix-lets-clojure-bootstrap ()
-  "Proves Task 1's fix: without it, this fails with
-ExceptionInInitializerError the first time Clojure's runtime is touched
-\(see the spec's Feasibility section for the exact failure)."
+  "Proves Task 1's fix stays in effect: a `Clojure/var'+`read'+`require'
+sequence keeps working (without the fix, touching Clojure's runtime fails
+with ExceptionInInitializerError -- see the spec's Feasibility section for
+the exact failure). `--ensure-ready' already bootstraps Clojure's runtime
+via `emacs-jni.clj', so this is not that first touch, just a check that
+the sequence itself still succeeds."
   (jvm-clj-eval-test--ensure-ready)
   (let* ((require-fn (jvm-call-await "clojure.java.api.Clojure" "var" (list "clojure.core" "require")))
          (sym (jvm-call-await "clojure.java.api.Clojure" "read" (list "clojure.set"))))

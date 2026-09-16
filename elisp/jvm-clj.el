@@ -55,7 +55,12 @@ not persist to the next one -- fold namespace switches into CODE itself
 when it matters, or use `jvm-clj-eval-string-direct', which keeps one
 attached thread so thread-locals do persist. Non-scalar Clojure return
 values (keywords, vectors, maps) come back as an opaque wrapped JVM object,
-same limitation as any other non-scalar `jvm-call' result."
+same limitation as any other non-scalar `jvm-call' result.
+
+CODE is read by `clojure.java.api.Clojure/read', which reads EDN, not full
+Clojure syntax: it has no reader macros. Write `(quote x)' rather than
+quoting a form with a leading quote mark; backtick, `~', and `#()' are
+likewise unsupported."
   (jvm-clj--invoke-with-form-await "emacs-jni.clj" "eval-for-lisp" code timeout))
 
 ;;; Clojure interop primitives (direct main-thread path).
@@ -104,7 +109,12 @@ Unlike `jvm-clj-eval-string-await', successive calls run on the *same*, always-
 attached JVM thread, so a thread-local effect (e.g. `*ns*' after `in-ns', or
 a dynamic binding) does persist across calls. It blocks Emacs's main loop for
 the whole eval, so keep heavy or blocking work on the Clojure side's own
-threads."
+threads.
+
+CODE is read by `clojure.java.api.Clojure/read', which reads EDN, not full
+Clojure syntax: it has no reader macros. Write `(quote x)' rather than
+quoting a form with a leading quote mark; backtick, `~', and `#()' are
+likewise unsupported."
   (jvm-clj--invoke-with-form-direct "emacs-jni.clj" "eval-for-lisp" code))
 
 (defalias 'jvm-clj-eval-string 'jvm-clj-eval-string-direct

@@ -388,12 +388,12 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
         let handle: u64 = v.env.call("jvm--register-callback", (v,))?.into_rust()?;
         return Ok(commands::LispArg::Callback(handle));
     }
-    // Anything else reaching this point (a vector, keyword, hash-table,
-    // or any symbol other than `t`) is not a value this bridge knows how
-    // to marshal. Earlier code silently treated it as `LispArg::True`,
-    // which could mask real caller bugs (e.g. accidentally passing a
-    // vector where a number was intended would silently become Java
-    // `true`) -- signal a clear error instead.
+    // Anything else reaching this point (a vector, hash-table, or other
+    // unsupported value) is not a value this bridge knows how to marshal.
+    // Earlier code silently treated it as `LispArg::True`, which could mask
+    // real caller bugs (e.g. accidentally passing a vector where a number
+    // was intended would silently become Java `true`) -- signal a clear
+    // error instead.
     v.env.signal(jvm_invalid_argument, (v,))
 }
 
