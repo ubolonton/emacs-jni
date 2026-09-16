@@ -319,6 +319,13 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     if !v.is_not_nil() {
         return Ok(commands::LispArg::Nil);
     }
+    if v.env.call("keywordp", (v,))?.is_not_nil() {
+        let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
+        // `symbol-name` of a keyword includes its leading `:`; strip it so
+        // `name` is the bare name the marker carries.
+        let name = name.strip_prefix(':').unwrap_or(&name).to_string();
+        return Ok(commands::LispArg::Symbol { name, keyword: true });
+    }
     if let Ok(n) = v.into_rust::<i64>() {
         return Ok(commands::LispArg::Int(n));
     }
@@ -351,6 +358,16 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     // literally `t`" rather than "is this any non-nil symbol".
     if v == v.env.intern("t")? {
         return Ok(commands::LispArg::True);
+    }
+    // A symbol is data: it crosses as a marker, not a callback. Checked
+    // before `functionp` so a symbol holding a function cell (`car`) is a
+    // marker too; only a non-symbol function object (lambda, closure,
+    // byte-code, subr) reaches the `functionp` arm below. Matches the
+    // Clojure `->lisp` model, where every symbol is a `LispSymbol` marker
+    // and callability is opt-in via `require-symbol`.
+    if v.env.call("symbolp", (v,))?.is_not_nil() {
+        let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
+        return Ok(commands::LispArg::Symbol { name, keyword: false });
     }
     // A Lisp function (symbol with a function cell, lambda, closure,
     // subr, or byte-compiled object) is registered Lisp-side in
