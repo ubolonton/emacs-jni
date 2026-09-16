@@ -22,6 +22,8 @@
     (should (eq (jvm-start-await) 'ready))
     (dolist (jar (directory-files jvm-clj-eval-direct-test--jars-dir t "\\.jar\\'"))
       (jvm-load-jar-await jar))
+    (jvm-load-jar-await jvm-clj--source-dir)
+    (jvm-clj-require-await "emacs-jni.clj")
     (setq jvm-clj-eval-direct-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-marshalled-scalar ()
@@ -64,6 +66,21 @@ like `jvm-clj-nrepl-start-await'."
     (should (integerp port))
     (should (> port 0))
     (jvm-clj-nrepl-stop-direct server)))
+
+(ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-keyword ()
+  "A Clojure keyword result comes back as a real Lisp keyword, not a pointer."
+  (jvm-clj-eval-direct-test--ensure-ready)
+  (should (eq (jvm-clj-eval-string-direct ":a") :a)))
+
+(ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-symbol ()
+  "A Clojure symbol result comes back as a real Lisp symbol.
+Uses \"(quote foo)\" as the code string, not a quote-reader-macro shorthand:
+`jvm-clj--read-direct' parses code via `clojure.java.api.Clojure/read',
+which is EDN-based and has no quote-reader-macro support, so a shorthand
+quote would read as a symbol literally including the quote character,
+not as a `(quote ...)' form."
+  (jvm-clj-eval-direct-test--ensure-ready)
+  (should (eq (jvm-clj-eval-string-direct "(quote foo)") 'foo)))
 
 (provide 'jvm-clj-eval-direct-test)
 ;;; jvm-clj-eval-direct-test.el ends here

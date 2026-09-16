@@ -56,7 +56,7 @@ when it matters, or use `jvm-clj-eval-string-direct', which keeps one
 attached thread so thread-locals do persist. Non-scalar Clojure return
 values (keywords, vectors, maps) come back as an opaque wrapped JVM object,
 same limitation as any other non-scalar `jvm-call' result."
-  (jvm-clj--invoke-with-form-await "clojure.core" "eval" code timeout))
+  (jvm-clj--invoke-with-form-await "emacs-jni.clj" "eval-for-lisp" code timeout))
 
 ;;; Clojure interop primitives (direct main-thread path).
 ;;;
@@ -105,7 +105,7 @@ attached JVM thread, so a thread-local effect (e.g. `*ns*' after `in-ns', or
 a dynamic binding) does persist across calls. It blocks Emacs's main loop for
 the whole eval, so keep heavy or blocking work on the Clojure side's own
 threads."
-  (jvm-clj--invoke-with-form-direct "clojure.core" "eval" code))
+  (jvm-clj--invoke-with-form-direct "emacs-jni.clj" "eval-for-lisp" code))
 
 (defalias 'jvm-clj-eval-string 'jvm-clj-eval-string-direct
   "Canonical `jvm-clj-eval-string' is the direct (main-thread) variant. See

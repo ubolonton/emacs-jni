@@ -26,6 +26,8 @@ problem Phase 2's Task 5 already hit for `jvm-call-test.el'.")
     (should (eq (jvm-start-await) 'ready))
     (dolist (jar (directory-files jvm-clj-eval-test--jars-dir t "\\.jar\\'"))
       (jvm-load-jar-await jar))
+    (jvm-load-jar-await jvm-clj--source-dir)
+    (jvm-clj-require-await "emacs-jni.clj")
     (setq jvm-clj-eval-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/context-classloader-fix-lets-clojure-bootstrap ()
@@ -104,6 +106,10 @@ socket for the bound port is a wildcard address, not loopback."
           ;; default (no BIND) produces and what this option fixes.
           (should-not (string-match-p (format "127\\.0\\.0\\.1:%d\\b" port) listen)))
       (jvm-clj-nrepl-stop-await server))))
+
+(ert-deftest emacs-jni-jvm-clj-eval-test/eval-string-await-returns-keyword ()
+  (jvm-clj-eval-test--ensure-ready)
+  (should (eq (jvm-clj-eval-string-await ":a") :a)))
 
 (provide 'jvm-clj-eval-test)
 ;;; jvm-clj-eval-test.el ends here

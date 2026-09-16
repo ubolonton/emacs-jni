@@ -41,6 +41,14 @@
   [s]
   (<-lisp (Lisp/intern s)))
 
+(defn eval-for-lisp
+  "Evaluate FORM and marshal the result toward Lisp: a keyword or symbol
+  result becomes a LispSymbol marker the generic bridge interns back into a
+  Lisp keyword/symbol; every other value passes through the ordinary
+  jvm-call return marshalling. Backs `jvm-clj-eval-string'."
+  [form]
+  (->lisp (eval form)))
+
 (defn- lisp-exit->ex-info
   "Translate a native LispNonLocalExit carrier into a Clojure ex-info,
   converting its parts with <-lisp."
