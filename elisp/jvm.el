@@ -123,6 +123,8 @@ docs/explanation/architecture.md).")
 into its final Lisp-visible form."
   (pcase result
     (`(jvm-handle ,n) (jvm--wrap-handle n))
+    (`(jvm-symbol ,name ,keyword)
+     (intern (if keyword (concat ":" name) name)))
     (_ result)))
 
 (defun jvm--process-filter (_proc data)
