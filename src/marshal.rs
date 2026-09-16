@@ -99,6 +99,24 @@ pub fn lisp_arg_to_jvalue<'local>(
             register_release_on_gc(env, &obj, *handle)?;
             Ok(JValueOwned::Object(obj))
         }
+        // A Lisp symbol/keyword crosses into Java as the platform-loader
+        // `LispSymbol` marker (identical construction to
+        // `jvm_thread::build_lisp_reply_object`'s `Symbol` arm), so the
+        // Clojure layer's `<-lisp` and any other consumer read it the same
+        // way regardless of which direction produced it.
+        (LispArg::Symbol { name, keyword }, _) => {
+            let jname = env.new_string(name)?;
+            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
+            let obj = env.new_object(
+                &class,
+                jni::jni_sig!((name: java.lang.String, keyword: boolean) -> void),
+                &[
+                    JValueOwned::Object(jname.into()).borrow(),
+                    JValueOwned::Bool(*keyword).borrow(),
+                ],
+            )?;
+            Ok(JValueOwned::Object(obj))
+        }
     }
 }
 
@@ -384,6 +402,18 @@ fn object_to_lisp_arg<'local>(
         return Ok(LispArg::Float(d));
     }
 
+    let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
+    if env.is_instance_of(&obj, &lisp_symbol_class)? {
+        let name = env
+            .get_field(&obj, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?
+            .l()?;
+        let name = env.cast_local::<jni::objects::JString>(name)?.to_string();
+        let keyword = env
+            .get_field(&obj, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?
+            .z()?;
+        return Ok(LispArg::Symbol { name, keyword });
+    }
+
     let global = env.new_global_ref(&obj)?;
     let handle = handles::register(global);
     Ok(LispArg::Object(handle))
@@ -404,6 +434,13 @@ pub fn lisp_arg_to_sexp(arg: &LispArg) -> String {
         LispArg::Str(s) => quote_lisp_string(s),
         LispArg::Object(handle) => format!("(jvm-handle {handle})"),
         LispArg::Callback(handle) => format!("(jvm-handle {handle})"),
+        LispArg::Symbol { name, keyword } => {
+            format!(
+                "(jvm-symbol {} {})",
+                quote_lisp_string(name),
+                if *keyword { "t" } else { "nil" }
+            )
+        }
     }
 }
 
@@ -460,6 +497,24 @@ mod tests {
     #[test]
     fn renders_object_handle() {
         assert_eq!(lisp_arg_to_sexp(&LispArg::Object(7)), "(jvm-handle 7)");
+    }
+
+    #[test]
+    fn renders_symbol_and_keyword() {
+        assert_eq!(
+            lisp_arg_to_sexp(&LispArg::Symbol {
+                name: "foo".to_string(),
+                keyword: false
+            }),
+            "(jvm-symbol \"foo\" nil)"
+        );
+        assert_eq!(
+            lisp_arg_to_sexp(&LispArg::Symbol {
+                name: "foo".to_string(),
+                keyword: true
+            }),
+            "(jvm-symbol \"foo\" t)"
+        );
     }
 }
 

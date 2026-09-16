@@ -29,6 +29,10 @@ pub enum LispArg {
     /// (Task 6) — auto-wrapped as `LispFunction` when this crosses into
     /// Java (Task 6).
     Callback(u64),
+    /// An interned Lisp symbol or keyword, crossing as an
+    /// `emacs_jni.core.LispSymbol` marker (the same class the Clojure
+    /// Lisp-access path uses). `name` is the bare name (no leading `:`).
+    Symbol { name: String, keyword: bool },
 }
 
 /// The value a `Cmd::LispReply` completes a pending Lisp-access future

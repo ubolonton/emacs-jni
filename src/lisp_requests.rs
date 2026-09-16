@@ -143,6 +143,17 @@ pub fn lisp_arg_to_value<'e>(env: &'e Env, arg: &LispArg) -> EmacsResult<Value<'
         // ordinary `call-done`/`invoke` result does, rather than
         // hand-rolling a second "build a JvmHandle user-ptr" path.
         LispArg::Object(handle) => env.call("jvm--wrap-handle", (*handle as i64,)),
+        // Intern on the main thread, mirroring the `Intern` request
+        // (`arg_to_value`): a keyword takes its leading `:`, a plain symbol
+        // its bare name. `env.intern` uses the global obarray, so the result
+        // is `eq`-stable.
+        LispArg::Symbol { name, keyword } => {
+            if *keyword {
+                env.intern(&format!(":{name}"))
+            } else {
+                env.intern(name)
+            }
+        }
         LispArg::Callback(_) => unreachable!(
             "neither a Lisp-access apply argument nor a JVM-call return value is ever \
              classified as LispArg::Callback -- Callback is only produced on the \
