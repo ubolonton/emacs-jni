@@ -26,4 +26,4 @@ fetch "$CLOJARS/nrepl/nrepl/1.7.0/nrepl-1.7.0.jar" nrepl-1.7.0.jar
 
 echo "Jars ready in $OUT_DIR"
 echo "Run Clojure/nREPL tests with:"
-echo "  EMACS_JNI_CLOJURE_JARS_DIR=$OUT_DIR ./test/run-ert-tests.sh test/jvm-clojure-test.el"
+echo "  EMACS_JNI_CLOJURE_JARS_DIR=$OUT_DIR ./test/run-ert-tests.sh test/jvm-clj-eval-test.el"

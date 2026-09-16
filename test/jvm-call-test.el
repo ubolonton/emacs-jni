@@ -16,27 +16,27 @@ order (verified empirically — this file's tests do not reliably run in
 the order they appear in when driven that way), so every test must be
 independently able to reach a ready JVM with the fixture jar loaded."
   (unless (eq (jvm-status) 'ready)
-    (should (eq (jvm-start-sync) 'ready)))
+    (should (eq (jvm-start-await) 'ready)))
   ;; Loading the same jar into the shared classloader more than once is
   ;; harmless (`URLClassLoader#addURL' just appends to its URL list), so
   ;; this is safe to call unconditionally from every test.
-  (should (equal (jvm-load-jar-sync jvm-call-test--calc-jar) '(t))))
+  (jvm-load-jar-await jvm-call-test--calc-jar))
 
 (ert-deftest emacs-jni-jvm-call-test/static-call-and-instance-call ()
   (jvm-call-test--ensure-ready)
-  (should (equal (jvm-call-sync "Calc" "addLong" '(2 3)) '(t 5 nil)))
-  (let ((obj (nth 1 (jvm-new-sync "Calc" '(10)))))
+  (should (equal (jvm-call-await "Calc" "addLong" '(2 3)) 5))
+  (let ((obj (jvm-new-await "Calc" '(10))))
     (should (user-ptrp obj))
-    (should (equal (jvm-call-sync obj "addToBase" '(5)) '(t 15 nil)))))
+    (should (equal (jvm-call-await obj "addToBase" '(5)) 15))))
 
 (ert-deftest emacs-jni-jvm-call-test/nil-marshals-to-false-for-boolean-param ()
   (jvm-call-test--ensure-ready)
-  (should (equal (jvm-call-sync "Calc" "describe" '(nil)) '(t "no" nil))))
+  (should (equal (jvm-call-await "Calc" "describe" '(nil)) "no")))
 
 (ert-deftest emacs-jni-jvm-call-test/bignum-round-trips ()
   (jvm-call-test--ensure-ready)
   (let ((big (* (expt 2 62) (expt 2 62)))) ; exceeds i64/long range, forces bignum
-    (should (equal (jvm-call-sync "Calc" "addBig" (list big 1)) (list t (1+ big) nil)))))
+    (should (equal (jvm-call-await "Calc" "addBig" (list big 1)) (1+ big)))))
 
 (ert-deftest emacs-jni-jvm-call-test/overload-resolution-falls-through-to-the-matching-candidate ()
   "Regression test for Finding 2 of the Phase 2 whole-branch review:
@@ -45,14 +45,14 @@ independently able to reach a ready JVM with the fixture jar loaded."
 just whichever candidate `getMethods()' happens to return first for a
 given call to actually succeed, whichever it is."
   (jvm-call-test--ensure-ready)
-  (should (equal (jvm-call-sync "Calc" "pick" '("hello")) '(t "string" nil)))
-  (should (equal (jvm-call-sync "Calc" "pick" '(42)) '(t "long" nil))))
+  (should (equal (jvm-call-await "Calc" "pick" '("hello")) "string"))
+  (should (equal (jvm-call-await "Calc" "pick" '(42)) "long")))
 
 (ert-deftest emacs-jni-jvm-call-test/unsupported-argument-value-signals-instead-of-silently-becoming-t ()
   "A Lisp value with no marshalling rule (e.g. a vector) must signal
 `jvm-invalid-argument' rather than silently being sent to Java as `true'."
   (jvm-call-test--ensure-ready)
-  (should-error (jvm-call-sync "Calc" "addLong" (list [1 2 3] 3))
+  (should-error (jvm-call-await "Calc" "addLong" (list [1 2 3] 3))
                 :type 'jvm-invalid-argument))
 
 (provide 'jvm-call-test)

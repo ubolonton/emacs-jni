@@ -12,7 +12,7 @@ Set `jvm-classpath` and `jvm-options` before your first `jvm-start`:
 ```elisp
 (setq jvm-classpath '("/path/to/extra/classes"))
 (setq jvm-options '("-Xrs" "-Xmx512m"))
-(jvm-start-sync)
+(jvm-start-await)
 ```
 
 These two variables are only honored on a genuinely fresh start, from
@@ -28,7 +28,7 @@ outright, because the JVM shares Emacs's process. See
 ## Pause the JVM without losing its state
 
 ```elisp
-(jvm-pause-sync)
+(jvm-pause-await)
 ;; => paused
 ```
 
@@ -36,10 +36,10 @@ Pausing detaches the worker thread but keeps the JVM alive. Loaded
 jars, JVM-side objects, and static state all survive. Pausing is legal
 only from `ready`.
 
-To resume, call `jvm-start-sync` again:
+To resume, call `jvm-start-await` again:
 
 ```elisp
-(jvm-start-sync)
+(jvm-start-await)
 ;; => ready
 ```
 
@@ -49,14 +49,17 @@ it ignores `jvm-classpath`/`jvm-options` on this call.
 ## Stop the JVM
 
 ```elisp
-(jvm-stop-sync)
+(jvm-stop-await)
 ;; => stopped, or stop-failed
 ```
 
 Both `stopped` and `stop-failed` mean the operation finished, not that
 it hung. `jvm-stop` is best-effort: some JVM builds handle the
-underlying teardown call unreliably. Do not rely on `jvm-start` after
-`jvm-stop` succeeding — see
+underlying teardown call unreliably. Restarting the JVM in the same
+process after a stop is **not supported** — `jvm-start` afterward
+typically returns a non-functional "zombie" VM whose calls fail with
+`"JNI call failed"`. A fresh Emacs process is the only reliable reset —
+see
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).
 
 If you need to release JVM resources temporarily and come back later
@@ -93,14 +96,14 @@ failed. It does not always say why in detail.
 ## Call `jvm-start`/`jvm-pause`/`jvm-stop` from the wrong state
 
 Each of these primitives signals `jvm-illegal-transition` if the
-current status does not allow it. The corresponding `-sync` wrapper
+current status does not allow it. The corresponding `-async` wrapper
 leaves `jvm-status` unchanged when this happens, so it never gets stuck
 on a transient state like `starting`. Catch the condition if you need
 to handle it:
 
 ```elisp
 (condition-case err
-    (jvm-pause-sync)
+    (jvm-pause-await)
   (jvm-illegal-transition
    (message "cannot pause from %s" (jvm-status))))
 ```

@@ -7,7 +7,7 @@ It assumes you can already evaluate Clojure — see
 [How to evaluate Clojure code](evaluate-clojure-code.md).
 
 The Clojure snippets below run wherever Clojure runs: at an nREPL
-client connected to your Emacs, or inside a `jvm-clojure-eval-string`
+client connected to your Emacs, or inside a `jvm-clj-eval-string`
 call.
 
 ## Start the Clojure side
@@ -25,7 +25,7 @@ plus this package's own `clojure-src` directory, and requires
 example, if no Clojure jar is on `jvm-clj-classpath`.
 
 To start an nREPL server with the namespace already loaded, use
-`jvm-clj-nrepl-start` in place of `jvm-nrepl-start`.
+`jvm-clj-nrepl-start` in place of `jvm-clj-start`.
 
 ## Alias the namespace
 

@@ -389,6 +389,13 @@ fn service_lisp_request_sync<'local>(
     env: &mut jni::Env<'local>,
     build_request: impl FnOnce(u64) -> crate::lisp_requests::LispRequest,
 ) -> jni::errors::Result<JObject<'local>> {
+    // Reentrant case: this native runs on the Emacs main thread, inside a
+    // `jvm--call-direct`. That thread is blocked in the JVM right now, so the
+    // async queue below can never be drained -- run the op directly on the
+    // enclosing frame's live `Env` instead. See `reentry` and the plan doc.
+    if crate::reentry::in_scope() {
+        return service_lisp_request_direct(env, build_request(0));
+    }
     let id = crate::pending::next_id();
     let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
     let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
@@ -399,6 +406,33 @@ fn service_lisp_request_sync<'local>(
     crate::channel::send(&crate::protocol::lisp_request_message());
 
     block_on_lisp_reply(env, &future)
+}
+
+/// Runs a synchronous Lisp-access REQUEST directly on the enclosing
+/// `jvm--call-direct` frame's `Env` (no queue, no future), for the reentrant
+/// case. Returns the built Java object, or throws the Lisp signal/throw as a
+/// `LispNonLocalExit` so it propagates up the Clojure stack — the direct-path
+/// equivalent of `block_on_lisp_reply`'s checked-exception rethrow.
+fn service_lisp_request_direct<'local>(
+    env: &mut jni::Env<'local>,
+    request: crate::lisp_requests::LispRequest,
+) -> jni::errors::Result<JObject<'local>> {
+    let reply = crate::reentry::with_current_env(|lisp_env| {
+        crate::lisp_requests::compute_reply(lisp_env, &request)
+    })
+    // `in_scope()` was true and this is the same thread, so the scope cannot
+    // have been popped between that check and here.
+    .ok_or_else(|| crate::marshal::marshal_error("reentrant Lisp call lost its Env scope"))?;
+
+    match reply {
+        crate::commands::LispReplyValue::Signal { symbol, data } => {
+            Err(crate::jvm_thread::throw_non_local_exit(env, 0, *symbol, *data))
+        }
+        crate::commands::LispReplyValue::Throw { tag, value } => {
+            Err(crate::jvm_thread::throw_non_local_exit(env, 1, *tag, *value))
+        }
+        other => crate::jvm_thread::build_lisp_reply_object(env, other),
+    }
 }
 
 /// Blocks on FUTURE's own `get(LISP_REQUEST_TIMEOUT_SECS, SECONDS)`,
@@ -525,6 +559,22 @@ fn lisp_apply_async<'local>(
     let f = object_to_lisp_request_arg(env, f)?;
     let request_args = jobject_array_to_lisp_request_args(env, &args)?;
 
+    // Reentrant case (same reasoning as `service_lisp_request_sync`): run the
+    // apply directly and hand back an *already-completed* future, so Clojure's
+    // `(deref (applyAsync ...))` returns at once without needing the blocked
+    // main thread to drain the queue.
+    if crate::reentry::in_scope() {
+        let request = crate::lisp_requests::LispRequest::Apply { id: 0, f, args: request_args };
+        let reply = crate::reentry::with_current_env(|lisp_env| {
+            crate::lisp_requests::compute_reply(lisp_env, &request)
+        })
+        .ok_or_else(|| crate::marshal::marshal_error("reentrant apply lost its Env scope"))?;
+        let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
+        let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
+        crate::jvm_thread::complete_future_with_reply(env, &future, reply)?;
+        return Ok(future);
+    }
+
     let id = crate::pending::next_id();
     let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
     let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
@@ -580,7 +630,7 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
 ///   namespace wrapped) → `Symbol { name, keyword }`;
 /// - everything else → the same `marshal::jvm_value_to_lisp_arg` an
 ///   ordinary `jvm-call` argument would go through.
-fn object_to_lisp_request_arg<'local>(
+pub(crate) fn object_to_lisp_request_arg<'local>(
     env: &mut jni::Env<'local>,
     elem: JObject<'local>,
 ) -> jni::errors::Result<crate::lisp_requests::LispRequestArg> {

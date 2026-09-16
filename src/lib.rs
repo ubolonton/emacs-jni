@@ -8,6 +8,8 @@ mod lisp_requests;
 mod marshal;
 mod pending;
 mod protocol;
+mod reentry;
+mod runtime;
 mod shim;
 mod status;
 mod worker;
@@ -16,6 +18,10 @@ emacs::plugin_is_GPL_compatible!();
 
 #[emacs::module(defun_prefix = "", separator = "")]
 fn init(env: &Env) -> Result<Value<'_>> {
+    // Module load runs on the Emacs main thread; record it so `jvm--call-direct`
+    // permanently attaches only this thread to the JVM (stable thread identity),
+    // and lets any other caller fall back to a transient scoped attach.
+    runtime::set_main_thread();
     let feature = env.intern("emacs-jni")?;
     env.call("provide", (feature,))
 }
@@ -30,6 +36,7 @@ use crate::status::{Status, STATUS};
 emacs::define_errors! {
     jvm_illegal_transition "JVM operation not allowed in the current state"
     jvm_invalid_argument "Unsupported Lisp value for a JVM call argument"
+    jvm_error "JVM call failed"
 }
 
 #[defun(mod_in_name = false, name = "jvm--init-channel")]
@@ -62,10 +69,23 @@ fn jvm_pause(env: &Env) -> Result<()> {
 #[defun(mod_in_name = false, name = "jvm--stop")]
 fn jvm_stop(env: &Env) -> Result<()> {
     match STATUS.begin_stop() {
-        Ok(()) => match worker::send_command(commands::Cmd::Stop) {
-            Ok(()) => Ok(()),
-            Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
-        },
+        Ok(()) => {
+            // This defun runs on the main thread — the one `call_direct` may
+            // have permanently attached. Detach it here (best-effort, and a
+            // no-op if it was never attached) so the worker's `destroy` does
+            // not block waiting for it (`destroy` waits only for *other*
+            // non-daemon threads; the worker itself is the caller, exempt).
+            // Reset the flag so a later restart re-attaches on its next
+            // direct call.
+            if let Some(vm) = runtime::vm() {
+                let _ = vm.detach_current_thread();
+            }
+            runtime::set_main_attached(false);
+            match worker::send_command(commands::Cmd::Stop) {
+                Ok(()) => Ok(()),
+                Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
+            }
+        }
         Err(current) => env.signal(jvm_illegal_transition, (current.as_tag(),)),
     }
 }
@@ -82,27 +102,106 @@ fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
     }
 }
 
+/// Synchronous counterpart of `jvm--load-jar`: adds PATH to the shared
+/// classloader on *this* (the Emacs main) thread and returns `nil`, instead of
+/// a request id. Signals `jvm-error` on failure (missing path, or a JNI error).
+/// Shares the one classloader with the async `jvm--load-jar` path through a
+/// single get-or-create in `runtime`, so whichever path loads the first jar
+/// wins and both see every later jar (see `jvm_thread::load_jar_direct`).
+#[defun(mod_in_name = false, name = "jvm--load-jar-direct")]
+fn jvm_load_jar_direct(env: &Env, path: String) -> Result<()> {
+    if STATUS.get() != Status::Ready {
+        return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
+    }
+    let Some(vm) = runtime::vm() else {
+        return env.signal(jvm_illegal_transition, ("no running JVM",));
+    };
+    match jvm_thread::load_jar_direct(&vm, &path) {
+        Ok(()) => Ok(()),
+        Err(e) => env.signal(jvm_error, (e,)),
+    }
+}
+
 #[defun(mod_in_name = false, name = "jvm--call")]
 fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64> {
     if STATUS.get() != Status::Ready {
         return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
     }
-    let target = if let Ok(class_name) = target.into_rust::<String>() {
-        commands::CallTarget::ClassName(class_name)
-    } else {
-        // `JvmHandle` only has a `FromLisp` impl for `&JvmHandle` (the
-        // `emacs` crate's blanket `user-ptr` impl is `impl<'e, T: Transfer>
-        // FromLisp<'e> for &'e T`, not for a bare `T` — verified against
-        // the vendored emacs-0.21.0 source, `src/types/user_ptr.rs`), so
-        // this must ask for a reference, not an owned value.
-        let h: &handles::JvmHandle = target.into_rust()?;
-        commands::CallTarget::Object(h.0)
-    };
+    let target = parse_call_target(target)?;
     let args = lisp_list_to_args(args)?;
     let id = worker::next_request_id();
     match worker::send_command(commands::Cmd::Call { id, target, member, args }) {
         Ok(()) => Ok(id),
         Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
+    }
+}
+
+/// Interprets a `jvm-call`/`jvm-call-direct` TARGET argument: a string is a
+/// fully-qualified class name (for a static call or `<init>`); anything else
+/// must be a `JvmHandle` `user-ptr` naming a live JVM object.
+///
+/// `JvmHandle` only has a `FromLisp` impl for `&JvmHandle` (the `emacs`
+/// crate's blanket `user-ptr` impl is `impl<'e, T: Transfer> FromLisp<'e> for
+/// &'e T`, not for a bare `T` — verified against the vendored emacs-0.21.0
+/// source, `src/types/user_ptr.rs`), so this asks for a reference, not an
+/// owned value.
+fn parse_call_target(target: Value) -> Result<commands::CallTarget> {
+    if let Ok(class_name) = target.into_rust::<String>() {
+        Ok(commands::CallTarget::ClassName(class_name))
+    } else {
+        let h: &handles::JvmHandle = target.into_rust()?;
+        Ok(commands::CallTarget::Object(h.0))
+    }
+}
+
+/// Synchronous counterpart of `jvm--call`: resolves and invokes
+/// TARGET.MEMBER with ARGS on *this* (the Emacs main) thread, and returns the
+/// result value directly instead of a request id. The main thread stays
+/// permanently attached to the running JVM across calls (stable thread
+/// identity + persistent thread-locals); see `jvm_thread::call_direct`. A
+/// failed call signals `jvm-error`.
+///
+/// Distinct from `jvm-call-sync` (`elisp/jvm.el`), which is the *async*
+/// `jvm--call` plus a blocking wait on the worker's `call-done` reply. This
+/// primitive never touches the worker thread or the channel: it is the
+/// experimental "attach, execute, return" path (see plan
+/// `docs/superpowers/plans/2026-09-13-sync-lisp-clojure-plan.md`). A long call
+/// blocks Emacs's main loop for its whole duration — the caller must keep
+/// heavy/blocking work on the Clojure side's own threads.
+#[defun(mod_in_name = false, name = "jvm--call-direct")]
+fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value) -> Result<Value<'e>> {
+    if STATUS.get() != Status::Ready {
+        return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
+    }
+    let Some(vm) = runtime::vm() else {
+        return env.signal(jvm_illegal_transition, ("no running JVM",));
+    };
+    let target = parse_call_target(target)?;
+    let args = lisp_list_to_args(args)?;
+    let loader = runtime::loader();
+    // Record this frame's `Env` so any Clojure -> Lisp callback made *during*
+    // the call runs directly on it (`reentry`/`shim`), rather than deadlocking
+    // on the async queue this blocked main thread cannot drain. Dropped when
+    // the call returns or unwinds.
+    let _scope = reentry::enter(env);
+    match jvm_thread::call_direct(&vm, &loader, &target, &member, &args) {
+        Ok(arg) => lisp_requests::lisp_arg_to_value(env, &arg),
+        // A Lisp signal/throw raised in a reentrant callback, unwound back up
+        // through Clojure: rebind its symbol/data (or tag/value) to this
+        // frame's `Env` and re-raise the *original* non-local exit, so the
+        // round trip is transparent to the Lisp caller. `signal`/`throw` always
+        // return `Err` (the non-local exit), which the defun trampoline turns
+        // back into a real Emacs signal/throw.
+        Err(jvm_thread::DirectError::NonLocalExit { kind, a, b }) => {
+            let a = lisp_requests::arg_to_value(env, &a)?;
+            let b = lisp_requests::arg_to_value(env, &b)?;
+            if kind == 0 {
+                env.call("signal", (a, b))
+            } else {
+                env.call("throw", (a, b))
+            }
+        }
+        Err(jvm_thread::DirectError::Jni(e)) => env.signal(jvm_error, (e.to_string(),)),
     }
 }
 

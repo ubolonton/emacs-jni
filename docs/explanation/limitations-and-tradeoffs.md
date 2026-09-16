@@ -5,16 +5,26 @@ each one costs. For the bare facts, see the
 [Lisp API reference](../reference/lisp-api.md). For workarounds, see
 the relevant how-to guide.
 
-## `jvm-stop` is best-effort
+## `jvm-stop` is best-effort, and restart-in-process is unsupported
 
 `jvm-stop` tears the JVM down through `JNI_DestroyJavaVM`. Some JVM
 builds handle this call unreliably — a JVM is not designed with the
 expectation that an embedding host will ask it to shut down and then
 keep running itself. Rather than have `jvm-stop` hang indefinitely
 waiting for a guarantee the JVM specification does not make, both
-`stopped` and `stop-failed` count as "the operation finished." This
-means a caller has to treat `jvm-stop` as a best-effort request, not a
-promise, and should not assume `jvm-start` afterward will succeed.
+`stopped` and `stop-failed` count as "the operation finished." So a
+caller has to treat `jvm-stop` as a best-effort request, not a promise.
+
+Restarting after a stop, in the same process, is **not supported**. The
+JVM does not support re-initialization once a process has destroyed one.
+After a `jvm-stop`, a later `jvm-start` typically hands back a
+non-functional "zombie" VM: it accepts the create/attach calls but fails
+any real JNI work — the first `jvm-load-jar` or `jvm-call` on it errors
+with `"JNI call failed"`. This is a JVM/JNI limitation, independent of
+which thread runs the teardown; no arrangement in this module works
+around it. A fresh Emacs process is the only reliable reset. To release
+JVM resources temporarily and resume later in the same session, use
+`jvm-pause` instead of `jvm-stop`.
 
 ## One JVM per Emacs process
 
@@ -124,7 +134,7 @@ it.
 
 ## `*ns*` does not persist across separate Clojure eval calls
 
-Because each `jvm-clojure-eval-string` call runs on its own freshly
+Because each `jvm-clj-eval-string-await` call runs on its own freshly
 spawned thread, and Clojure's current-namespace pointer is
 thread-local, a namespace switch made by `(in-ns ...)` in one call is
 invisible to the next call — that call runs on a different thread,
@@ -136,8 +146,14 @@ chose not to special-case Clojure eval calls that way. The nREPL
 server does not share this limitation: once started, it manages its
 own session and thread state internally, independent of the per-call
 dispatch model that everything else in this module uses. See
-[How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md#switch-namespaces-inside-a-single-call)
+[How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md#switch-namespaces-across-calls)
 for the workaround.
+
+The direct counterpart, `jvm-clj-eval-string-direct`, does *not* have
+this limitation: it runs on the Emacs main thread, which stays permanently
+attached to the JVM across calls, so `*ns*` and other thread-locals set by
+one direct eval persist into the next. The trade-off is the opposite one —
+it blocks Emacs for the whole eval (see below) and offers no concurrency.
 
 ## A synchronous Clojure-to-Lisp call waits for Emacs to be free
 
@@ -154,6 +170,32 @@ in a long, uninterrupted Lisp computation — it waits until Emacs
 returns to its event loop. This is inherent to Emacs's single-threaded
 execution model, not a choice this module made; a per-call timeout
 bounds the wait rather than letting a stalled call hang forever.
+
+## `jvm-call-direct` blocks Emacs while it runs
+
+`jvm-call-direct` runs the whole call on the Emacs main thread (attach,
+execute, return). While it runs, Emacs's main loop is frozen — so keep
+any heavy or blocking work on Clojure's own threads and return promptly.
+This holds even from a `make-thread` Lisp thread: a direct call blocking
+in the JVM holds Emacs's global thread lock the whole time (no module API
+releases it), so it freezes every Lisp thread, not just its own — a
+`make-thread` cannot run a blocking direct call "in the background".
+
+The main thread stays permanently attached to the JVM across direct calls,
+so its `Thread.currentThread()` identity and thread-locals are stable (see
+`jvm-clj-eval-string-direct` above). `jvm-stop`, which runs on the main
+thread, detaches it before shutdown so `DestroyJavaVM` does not block on it.
+`DestroyJavaVM` is unreliable in-process regardless, so `jvm-stop` is
+best-effort either way — the design does not contort the call path to avoid
+non-daemon attachments. A direct call from any *other* thread uses a scoped
+attach that detaches on return, so it leaves no attachment behind.
+
+A Lisp signal or throw raised in a same-thread callback *during* the call
+propagates through Clojure as a `LispNonLocalExit` and is reconstructed at
+the boundary as the original `(signal …)`/`(throw …)`, so an enclosing
+`condition-case`/`catch` sees the real symbol and data. A genuine Clojure
+or Java exception (with no `LispNonLocalExit` in its cause chain) still
+surfaces as a `jvm-error` carrying the flattened message.
 
 ## Lisp values held by Clojure are opaque
 
@@ -176,7 +218,7 @@ cycle through one would leak, the same as any other cross-runtime cycle
 
 ## The nREPL server ships unhardened
 
-`jvm-nrepl-start` uses nREPL's own defaults: loopback-only usage
+`jvm-clj-nrepl-start` uses nREPL's own defaults: loopback-only usage
 assumed, no authentication, no TLS, no middleware selection. Anyone
 who can reach the port can evaluate arbitrary code with the
 permissions of the Emacs process. Hardening an nREPL server —

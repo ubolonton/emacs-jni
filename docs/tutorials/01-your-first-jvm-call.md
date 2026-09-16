@@ -48,11 +48,12 @@ Open `*scratch*` (or `M-x ielm`). Evaluate each form one at a time.
 ```elisp
 (require 'jvm)
 
-(jvm-start-sync)
+(jvm-start)
 ```
 
 This blocks until the JVM is ready. On a normal machine, it takes
-under a second. The result is the symbol `ready`.
+under a second. The result is the symbol `ready`. (`jvm-start` is the
+synchronous alias; `jvm-start-async` returns immediately instead.)
 
 Check the status:
 
@@ -71,22 +72,22 @@ reason:
 ## Step 4: Load the jar and call a static method
 
 ```elisp
-(jvm-load-jar-sync (expand-file-name "target/test-fixtures/greeter.jar"))
-;; => (t)
+(jvm-load-jar (expand-file-name "target/test-fixtures/greeter.jar"))
+;; => nil
 ```
 
-The result `(t)` is a cons `(OK . ERR)` with a `nil` `ERR`. Emacs
-prints a `nil` cdr as nothing, so success prints as `(t)`.
+`jvm-load-jar` returns nil on success, and signals `jvm-error` on
+failure.
 
 Now call `Greeter.greet()`:
 
 ```elisp
-(jvm-call-sync "Greeter" "greet" nil)
-;; => (t "hello from Greeter" nil)
+(jvm-call "Greeter" "greet" nil)
+;; => "hello from Greeter"
 ```
 
-The result is a 3-element list: `(OK RESULT ERR)`. `OK` is `t`, so the
-call succeeded. `RESULT` is the string Java returned.
+`jvm-call` returns the value Java returned, and signals `jvm-error` on
+failure.
 
 You just called a static Java method from Lisp.
 
@@ -105,36 +106,35 @@ parameter.
 Load the new jar:
 
 ```elisp
-(jvm-load-jar-sync (expand-file-name "target/test-fixtures/calc.jar"))
-;; => (t)
+(jvm-load-jar (expand-file-name "target/test-fixtures/calc.jar"))
+;; => nil
 ```
 
 ## Step 6: Construct an object and call an instance method
 
 ```elisp
-(jvm-new-sync "Calc" (list 100))
-;; => (t #<user-ptr ...> nil)
+(jvm-new "Calc" (list 100))
+;; => #<user-ptr ...>
 ```
 
-`jvm-new-sync` constructs a `Calc` object with `base` set to 100. The
-result is a wrapped JVM object, printed as `#<user-ptr ...>`. Store it:
+`jvm-new` constructs a `Calc` object with `base` set to 100 and returns
+it, a wrapped JVM object printed as `#<user-ptr ...>`. Store it:
 
 ```elisp
-(setq my-calc (jvm-new-sync "Calc" (list 100)))
+(setq my-calc (jvm-new "Calc" (list 100)))
 
-(jvm-call-sync (nth 1 my-calc) "addToBase" (list 23))
-;; => (t 123 nil)
+(jvm-call my-calc "addToBase" (list 23))
+;; => 123
 ```
 
-`(nth 1 my-calc)` pulls the wrapped object out of the `(OK RESULT ERR)`
-list. Passing it as `TARGET` makes this an instance call, not a static
-one.
+`my-calc` is the wrapped object itself. Passing it as `TARGET` makes
+this an instance call, not a static one.
 
 ## Step 7: Let Java call a Lisp function back
 
 ```elisp
-(jvm-call-sync "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
-;; => (t 40 nil)
+(jvm-call "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
+;; => 40
 ```
 
 Notice the first argument: a real Lisp `lambda`. It crosses into the

@@ -17,6 +17,9 @@ use crate::{channel, worker};
 pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>) {
     let vm = match create_jvm(&classpath, &options) {
         Ok(vm) => {
+            // Publish the VM so the Emacs main thread can attach for a
+            // synchronous `jvm--call-direct` (see `runtime` and `call_direct`).
+            crate::runtime::set_vm(vm.clone());
             STATUS.finish(Status::Ready);
             channel::send(&protocol::status_message(Status::Ready, None));
             vm
@@ -28,14 +31,6 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
             return;
         }
     };
-
-    // Lazily created on the first LoadJar command, then reused so every
-    // loaded jar shares one classloader (see spec: "Jar loading"). `Arc`-
-    // wrapped (not a bare `Global`, which has no `Clone` impl in jni 0.22 —
-    // same reasoning as `handles::TABLE`) so `Cmd::Call`'s per-call thread
-    // (Task 5) can cheaply clone out a reference to it without needing a
-    // live `Env` on this thread.
-    let mut loader: Option<Arc<jni::refs::Global<jni::objects::JObject<'static>>>> = None;
 
     for cmd in receiver {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd {
@@ -49,7 +44,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
             }
             Cmd::Stop => true, // signal "stop after this iteration" below
             Cmd::LoadJar { id, path } => {
-                handle_load_jar(&vm, &mut loader, id, path);
+                handle_load_jar(&vm, id, path);
                 false
             }
             Cmd::Call { id, target, member, args } => {
@@ -58,7 +53,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 // reasons unrelated to callbacks, and must not stall other
                 // pending commands on this dispatch loop.
                 let vm = vm.clone();
-                let loader = loader.clone();
+                let loader = crate::runtime::loader();
                 std::thread::spawn(move || handle_call(&vm, loader, id, target, member, args));
                 false
             }
@@ -287,6 +282,12 @@ fn handle_stop(vm: JavaVM) {
     // exactly what follows.
     let result = unsafe { vm.destroy() };
     std::mem::drop(vm);
+    // Drop the shared handles the main thread reads for `call_direct`: the VM
+    // is gone now. The main thread already detached itself in the `jvm--stop`
+    // defun (before this `Cmd::Stop` was sent), so no main-thread attachment
+    // was left to block this `destroy`. `clear` also resets the
+    // main-attached flag so a restart re-attaches on the next direct call.
+    crate::runtime::clear();
     match result {
         Ok(()) => {
             STATUS.finish(Status::Stopped);
@@ -317,12 +318,7 @@ fn handle_resume(vm: &JavaVM) {
     }
 }
 
-fn handle_load_jar(
-    vm: &JavaVM,
-    loader: &mut Option<Arc<jni::refs::Global<jni::objects::JObject<'static>>>>,
-    id: u64,
-    path: String,
-) {
+fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     // `URLClassLoader#addURL` is lazy: it just appends to the loader's
     // internal URL list and never inspects the target until a class is
     // actually looked up, so it does not itself fail for a nonexistent
@@ -347,10 +343,9 @@ fn handle_load_jar(
     }
 
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
-        if loader.is_none() {
-            *loader = Some(Arc::new(create_shared_classloader(env)?));
-        }
-        let loader_local = env.new_local_ref(loader.as_ref().unwrap().as_obj())?;
+        let loader =
+            crate::runtime::get_or_create_loader(|| create_shared_classloader(env).map(Arc::new))?;
+        let loader_local = env.new_local_ref(loader.as_obj())?;
         add_jar_url(env, &loader_local, &path)
     });
 
@@ -358,6 +353,31 @@ fn handle_load_jar(
         Ok(()) => channel::send(&protocol::load_jar_done_message(id, true, None)),
         Err(e) => channel::send(&protocol::load_jar_done_message(id, false, Some(&e.to_string()))),
     }
+}
+
+/// Synchronous main-thread counterpart of `handle_load_jar`: adds PATH to the
+/// shared classloader on *this* thread, sharing the one loader with the async
+/// path through `runtime::get_or_create_loader`. Returns an error string (a
+/// missing path, or a JNI failure) instead of sending a `load-jar-done`
+/// message, since the caller (`jvm--load-jar-direct`) returns or signals
+/// directly. See `call_direct` for the main-thread attach model.
+pub(crate) fn load_jar_direct(vm: &JavaVM, path: &str) -> Result<(), String> {
+    // Same up-front existence check as `handle_load_jar`: `addURL` is lazy and
+    // never fails for a nonexistent path on its own.
+    if !std::path::Path::new(path).exists() {
+        return Err(format!("jar/classpath entry not found: {path}"));
+    }
+    // A *scoped* attach: a no-op on the permanently-attached main thread, an
+    // owning attach-and-detach on any other caller. Unlike `call_direct`, this
+    // never takes the permanent attach -- `addURL` needs no stable thread
+    // identity, so there is no reason to touch the main-attachment state.
+    let result: jni::errors::Result<()> = vm.attach_current_thread_for_scope(|env| {
+        let loader =
+            crate::runtime::get_or_create_loader(|| create_shared_classloader(env).map(Arc::new))?;
+        let loader_local = env.new_local_ref(loader.as_obj())?;
+        add_jar_url(env, &loader_local, path)
+    });
+    result.map_err(|e| e.to_string())
 }
 
 /// Creates a `URLClassLoader` with an empty URL list, parented on the
@@ -496,12 +516,16 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::
             let crate::commands::LispArg::Str(message) = result else {
                 return Ok(());
             };
-            complete_with_non_local_exit(
+            complete_future_with_reply(
                 env,
                 &future_local,
-                0,
-                crate::commands::LispReplyValue::Symbol { name: "error".to_string(), keyword: false },
-                crate::commands::LispReplyValue::Str(message),
+                crate::commands::LispReplyValue::Signal {
+                    symbol: Box::new(crate::commands::LispReplyValue::Symbol {
+                        name: "error".to_string(),
+                        keyword: false,
+                    }),
+                    data: Box::new(crate::commands::LispReplyValue::Str(message)),
+                },
             )?;
         }
         Ok(())
@@ -534,24 +558,7 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispReplyValu
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
         let future_local = env.new_local_ref(future.as_obj())?;
-        match value {
-            crate::commands::LispReplyValue::Signal { symbol, data } => {
-                complete_with_non_local_exit(env, &future_local, 0, *symbol, *data)?;
-            }
-            crate::commands::LispReplyValue::Throw { tag, value } => {
-                complete_with_non_local_exit(env, &future_local, 1, *tag, *value)?;
-            }
-            other => {
-                let obj = build_lisp_reply_object(env, other)?;
-                env.call_method(
-                    &future_local,
-                    jni::jni_str!("complete"),
-                    jni::jni_sig!((v: java.lang.Object) -> boolean),
-                    &[jni::objects::JValueOwned::Object(obj).borrow()],
-                )?;
-            }
-        }
-        Ok(())
+        complete_future_with_reply(env, &future_local, value)
     });
     if let Err(e) = result {
         channel::send(&protocol::log_message(
@@ -564,7 +571,11 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispReplyValu
 /// Builds the actual Java value a successful `LispReplyValue` becomes —
 /// factored out of `handle_lisp_reply` since the `LispReplyValue::Signal`/
 /// `Throw` cases (handled by that function's caller) never reach here.
-fn build_lisp_reply_object<'local>(
+///
+/// `pub(crate)` because the reentrant direct path (`shim.rs`) builds the same
+/// Java object on its own thread, from the `LispReplyValue`
+/// `lisp_requests::compute_reply` returns, instead of over the channel.
+pub(crate) fn build_lisp_reply_object<'local>(
     env: &mut jni::Env<'local>,
     value: crate::commands::LispReplyValue,
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
@@ -632,20 +643,64 @@ fn build_lisp_reply_object<'local>(
     }
 }
 
-/// Builds an `emacs_jni.core.LispNonLocalExit(kind, symbolOrTag,
-/// dataOrValue)` from two already-classified reply values and completes
-/// FUTURE exceptionally with it. `kind` is 0 (signal) or 1 (throw).
-fn complete_with_non_local_exit<'local>(
+/// Turns one `LispReplyValue` into a Java result: a `Signal`/`Throw`
+/// completes FUTURE exceptionally with the matching `LispNonLocalExit`, and
+/// anything else completes it normally with its built object.
+///
+/// Shared by the async worker (`handle_lisp_reply`, completing a registered
+/// future) and the reentrant direct path (`shim.rs`'s `applyAsync` fast path,
+/// completing a fresh, immediately-returned future) — Clojure's `apply`
+/// derefs that future either way, so both must produce the identical shape.
+pub(crate) fn complete_future_with_reply<'local>(
     env: &mut jni::Env<'local>,
     future: &jni::objects::JObject<'local>,
+    value: crate::commands::LispReplyValue,
+) -> jni::errors::Result<()> {
+    match value {
+        crate::commands::LispReplyValue::Signal { symbol, data } => {
+            let ex = build_non_local_exit(env, 0, *symbol, *data)?;
+            env.call_method(
+                future,
+                jni::jni_str!("completeExceptionally"),
+                jni::jni_sig!((ex: java.lang.Throwable) -> boolean),
+                &[jni::objects::JValueOwned::Object(ex).borrow()],
+            )?;
+        }
+        crate::commands::LispReplyValue::Throw { tag, value } => {
+            let ex = build_non_local_exit(env, 1, *tag, *value)?;
+            env.call_method(
+                future,
+                jni::jni_str!("completeExceptionally"),
+                jni::jni_sig!((ex: java.lang.Throwable) -> boolean),
+                &[jni::objects::JValueOwned::Object(ex).borrow()],
+            )?;
+        }
+        other => {
+            let obj = build_lisp_reply_object(env, other)?;
+            env.call_method(
+                future,
+                jni::jni_str!("complete"),
+                jni::jni_sig!((v: java.lang.Object) -> boolean),
+                &[jni::objects::JValueOwned::Object(obj).borrow()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Builds an `emacs_jni.core.LispNonLocalExit(kind, symbolOrTag,
+/// dataOrValue)` from two already-classified reply values. `kind` is 0
+/// (signal) or 1 (throw).
+fn build_non_local_exit<'local>(
+    env: &mut jni::Env<'local>,
     kind: i32,
     a: crate::commands::LispReplyValue,
     b: crate::commands::LispReplyValue,
-) -> jni::errors::Result<()> {
+) -> jni::errors::Result<jni::objects::JObject<'local>> {
     let a_obj = build_lisp_reply_object(env, a)?;
     let b_obj = build_lisp_reply_object(env, b)?;
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
-    let ex = env.new_object(
+    env.new_object(
         &class,
         jni::jni_sig!((kind: int, a: java.lang.Object, b: java.lang.Object) -> void),
         &[
@@ -653,14 +708,28 @@ fn complete_with_non_local_exit<'local>(
             jni::objects::JValue::Object(&a_obj),
             jni::objects::JValue::Object(&b_obj),
         ],
-    )?;
-    env.call_method(
-        future,
-        jni::jni_str!("completeExceptionally"),
-        jni::jni_sig!((ex: java.lang.Throwable) -> boolean),
-        &[jni::objects::JValueOwned::Object(ex).borrow()],
-    )?;
-    Ok(())
+    )
+}
+
+/// Throws a `LispNonLocalExit` for a Lisp signal/throw raised in a reentrant
+/// direct-path native (`shim.rs`'s synchronous natives), so it propagates up
+/// the Clojure stack exactly like the checked exception `block_on_lisp_reply`
+/// rethrows on the async path. Returns the `Error::JavaException` the caller
+/// hands back so the `native_method!` policy leaves this pending exception in
+/// place (rather than throwing a fresh `RuntimeException` over it).
+pub(crate) fn throw_non_local_exit(
+    env: &mut jni::Env,
+    kind: i32,
+    a: crate::commands::LispReplyValue,
+    b: crate::commands::LispReplyValue,
+) -> jni::errors::Error {
+    let thrown = build_non_local_exit(env, kind, a, b)
+        .and_then(|ex| env.cast_local::<jni::objects::JThrowable>(ex))
+        .and_then(|ex| env.throw(&ex));
+    match thrown {
+        Err(e) => e,
+        Ok(()) => marshal_error("env.throw unexpectedly left no pending exception"),
+    }
 }
 
 /// Handles a `Cmd::Call`: resolves TARGET.MEMBER reflectively and invokes
@@ -677,74 +746,8 @@ fn handle_call(
     member: String,
     args: Vec<crate::commands::LispArg>,
 ) {
-    let result: jni::errors::Result<crate::commands::LispArg> = vm.attach_current_thread(|env| {
-        // A freshly attached thread's context classloader is null. Plain
-        // JNI class resolution (find_class/loadClass, used just below)
-        // doesn't need it, but Clojure's own namespace loader
-        // (clojure.lang.RT, used internally by `require`) does: it loads
-        // .clj source files as classpath *resources*, not classes, and
-        // that resolution path falls back through
-        // Thread.currentThread().getContextClassLoader(). Left null, the
-        // first touch of Clojure's runtime throws
-        // ExceptionInInitializerError before clojure.core even finishes
-        // loading — verified empirically during Phase 3's design spike
-        // (see docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md,
-        // "Feasibility"). Harmless for calls that never touch Clojure.
-        if let Some(global) = &loader {
-            let loader_local = env.new_local_ref(global.as_obj())?;
-            let thread_class = env.find_class(jni::jni_str!("java/lang/Thread"))?;
-            let current_thread = env
-                .call_static_method(&thread_class, jni::jni_str!("currentThread"), jni::jni_sig!(() -> java.lang.Thread), &[])?
-                .l()?;
-            env.call_method(
-                &current_thread,
-                jni::jni_str!("setContextClassLoader"),
-                jni::jni_sig!((cl: java.lang.ClassLoader) -> void),
-                &[jni::objects::JValue::Object(&loader_local)],
-            )?;
-        }
-
-        let (class, instance): (jni::objects::JClass, Option<jni::objects::JObject>) = match &target {
-            crate::commands::CallTarget::ClassName(name) => {
-                let class = match &loader {
-                    // A jar has been loaded at least once: classes it
-                    // provides only live in *this* classloader's URL list,
-                    // not on the default `FindClass` search path (verified
-                    // empirically in Task 7 — see `add_jar_url`'s own test,
-                    // which resolves `Greeter` the same way, via
-                    // `loadClass`, not `find_class`). Routing every
-                    // class-name lookup through the shared loader once it
-                    // exists still finds plain JDK classes too, since
-                    // `URLClassLoader#loadClass` delegates to its parent
-                    // (the platform loader) before consulting its own URLs.
-                    Some(global) => {
-                        let loader_local = env.new_local_ref(global.as_obj())?;
-                        resolve_class_via_loader(env, &loader_local, name)?
-                    }
-                    // No jar ever loaded: fall back to a plain `FindClass`,
-                    // which covers plain JDK classes (e.g. "java.lang.Math")
-                    // without needing a classloader object at all.
-                    None => {
-                        let internal_name = name.replace('.', "/");
-                        env.find_class(jni::strings::JNIString::from(internal_name))?
-                    }
-                };
-                (class, None)
-            }
-            crate::commands::CallTarget::Object(handle) => {
-                let global = crate::handles::resolve(*handle)
-                    .ok_or_else(|| marshal_error(&format!("unknown JVM object handle {handle}")))?;
-                let local = env.new_local_ref(global.as_obj())?;
-                (env.get_object_class(&local)?, Some(local))
-            }
-        };
-
-        if member == "<init>" {
-            invoke_constructor(env, &class, &args)
-        } else {
-            invoke_method(env, &class, instance.as_ref(), &member, &args)
-        }
-    });
+    let result: jni::errors::Result<crate::commands::LispArg> =
+        vm.attach_current_thread(|env| resolve_and_invoke(env, &loader, &target, &member, &args));
 
     match result {
         Ok(value) => {
@@ -752,6 +755,177 @@ fn handle_call(
             channel::send(&protocol::call_done_message(id, true, Some(&sexp), None));
         }
         Err(e) => channel::send(&protocol::call_done_message(id, false, None, Some(&e.to_string()))),
+    }
+}
+
+/// Resolves TARGET.MEMBER against the shared classloader and invokes it with
+/// ARGS on an already-attached thread, returning the marshalled result.
+///
+/// Shared by the async worker (`handle_call`, on a spawned thread) and the
+/// synchronous main-thread path (`call_direct`). Identical behaviour in both:
+/// the only differences are which thread runs it and what the caller does
+/// with the `LispArg` afterward (an sexp `call-done` message vs. a direct
+/// `Value`).
+pub(crate) fn resolve_and_invoke(
+    env: &mut jni::Env,
+    loader: &Option<crate::runtime::SharedLoader>,
+    target: &crate::commands::CallTarget,
+    member: &str,
+    args: &[crate::commands::LispArg],
+) -> jni::errors::Result<crate::commands::LispArg> {
+    // A freshly attached thread's context classloader is null. Plain
+    // JNI class resolution (find_class/loadClass, used just below)
+    // doesn't need it, but Clojure's own namespace loader
+    // (clojure.lang.RT, used internally by `require`) does: it loads
+    // .clj source files as classpath *resources*, not classes, and
+    // that resolution path falls back through
+    // Thread.currentThread().getContextClassLoader(). Left null, the
+    // first touch of Clojure's runtime throws
+    // ExceptionInInitializerError before clojure.core even finishes
+    // loading — verified empirically during Phase 3's design spike
+    // (see docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md,
+    // "Feasibility"). Harmless for calls that never touch Clojure.
+    if let Some(global) = loader {
+        let loader_local = env.new_local_ref(global.as_obj())?;
+        let thread_class = env.find_class(jni::jni_str!("java/lang/Thread"))?;
+        let current_thread = env
+            .call_static_method(&thread_class, jni::jni_str!("currentThread"), jni::jni_sig!(() -> java.lang.Thread), &[])?
+            .l()?;
+        env.call_method(
+            &current_thread,
+            jni::jni_str!("setContextClassLoader"),
+            jni::jni_sig!((cl: java.lang.ClassLoader) -> void),
+            &[jni::objects::JValue::Object(&loader_local)],
+        )?;
+    }
+
+    let (class, instance): (jni::objects::JClass, Option<jni::objects::JObject>) = match target {
+        crate::commands::CallTarget::ClassName(name) => {
+            let class = match loader {
+                // A jar has been loaded at least once: classes it
+                // provides only live in *this* classloader's URL list,
+                // not on the default `FindClass` search path (verified
+                // empirically in Task 7 — see `add_jar_url`'s own test,
+                // which resolves `Greeter` the same way, via
+                // `loadClass`, not `find_class`). Routing every
+                // class-name lookup through the shared loader once it
+                // exists still finds plain JDK classes too, since
+                // `URLClassLoader#loadClass` delegates to its parent
+                // (the platform loader) before consulting its own URLs.
+                Some(global) => {
+                    let loader_local = env.new_local_ref(global.as_obj())?;
+                    resolve_class_via_loader(env, &loader_local, name)?
+                }
+                // No jar ever loaded: fall back to a plain `FindClass`,
+                // which covers plain JDK classes (e.g. "java.lang.Math")
+                // without needing a classloader object at all.
+                None => {
+                    let internal_name = name.replace('.', "/");
+                    env.find_class(jni::strings::JNIString::from(internal_name))?
+                }
+            };
+            (class, None)
+        }
+        crate::commands::CallTarget::Object(handle) => {
+            let global = crate::handles::resolve(*handle)
+                .ok_or_else(|| marshal_error(&format!("unknown JVM object handle {handle}")))?;
+            let local = env.new_local_ref(global.as_obj())?;
+            (env.get_object_class(&local)?, Some(local))
+        }
+    };
+
+    if member == "<init>" {
+        invoke_constructor(env, &class, args)
+    } else {
+        invoke_method(env, &class, instance.as_ref(), member, args)
+    }
+}
+
+thread_local! {
+    /// Nesting depth of in-flight `call_direct` frames on this thread. Used
+    /// only to gate the reentrant-boundary outbound path
+    /// (`describe_pending_java_exception` classifies a `LispNonLocalExit` into
+    /// `PENDING_NLE` only when `> 0`, i.e. inside a direct call — never on the
+    /// async worker thread). It no longer drives detaching: the main thread
+    /// stays permanently attached, and non-main callers rely on the scoped
+    /// attach in `call_direct` to detach on return.
+    static ATTACH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+
+    /// Side channel from `describe_pending_java_exception` back to
+    /// `call_direct`, for the outbound half of the reentrant boundary: a Lisp
+    /// signal/throw raised in a callback unwinds up through Clojure as a
+    /// `LispNonLocalExit`; when it reaches the top of a direct call
+    /// (`ATTACH_DEPTH > 0`) `describe` classifies its fields into this slot so
+    /// `call_direct` can re-raise the *original* signal/throw instead of a
+    /// generic `jvm-error`. A plain error can't carry them — `describe`'s
+    /// return type is fixed `jni::errors::Error`. Filled at the invoke error
+    /// site, taken (once) by the enclosing `call_direct`. Never touched on the
+    /// async worker thread (its `ATTACH_DEPTH` stays 0), so `handle_call` is
+    /// unchanged.
+    static PENDING_NLE: std::cell::RefCell<Option<DirectError>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Failure of a `call_direct`.
+pub(crate) enum DirectError {
+    /// A Lisp non-local exit that unwound up through Clojure as a
+    /// `LispNonLocalExit`. `kind` is 0 (signal) or 1 (throw); `a`/`b` are the
+    /// already-classified symbol/data or tag/value, ready to rebind to the
+    /// caller's `Env` and re-raise via `(signal …)`/`(throw …)`.
+    NonLocalExit { kind: i32, a: crate::lisp_requests::LispRequestArg, b: crate::lisp_requests::LispRequestArg },
+    /// Any other JVM-side failure — surfaced as `jvm-error` with this message.
+    Jni(jni::errors::Error),
+}
+
+/// Runs a synchronous TARGET.MEMBER call on the current (Emacs main) thread:
+/// attach to the shared JVM, resolve + invoke via `resolve_and_invoke`,
+/// return the marshalled result. The main thread stays permanently attached
+/// (for a stable thread identity); the per-call attach is scoped, so on any
+/// *other* thread it detaches on return (see the attach comments in the body).
+/// Called by the `jvm--call-direct` defun, which converts the `LispArg` to a
+/// real `Value` on the same thread's live `Env`.
+pub(crate) fn call_direct(
+    vm: &JavaVM,
+    loader: &Option<crate::runtime::SharedLoader>,
+    target: &crate::commands::CallTarget,
+    member: &str,
+    args: &[crate::commands::LispArg],
+) -> Result<crate::commands::LispArg, DirectError> {
+    ATTACH_DEPTH.with(|d| d.set(d.get() + 1));
+    // Clear any stale slot before this frame's invoke, so a `Some` seen after
+    // it can only be this frame's (each frame fills and takes its own).
+    PENDING_NLE.with(|s| *s.borrow_mut() = None);
+
+    // Attach the Emacs main thread to the JVM *permanently*, once. A permanent
+    // attach installs a thread-local guard that keeps the thread attached
+    // until it terminates (or `jvm--stop` detaches it), so its
+    // `java.lang.Thread` peer — hence `Thread.currentThread()` identity and any
+    // thread-locals (Clojure dynamic bindings, `*ns*`) — stays stable across
+    // calls. The scoped attach below is then a cheap no-op on it (it does not
+    // own the attachment, so it never detaches on return). Only the main
+    // thread gets this: a direct call from any other thread (e.g. a
+    // `make-thread` Lisp thread) is never recorded as main, so its scoped
+    // attach owns the attachment and detaches on return — transient, no leaked
+    // attachment to block a later `destroy`.
+    if crate::runtime::on_main_thread() && !crate::runtime::main_attached() {
+        if vm.attach_current_thread(|_env| Ok::<(), jni::errors::Error>(())).is_ok() {
+            crate::runtime::set_main_attached(true);
+        }
+    }
+
+    // The actual invoke always goes through a *scoped* attach: a no-op on the
+    // permanently-attached main thread, an owning attach-and-detach on any
+    // other thread.
+    let result =
+        vm.attach_current_thread_for_scope(|env| resolve_and_invoke(env, loader, target, member, args));
+
+    ATTACH_DEPTH.with(|d| d.set(d.get() - 1));
+    match result {
+        Ok(arg) => Ok(arg),
+        // A `LispNonLocalExit` reconstructed by `describe_pending_java_exception`
+        // takes precedence over its flattened message: re-raise the original
+        // signal/throw. Otherwise it's a genuine JVM failure → `jvm-error`.
+        Err(e) => Err(PENDING_NLE.with(|s| s.borrow_mut().take()).unwrap_or(DirectError::Jni(e))),
     }
 }
 
@@ -814,6 +988,22 @@ fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
         return caught;
     };
 
+    // Outbound half of the reentrant boundary: only inside a direct call
+    // (`ATTACH_DEPTH > 0`, i.e. never on the async worker thread). If this
+    // exception is, or wraps, a `LispNonLocalExit`, stash its classified
+    // fields so the enclosing `call_direct` re-raises the original Lisp
+    // signal/throw. Best-effort — any failure here just falls through to the
+    // flattened message below (a `jvm-error`).
+    if ATTACH_DEPTH.with(|d| d.get()) > 0 {
+        if let Ok(local) = env.new_local_ref(exception.as_obj()) {
+            if let Ok(throwable) = env.cast_local::<jni::objects::JThrowable>(local) {
+                if let Ok(Some(nle)) = extract_non_local_exit(env, throwable) {
+                    PENDING_NLE.with(|s| *s.borrow_mut() = Some(nle));
+                }
+            }
+        }
+    }
+
     let mut lines = vec![format!("{name}: {msg}")];
     if let Ok(local) = env.new_local_ref(exception.as_obj()) {
         if let Ok(mut current) = env.cast_local::<jni::objects::JThrowable>(local) {
@@ -845,6 +1035,42 @@ fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
         }
     }
     marshal_error(&lines.join("\n"))
+}
+
+/// Walks THROWABLE's `getCause()` chain for an `emacs_jni.core.LispNonLocalExit`
+/// and, if found, classifies its `kind`/`symbolOrTag`/`dataOrValue` back into a
+/// `DirectError::NonLocalExit`. The two fields run through the same
+/// `shim::object_to_lisp_request_arg` classifier the inbound direction built
+/// them with (`build_lisp_reply_object`), so the round trip is symmetric.
+/// `None` if no `LispNonLocalExit` is in the chain (a genuine Java/Clojure
+/// exception).
+fn extract_non_local_exit<'local>(
+    env: &mut jni::Env<'local>,
+    throwable: jni::objects::JThrowable<'local>,
+) -> jni::errors::Result<Option<DirectError>> {
+    let nle_class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
+    let mut current = throwable;
+    // Bounded like `describe_pending_java_exception`'s own walk: a normal cause
+    // chain can't cycle, but this is recovery code, not worth an unbounded loop.
+    for _ in 0..10 {
+        if current.is_null() {
+            break;
+        }
+        if env.is_instance_of(&current, &nle_class)? {
+            let kind = env.get_field(&current, jni::jni_str!("kind"), jni::jni_sig!(int))?.i()?;
+            let a_obj = env
+                .get_field(&current, jni::jni_str!("symbolOrTag"), jni::jni_sig!(java.lang.Object))?
+                .l()?;
+            let b_obj = env
+                .get_field(&current, jni::jni_str!("dataOrValue"), jni::jni_sig!(java.lang.Object))?
+                .l()?;
+            let a = crate::shim::object_to_lisp_request_arg(env, a_obj)?;
+            let b = crate::shim::object_to_lisp_request_arg(env, b_obj)?;
+            return Ok(Some(DirectError::NonLocalExit { kind, a, b }));
+        }
+        current = current.get_cause(env)?;
+    }
+    Ok(None)
 }
 
 /// Finds an overload of METHOD_NAME on CLASS whose parameter count matches

@@ -1,7 +1,7 @@
 # How to call Java from Lisp
 
-This guide covers `jvm-call`/`jvm-call-sync` and `jvm-new`/
-`jvm-new-sync`. It assumes the JVM is `ready` and the relevant jar or
+This guide covers `jvm-call`/`jvm-call-await` and `jvm-new`/
+`jvm-new-await`. It assumes the JVM is `ready` and the relevant jar or
 class is already loaded. See [How to load a jar](load-a-jar.md). Full
 marshalling rules are in the
 [Lisp API reference](../reference/lisp-api.md#argument-and-return-value-marshalling).
@@ -9,44 +9,44 @@ marshalling rules are in the
 ## Call a static method
 
 ```elisp
-(jvm-call-sync "java.lang.Math" "max" (list 3 7))
-;; => (t 7 nil)
+(jvm-call "java.lang.Math" "max" (list 3 7))
+;; => 7
 ```
 
 `TARGET` is a class name string. `MEMBER` is the method name. `ARGS`
-is a list of Lisp values.
+is a list of Lisp values. `jvm-call` returns the result value directly
+and signals `jvm-error` on failure.
 
 ## Call an instance method
 
 Construct an object first, then pass it as `TARGET`:
 
 ```elisp
-(let ((obj (jvm-new-sync "java.util.ArrayList" nil)))
-  (jvm-call-sync (nth 1 obj) "add" (list "hello"))
-  (jvm-call-sync (nth 1 obj) "size" nil))
-;; => (t 1 nil)
+(let ((obj (jvm-new "java.util.ArrayList" nil)))
+  (jvm-call obj "add" (list "hello"))
+  (jvm-call obj "size" nil))
+;; => 1
 ```
 
-`(nth 1 obj)` pulls the wrapped JVM object out of `jvm-new-sync`'s
-`(OK RESULT ERR)` result.
+`jvm-new` returns the wrapped JVM object directly; pass it straight back
+as `TARGET`.
 
 ## Construct an object
 
 ```elisp
-(jvm-new-sync "java.lang.StringBuilder" (list "hi"))
-;; => (t #<user-ptr ...> nil)
+(jvm-new "java.lang.StringBuilder" (list "hi"))
+;; => #<user-ptr ...>
 ```
 
-`jvm-new`/`jvm-new-sync` are `jvm-call`/`jvm-call-sync` with `MEMBER`
-fixed to the constructor's internal name, `"<init>"`. Everything else
-about them, including argument marshalling and error handling, is
-identical.
+`jvm-new` is `jvm-call` with `MEMBER` fixed to the constructor's
+internal name, `"<init>"`. Everything else about it, including argument
+marshalling and error handling, is identical.
 
 ## Pass a number
 
 ```elisp
-(jvm-call-sync "Calc" "addLong" (list 2 3))
-;; => (t 5 nil)
+(jvm-call "Calc" "addLong" (list 2 3))
+;; => 5
 ```
 
 An integer marshals to whichever numeric type the target parameter
@@ -59,11 +59,11 @@ silent truncation. A float marshals to `float`, `double`, or a boxed
 ## Pass a boolean
 
 ```elisp
-(jvm-call-sync "Calc" "describe" (list t))
-;; => (t "yes" nil)
+(jvm-call "Calc" "describe" (list t))
+;; => "yes"
 
-(jvm-call-sync "Calc" "describe" (list nil))
-;; => (t "no" nil)
+(jvm-call "Calc" "describe" (list nil))
+;; => "no"
 ```
 
 `t` marshals to Java `true`. `nil` marshals to Java `false` when the
@@ -73,11 +73,11 @@ the method expects.
 
 ## Pass a wrapped JVM object
 
-`obj` here is the `RESULT` part of an earlier `jvm-call-sync`/
-`jvm-new-sync` result, for example `(nth 1 (jvm-new-sync "Calc" (list 100)))`:
+`obj` here is the object an earlier `jvm-call`/`jvm-new` returned, for
+example `(jvm-new "Calc" (list 100))`:
 
 ```elisp
-(jvm-call-sync "Calc" "isLispCallable" (list obj))
+(jvm-call "Calc" "isLispCallable" (list obj))
 ```
 
 Pass the wrapped object exactly as it came back. It marshals to its
@@ -85,24 +85,29 @@ real Java type.
 
 ## Set a timeout longer than the default 30 seconds
 
+The bare `jvm-call` runs on the Emacs main thread until the call returns
+or signals; it has no timeout. To bound the wait, use the `-await`
+variant, which dispatches to the worker and takes a timeout as its last
+argument:
+
 ```elisp
-(jvm-call-sync "SlowClass" "slowMethod" nil 120)
+(jvm-call-await "SlowClass" "slowMethod" nil 120)
 ```
 
-The fourth argument to `jvm-call-sync` (third for `jvm-new-sync`) is
-the timeout, in seconds.
+The fourth argument to `jvm-call-await` (third for `jvm-new-await`) is
+the timeout, in seconds. Past it, the call signals `jvm-timeout`.
 
 ## Call without blocking
 
 ```elisp
-(jvm-call "Calc" "addLong" (list 2 3)
-          (lambda (ok result err)
-            (if ok
-                (message "result: %s" result)
-              (message "call failed: %s" err))))
+(jvm-call-async "Calc" "addLong" (list 2 3)
+                (lambda (ok result err)
+                  (if ok
+                      (message "result: %s" result)
+                    (message "call failed: %s" err))))
 ```
 
-`jvm-call`/`jvm-new` return a request ID immediately. The callback runs
+`jvm-call-async`/`jvm-new-async` return a request ID immediately. The callback runs
 later, on the same Lisp thread that is running Emacs's event loop, once
 the JVM worker thread finishes the call.
 

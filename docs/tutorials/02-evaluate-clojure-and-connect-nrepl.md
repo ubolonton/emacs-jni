@@ -36,13 +36,13 @@ find the jars by reading this environment variable back from Lisp.
 In `*scratch*`, evaluate each form one at a time.
 
 ```elisp
-(require 'jvm)
+(require 'jvm-clj)
 
-(jvm-start-sync)
+(jvm-start)
 ;; => ready
 
 (dolist (jar (directory-files (getenv "EMACS_JNI_CLOJURE_JARS_DIR") t "\\.jar\\'"))
-  (jvm-load-jar-sync jar))
+  (jvm-load-jar jar))
 ```
 
 The `dolist` loads all four jars, one at a time, into the JVM's shared
@@ -51,21 +51,21 @@ classloader.
 ## Step 4: Evaluate Clojure code
 
 ```elisp
-(jvm-clojure-eval-string "(+ 40 (* 2 1))")
-;; => (t 42 nil)
+(jvm-clj-eval-string "(+ 40 (* 2 1))")
+;; => 42
 ```
 
-The result is `(OK RESULT ERR)`, the same shape `jvm-call-sync`
-returns. Clojure evaluated the expression and returned `42`.
+`jvm-clj-eval-string` returns the result value directly. Clojure
+evaluated the expression and returned `42`.
 
 ## Step 5: Start an nREPL server
 
 ```elisp
-(setq my-nrepl (jvm-nrepl-start 7888))
-;; => (t (7888 . #<user-ptr ...>) nil)
+(setq my-nrepl (jvm-clj-nrepl-start 7888))
+;; => (7888 . #<user-ptr ...>)
 ```
 
-`7888` is the port. The result's `RESULT` part is
+`7888` is the port. `jvm-clj-nrepl-start` returns
 `(ACTUAL-PORT . SERVER)`. `ACTUAL-PORT` confirms the port the server
 bound. `SERVER` is a wrapped JVM object you will need later, to stop
 the server.
@@ -95,12 +95,12 @@ network to this separate terminal.
 Back in Emacs:
 
 ```elisp
-(jvm-nrepl-stop (cdr (nth 1 my-nrepl)))
-;; => (t nil nil)
+(jvm-clj-nrepl-stop (cdr my-nrepl))
+;; => nil
 ```
 
-`(cdr (nth 1 my-nrepl))` pulls `SERVER` out of the result you stored in
-Step 5.
+`(cdr my-nrepl)` pulls `SERVER` out of the `(ACTUAL-PORT . SERVER)`
+value you stored in Step 5.
 
 You have now evaluated Clojure code inside Emacs, and reached it from
 an independent process over the real nREPL wire protocol.
