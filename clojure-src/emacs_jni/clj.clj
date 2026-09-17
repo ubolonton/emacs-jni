@@ -42,12 +42,19 @@
   (<-lisp (Lisp/intern s)))
 
 (defn eval-for-lisp
-  "Evaluate FORM and marshal the result toward Lisp: a keyword or symbol
-  result becomes a LispSymbol marker the generic bridge interns back into a
-  Lisp keyword/symbol; every other value passes through the ordinary
-  jvm-call return marshalling. Backs `jvm-clj-eval-string'."
-  [form]
-  (->lisp (eval form)))
+  "Read CODE (a string of Clojure source) with the full Clojure reader, eval
+  it, and marshal the result toward Lisp: a keyword or symbol result becomes a
+  LispSymbol marker the generic bridge interns back into a Lisp keyword/symbol;
+  every other value passes through the ordinary jvm-call return marshalling.
+  Backs `jvm-clj-eval-string'.
+
+  Uses `load-string`, which reads with the full Clojure reader (reader macros
+  `'`, backtick, `~`, `@`, `#()`, `#\"re\"` all work) and evaluates every
+  top-level form, returning the last one's value. This is why CODE is passed as
+  a raw string rather than pre-read: `clojure.java.api.Clojure/read` reads
+  EDN-only and would reject the reader macros."
+  [code]
+  (->lisp (load-string code)))
 
 (defn- lisp-exit->ex-info
   "Translate a native LispNonLocalExit carrier into a Clojure ex-info,

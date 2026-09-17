@@ -73,14 +73,18 @@ like `jvm-clj-nrepl-start-await'."
   (should (eq (jvm-clj-eval-string-direct ":a") :a)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-symbol ()
-  "A Clojure symbol result comes back as a real Lisp symbol.
-Uses \"(quote foo)\" as the code string, not a quote-reader-macro shorthand:
-`jvm-clj--read-direct' parses code via `clojure.java.api.Clojure/read',
-which is EDN-based and has no quote-reader-macro support, so a shorthand
-quote would read as a symbol literally including the quote character,
-not as a `(quote ...)' form."
+  "A Clojure symbol result comes back as a real Lisp symbol. The `'' shorthand
+must work: eval-string reads with the full Clojure reader (`load-string'), not
+EDN, so `'foo' reads as `(quote foo)'."
   (jvm-clj-eval-direct-test--ensure-ready)
-  (should (eq (jvm-clj-eval-string-direct "(quote foo)") 'foo)))
+  (should (eq (jvm-clj-eval-string-direct "'foo") 'foo)))
+
+(ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-accepts-reader-macros ()
+  "Reader macros beyond quote work too (EDN would reject these): an anonymous-fn
+literal `#(...)' evaluates and applies, and a regex literal `#\"re\"' matches."
+  (jvm-clj-eval-direct-test--ensure-ready)
+  (should (equal (jvm-clj-eval-string-direct "(#(+ % 1) 41)") 42))
+  (should (equal (jvm-clj-eval-string-direct "(re-find #\"\\d+\" \"ab12cd\")") "12")))
 
 (provide 'jvm-clj-eval-direct-test)
 ;;; jvm-clj-eval-direct-test.el ends here
