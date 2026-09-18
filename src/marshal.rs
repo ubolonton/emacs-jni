@@ -1,6 +1,6 @@
 use jni::objects::{JClass, JObject, JValueOwned};
 
-use crate::commands::LispArg;
+use crate::commands::BridgeValue;
 use crate::handles;
 
 /// Converts ARG to a JNI value matching PARAM_TYPE's actual declared type
@@ -9,24 +9,24 @@ use crate::handles;
 /// widening primitive conversions.
 pub fn lisp_arg_to_jvalue<'local>(
     env: &mut jni::Env<'local>,
-    arg: &LispArg,
+    arg: &BridgeValue,
     param_type: &JClass<'local>,
 ) -> jni::errors::Result<JValueOwned<'local>> {
     let param_name = class_name(env, param_type)?;
 
     match (arg, param_name.as_str()) {
-        (LispArg::Nil, "boolean") | (LispArg::Nil, "java.lang.Boolean") => {
+        (BridgeValue::Nil, "boolean") | (BridgeValue::Nil, "java.lang.Boolean") => {
             Ok(JValueOwned::Bool(false))
         }
-        (LispArg::Nil, _) => Ok(JValueOwned::Object(JObject::null())),
-        (LispArg::True, _) => Ok(JValueOwned::Bool(true)),
-        (LispArg::Int(n), "int") => i32::try_from(*n)
+        (BridgeValue::Nil, _) => Ok(JValueOwned::Object(JObject::null())),
+        (BridgeValue::True, _) => Ok(JValueOwned::Bool(true)),
+        (BridgeValue::Int(n), "int") => i32::try_from(*n)
             .map(JValueOwned::Int)
             .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type int"))),
-        (LispArg::Int(n), "short") => i16::try_from(*n)
+        (BridgeValue::Int(n), "short") => i16::try_from(*n)
             .map(JValueOwned::Short)
             .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type short"))),
-        (LispArg::Int(n), "byte") => i8::try_from(*n)
+        (BridgeValue::Int(n), "byte") => i8::try_from(*n)
             .map(JValueOwned::Byte)
             .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type byte"))),
         // The "java.lang.Object" arms below matter beyond Task 5's own
@@ -44,25 +44,25 @@ pub fn lisp_arg_to_jvalue<'local>(
         // number", so a value that crosses Java -> Lisp -> Java this way
         // round-trips through the same representation rather than
         // silently narrowing.
-        (LispArg::Int(n), "long") | (LispArg::Int(n), "java.lang.Object") => Ok(JValueOwned::Long(*n)),
-        (LispArg::Int(n), "float") => Ok(JValueOwned::Float(*n as f32)),
-        (LispArg::Int(n), "double") => Ok(JValueOwned::Double(*n as f64)),
-        (LispArg::Int(n), "java.math.BigInteger") => big_integer_from_str(env, &n.to_string()),
-        (LispArg::Int(_), other) => Err(marshal_error(&format!(
+        (BridgeValue::Int(n), "long") | (BridgeValue::Int(n), "java.lang.Object") => Ok(JValueOwned::Long(*n)),
+        (BridgeValue::Int(n), "float") => Ok(JValueOwned::Float(*n as f32)),
+        (BridgeValue::Int(n), "double") => Ok(JValueOwned::Double(*n as f64)),
+        (BridgeValue::Int(n), "java.math.BigInteger") => big_integer_from_str(env, &n.to_string()),
+        (BridgeValue::Int(_), other) => Err(marshal_error(&format!(
             "integer argument doesn't fit parameter type {other}"
         ))),
-        (LispArg::Float(f), "float") => Ok(JValueOwned::Float(*f as f32)),
-        (LispArg::Float(f), "double") | (LispArg::Float(f), "java.lang.Object") => Ok(JValueOwned::Double(*f)),
-        (LispArg::Float(_), other) => Err(marshal_error(&format!(
+        (BridgeValue::Float(f), "float") => Ok(JValueOwned::Float(*f as f32)),
+        (BridgeValue::Float(f), "double") | (BridgeValue::Float(f), "java.lang.Object") => Ok(JValueOwned::Double(*f)),
+        (BridgeValue::Float(_), other) => Err(marshal_error(&format!(
             "float argument doesn't fit parameter type {other}"
         ))),
-        (LispArg::BigInt(digits), "java.math.BigInteger") | (LispArg::BigInt(digits), "java.lang.Object") => {
+        (BridgeValue::BigInt(digits), "java.math.BigInteger") | (BridgeValue::BigInt(digits), "java.lang.Object") => {
             big_integer_from_str(env, digits)
         }
-        (LispArg::BigInt(_), other) => Err(marshal_error(&format!(
+        (BridgeValue::BigInt(_), other) => Err(marshal_error(&format!(
             "bignum argument too large for parameter type {other}"
         ))),
-        (LispArg::Str(s), _) => {
+        (BridgeValue::Str(s), _) => {
             let jstr = env.new_string(s)?;
             Ok(JValueOwned::Object(jstr.into()))
         }
@@ -72,7 +72,7 @@ pub fn lisp_arg_to_jvalue<'local>(
         // the table stores `Arc`-wrapped `Global`s instead). `Arc` derefs
         // to `Global<JObject<'static>>` the same way a bare `Global` would,
         // so `.as_obj()` works unchanged.
-        (LispArg::Object(handle), _) => match handles::resolve(*handle) {
+        (BridgeValue::Object(handle), _) => match handles::resolve(*handle) {
             Some(global) => {
                 let local = env.new_local_ref(global.as_obj())?;
                 Ok(JValueOwned::Object(local))
@@ -81,7 +81,7 @@ pub fn lisp_arg_to_jvalue<'local>(
         },
         // The handle here already denotes a live entry in Lisp's own
         // `jvm--lisp-callbacks' table (`lisp_value_to_arg` in `lib.rs`
-        // registered it there before this `LispArg` was ever built —
+        // registered it there before this `BridgeValue` was ever built —
         // this module has no access to that table itself, only the
         // handle number). Wrapping it as a `LispFunction' here is what
         // makes "a Lisp function crosses into Java as a real object" a
@@ -89,7 +89,7 @@ pub fn lisp_arg_to_jvalue<'local>(
         // handle (see `java/emacs_jni/core/LispFunction.java`), for later
         // `invoke`/`InvokeReply` round-tripping (Task 7) to call back
         // into Lisp by that handle.
-        (LispArg::Callback(handle), _) => {
+        (BridgeValue::Callback(handle), _) => {
             let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
             let obj = env.new_object(
                 &lisp_function_class,
@@ -104,7 +104,7 @@ pub fn lisp_arg_to_jvalue<'local>(
         // `jvm_thread::build_lisp_reply_object`'s `Symbol` arm), so the
         // Clojure layer's `<-lisp` and any other consumer read it the same
         // way regardless of which direction produced it.
-        (LispArg::Symbol { name, keyword }, _) => {
+        (BridgeValue::Symbol { name, keyword }, _) => {
             let jname = env.new_string(name)?;
             let class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
             let obj = env.new_object(
@@ -319,7 +319,7 @@ where
     env.call_static_method(&class, jni::jni_str!("valueOf"), sig, &[value.borrow()])?.l()
 }
 
-/// Converts a JNI return value back to a `LispArg`. Non-scalar returns
+/// Converts a JNI return value back to a `BridgeValue`. Non-scalar returns
 /// (any Java object that isn't null/Boolean/a numeric wrapper/String/
 /// BigInteger) get wrapped via `handles::register` — this is the
 /// mechanism behind "wrap a JVM object as a Lisp value" whenever it
@@ -328,17 +328,17 @@ where
 pub fn jvm_value_to_lisp_arg<'local>(
     env: &mut jni::Env<'local>,
     value: JValueOwned<'local>,
-) -> jni::errors::Result<LispArg> {
+) -> jni::errors::Result<BridgeValue> {
     match value {
-        JValueOwned::Void => Ok(LispArg::Nil),
-        JValueOwned::Bool(b) => Ok(if b { LispArg::True } else { LispArg::Nil }),
-        JValueOwned::Byte(n) => Ok(LispArg::Int(n as i64)),
-        JValueOwned::Short(n) => Ok(LispArg::Int(n as i64)),
-        JValueOwned::Int(n) => Ok(LispArg::Int(n as i64)),
-        JValueOwned::Long(n) => Ok(LispArg::Int(n)),
-        JValueOwned::Float(f) => Ok(LispArg::Float(f as f64)),
-        JValueOwned::Double(f) => Ok(LispArg::Float(f)),
-        JValueOwned::Char(c) => Ok(LispArg::Int(c as i64)),
+        JValueOwned::Void => Ok(BridgeValue::Nil),
+        JValueOwned::Bool(b) => Ok(if b { BridgeValue::True } else { BridgeValue::Nil }),
+        JValueOwned::Byte(n) => Ok(BridgeValue::Int(n as i64)),
+        JValueOwned::Short(n) => Ok(BridgeValue::Int(n as i64)),
+        JValueOwned::Int(n) => Ok(BridgeValue::Int(n as i64)),
+        JValueOwned::Long(n) => Ok(BridgeValue::Int(n)),
+        JValueOwned::Float(f) => Ok(BridgeValue::Float(f as f64)),
+        JValueOwned::Double(f) => Ok(BridgeValue::Float(f)),
+        JValueOwned::Char(c) => Ok(BridgeValue::Int(c as i64)),
         JValueOwned::Object(obj) => object_to_lisp_arg(env, obj),
     }
 }
@@ -346,20 +346,20 @@ pub fn jvm_value_to_lisp_arg<'local>(
 fn object_to_lisp_arg<'local>(
     env: &mut jni::Env<'local>,
     obj: JObject<'local>,
-) -> jni::errors::Result<LispArg> {
+) -> jni::errors::Result<BridgeValue> {
     if obj.is_null() {
-        return Ok(LispArg::Nil);
+        return Ok(BridgeValue::Nil);
     }
 
     let string_class = env.find_class(jni::jni_str!("java/lang/String"))?;
     let boolean_class = env.find_class(jni::jni_str!("java/lang/Boolean"))?;
     let big_integer_class = env.find_class(jni::jni_str!("java/math/BigInteger"))?;
     // Boxed integral wrapper types must be checked (and routed through
-    // `longValue()` into `LispArg::Int`) *before* the generic `Number`
+    // `longValue()` into `BridgeValue::Int`) *before* the generic `Number`
     // fallback below — `Method.invoke` auto-boxes every primitive return
     // value into one of these, so this is the dominant numeric-return
     // path, not a corner case. Routing them through the generic
-    // `Number`/`doubleValue()`/`LispArg::Float` fallback instead would
+    // `Number`/`doubleValue()`/`BridgeValue::Float` fallback instead would
     // silently misrepresent the value's type (and lose precision for
     // `Long`s beyond 2^53).
     let integer_class = env.find_class(jni::jni_str!("java/lang/Integer"))?;
@@ -370,20 +370,20 @@ fn object_to_lisp_arg<'local>(
 
     if env.is_instance_of(&obj, &string_class)? {
         let s = env.cast_local::<jni::objects::JString>(obj)?;
-        return Ok(LispArg::Str(s.to_string()));
+        return Ok(BridgeValue::Str(s.to_string()));
     }
     if env.is_instance_of(&obj, &boolean_class)? {
         let b = env
             .call_method(&obj, jni::jni_str!("booleanValue"), jni::jni_sig!(() -> boolean), &[])?
             .z()?;
-        return Ok(if b { LispArg::True } else { LispArg::Nil });
+        return Ok(if b { BridgeValue::True } else { BridgeValue::Nil });
     }
     if env.is_instance_of(&obj, &big_integer_class)? {
         let s = env
             .call_method(&obj, jni::jni_str!("toString"), jni::jni_sig!(() -> java.lang.String), &[])?
             .l()?;
         let s = env.cast_local::<jni::objects::JString>(s)?;
-        return Ok(LispArg::BigInt(s.to_string()));
+        return Ok(BridgeValue::BigInt(s.to_string()));
     }
     if env.is_instance_of(&obj, &integer_class)?
         || env.is_instance_of(&obj, &long_class)?
@@ -393,13 +393,13 @@ fn object_to_lisp_arg<'local>(
         let n = env
             .call_method(&obj, jni::jni_str!("longValue"), jni::jni_sig!(() -> long), &[])?
             .j()?;
-        return Ok(LispArg::Int(n));
+        return Ok(BridgeValue::Int(n));
     }
     if env.is_instance_of(&obj, &number_class)? {
         let d = env
             .call_method(&obj, jni::jni_str!("doubleValue"), jni::jni_sig!(() -> double), &[])?
             .d()?;
-        return Ok(LispArg::Float(d));
+        return Ok(BridgeValue::Float(d));
     }
 
     let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
@@ -411,12 +411,12 @@ fn object_to_lisp_arg<'local>(
         let keyword = env
             .get_field(&obj, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?
             .z()?;
-        return Ok(LispArg::Symbol { name, keyword });
+        return Ok(BridgeValue::Symbol { name, keyword });
     }
 
     let global = env.new_global_ref(&obj)?;
     let handle = handles::register(global);
-    Ok(LispArg::Object(handle))
+    Ok(BridgeValue::Object(handle))
 }
 
 /// Renders ARG as the S-expression fragment embedded in `invoke`/
@@ -424,17 +424,17 @@ fn object_to_lisp_arg<'local>(
 /// A wrapped JVM object handle round-trips as `(jvm-handle N)` — Task 6's
 /// Elisp side reads this tag and turns it back into a real `user-ptr` via
 /// a new primitive that wraps a raw handle integer.
-pub fn lisp_arg_to_sexp(arg: &LispArg) -> String {
+pub fn lisp_arg_to_sexp(arg: &BridgeValue) -> String {
     match arg {
-        LispArg::Nil => "nil".to_string(),
-        LispArg::True => "t".to_string(),
-        LispArg::Int(n) => n.to_string(),
-        LispArg::Float(f) => format!("{f}"),
-        LispArg::BigInt(digits) => digits.clone(),
-        LispArg::Str(s) => quote_lisp_string(s),
-        LispArg::Object(handle) => format!("(jvm-handle {handle})"),
-        LispArg::Callback(handle) => format!("(jvm-handle {handle})"),
-        LispArg::Symbol { name, keyword } => {
+        BridgeValue::Nil => "nil".to_string(),
+        BridgeValue::True => "t".to_string(),
+        BridgeValue::Int(n) => n.to_string(),
+        BridgeValue::Float(f) => format!("{f}"),
+        BridgeValue::BigInt(digits) => digits.clone(),
+        BridgeValue::Str(s) => quote_lisp_string(s),
+        BridgeValue::Object(handle) => format!("(jvm-handle {handle})"),
+        BridgeValue::Callback(handle) => format!("(jvm-handle {handle})"),
+        BridgeValue::Symbol { name, keyword } => {
             format!(
                 "(jvm-symbol {} {})",
                 quote_lisp_string(name),
@@ -468,20 +468,20 @@ mod tests {
 
     #[test]
     fn renders_nil_and_t() {
-        assert_eq!(lisp_arg_to_sexp(&LispArg::Nil), "nil");
-        assert_eq!(lisp_arg_to_sexp(&LispArg::True), "t");
+        assert_eq!(lisp_arg_to_sexp(&BridgeValue::Nil), "nil");
+        assert_eq!(lisp_arg_to_sexp(&BridgeValue::True), "t");
     }
 
     #[test]
     fn renders_int_and_float() {
-        assert_eq!(lisp_arg_to_sexp(&LispArg::Int(42)), "42");
-        assert_eq!(lisp_arg_to_sexp(&LispArg::Float(1.5)), "1.5");
+        assert_eq!(lisp_arg_to_sexp(&BridgeValue::Int(42)), "42");
+        assert_eq!(lisp_arg_to_sexp(&BridgeValue::Float(1.5)), "1.5");
     }
 
     #[test]
     fn renders_bigint_as_raw_digits() {
         assert_eq!(
-            lisp_arg_to_sexp(&LispArg::BigInt("123456789012345678901234567890".to_string())),
+            lisp_arg_to_sexp(&BridgeValue::BigInt("123456789012345678901234567890".to_string())),
             "123456789012345678901234567890"
         );
     }
@@ -489,27 +489,27 @@ mod tests {
     #[test]
     fn renders_string_quoted_and_escaped() {
         assert_eq!(
-            lisp_arg_to_sexp(&LispArg::Str("hi \"there\"".to_string())),
+            lisp_arg_to_sexp(&BridgeValue::Str("hi \"there\"".to_string())),
             "\"hi \\\"there\\\"\""
         );
     }
 
     #[test]
     fn renders_object_handle() {
-        assert_eq!(lisp_arg_to_sexp(&LispArg::Object(7)), "(jvm-handle 7)");
+        assert_eq!(lisp_arg_to_sexp(&BridgeValue::Object(7)), "(jvm-handle 7)");
     }
 
     #[test]
     fn renders_symbol_and_keyword() {
         assert_eq!(
-            lisp_arg_to_sexp(&LispArg::Symbol {
+            lisp_arg_to_sexp(&BridgeValue::Symbol {
                 name: "foo".to_string(),
                 keyword: false
             }),
             "(jvm-symbol \"foo\" nil)"
         );
         assert_eq!(
-            lisp_arg_to_sexp(&LispArg::Symbol {
+            lisp_arg_to_sexp(&BridgeValue::Symbol {
                 name: "foo".to_string(),
                 keyword: true
             }),
@@ -569,7 +569,7 @@ mod jvm_tests {
             let method = env.cast_local::<jni::objects::JObject>(methods)?;
 
             let long_primitive = primitive_long_class(env)?;
-            let arg = lisp_arg_to_jvalue(env, &LispArg::Int(42), &long_primitive)?;
+            let arg = lisp_arg_to_jvalue(env, &BridgeValue::Int(42), &long_primitive)?;
             let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
             let args_array = env.new_object_array(1, &object_class, JObject::null())?;
             let boxed_arg = arg_to_object(env, arg)?;
@@ -589,13 +589,13 @@ mod jvm_tests {
             // Checks the actual variant, not just the rendered string:
             // `lisp_arg_to_sexp`'s `Float` arm renders a whole-number
             // `f64` without a trailing `.0` (Rust's `Display` for `f64`),
-            // so `LispArg::Int(42)` and `LispArg::Float(42.0)` render
+            // so `BridgeValue::Int(42)` and `BridgeValue::Float(42.0)` render
             // identically as `"42"` — a string-only assertion here
             // couldn't have caught a boxed `Long` return being
-            // misrouted into `LispArg::Float` instead of `LispArg::Int`.
+            // misrouted into `BridgeValue::Float` instead of `BridgeValue::Int`.
             assert!(
-                matches!(result_arg, LispArg::Int(42)),
-                "expected LispArg::Int(42), got {result_arg:?}"
+                matches!(result_arg, BridgeValue::Int(42)),
+                "expected BridgeValue::Int(42), got {result_arg:?}"
             );
             assert_eq!(lisp_arg_to_sexp(&result_arg), "42");
             Ok(())

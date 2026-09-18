@@ -270,7 +270,7 @@ fn get_handle_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::
 /// S-expression list fragment `protocol::invoke_message` embeds — the
 /// reverse direction of what `jvm_thread::handle_call` (Task 5) does for
 /// its own return values, reused here since a JVM-initiated call's
-/// arguments need the exact same Java-object -> `LispArg` -> sexp pipeline
+/// arguments need the exact same Java-object -> `BridgeValue` -> sexp pipeline
 /// as any other value crossing from Java to Lisp.
 fn jobject_array_to_sexp(env: &mut jni::Env<'_>, args: &JObjectArray<'_>) -> jni::errors::Result<String> {
     let len = args.len(env)?;
@@ -425,10 +425,10 @@ fn service_lisp_request_direct<'local>(
     .ok_or_else(|| crate::marshal::marshal_error("reentrant Lisp call lost its Env scope"))?;
 
     match reply {
-        crate::commands::LispReplyValue::Signal { symbol, data } => {
+        crate::commands::LispOutcome::Signal { symbol, data } => {
             Err(crate::jvm_thread::throw_non_local_exit(env, 0, *symbol, *data))
         }
-        crate::commands::LispReplyValue::Throw { tag, value } => {
+        crate::commands::LispOutcome::Throw { tag, value } => {
             Err(crate::jvm_thread::throw_non_local_exit(env, 1, *tag, *value))
         }
         other => crate::jvm_thread::build_lisp_reply_object(env, other),
@@ -622,7 +622,7 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
 }
 
 /// Classifies one value crossing Clojure → Lisp (an `apply` receiver or
-/// argument, or a `typeOf`/`isNotNil`/`eq` operand) into a `LispRequestArg`,
+/// argument, or a `typeOf`/`isNotNil`/`eq` operand) into a `LispInput`,
 /// per spec "Argument conversion":
 /// - `null` → `Nil`;
 /// - an `emacs_jni.core.LispObject` → carried by its `ptr`;
@@ -633,18 +633,18 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
 pub(crate) fn object_to_lisp_request_arg<'local>(
     env: &mut jni::Env<'local>,
     elem: JObject<'local>,
-) -> jni::errors::Result<crate::lisp_requests::LispRequestArg> {
-    use crate::lisp_requests::LispRequestArg;
+) -> jni::errors::Result<crate::lisp_requests::LispInput> {
+    use crate::lisp_requests::LispInput;
     // `IsInstanceOf` (what `is_instance_of` calls) reports `true` for a
     // null reference against ANY class per the JNI spec, so null must be
     // checked before the class checks below -- otherwise a null value
     // would be misread as `Obj(0)`.
     if elem.is_null() {
-        return Ok(LispRequestArg::Scalar(crate::commands::LispArg::Nil));
+        return Ok(LispInput::Scalar(crate::commands::BridgeValue::Nil));
     }
     let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
     if env.is_instance_of(&elem, &lisp_object_class)? {
-        return Ok(LispRequestArg::Obj(get_ptr_field(env, &elem)?));
+        return Ok(LispInput::Obj(get_ptr_field(env, &elem)?));
     }
     let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
     if env.is_instance_of(&elem, &lisp_symbol_class)? {
@@ -652,18 +652,18 @@ pub(crate) fn object_to_lisp_request_arg<'local>(
         let name = env.cast_local::<JString>(name_obj)?;
         let name = name.try_to_string(env)?;
         let keyword = env.get_field(&elem, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?.z()?;
-        return Ok(LispRequestArg::Symbol { name, keyword });
+        return Ok(LispInput::Symbol { name, keyword });
     }
     let lisp_arg = crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(elem))?;
-    Ok(LispRequestArg::Scalar(lisp_arg))
+    Ok(LispInput::Scalar(lisp_arg))
 }
 
-/// Converts `applyAsync`'s `Object[]` ARGS into `LispRequestArg`s, element
+/// Converts `applyAsync`'s `Object[]` ARGS into `LispInput`s, element
 /// by element via `object_to_lisp_request_arg`.
 fn jobject_array_to_lisp_request_args<'local>(
     env: &mut jni::Env<'local>,
     args: &JObjectArray<'local>,
-) -> jni::errors::Result<Vec<crate::lisp_requests::LispRequestArg>> {
+) -> jni::errors::Result<Vec<crate::lisp_requests::LispInput>> {
     let len = args.len(env)?;
     let mut out = Vec::with_capacity(len);
     for i in 0..len {

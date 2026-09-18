@@ -65,7 +65,7 @@ pub fn in_scope() -> bool {
 /// The reconstructed `Env` is scoped to F: `emacs` 0.21's `Env` roots the
 /// `Value`s it creates in its own list and frees them on `Drop` (the GC-bug
 /// workaround), so it acts as a per-native cleanup frame -- convert any result
-/// to a form that does not borrow it (a `LispReplyValue`, whose `Ptr` variant
+/// to a form that does not borrow it (a `LispOutcome`, whose `Ptr` variant
 /// already holds an independent `GlobalRef`) before this returns.
 pub fn with_current_env<R>(f: impl FnOnce(&Env) -> R) -> Option<R> {
     let raw = ENV_STACK.with(|stack| stack.borrow().last().copied())?;

@@ -185,7 +185,7 @@ fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value)
     // the call returns or unwinds.
     let _scope = reentry::enter(env);
     match jvm_thread::call_direct(&vm, &loader, &target, &member, &args) {
-        Ok(arg) => lisp_requests::lisp_arg_to_value(env, &arg),
+        Ok(arg) => lisp_requests::bridge_value_to_value(env, &arg),
         // A Lisp signal/throw raised in a reentrant callback, unwound back up
         // through Clojure: rebind its symbol/data (or tag/value) to this
         // frame's `Env` and re-raise the *original* non-local exit, so the
@@ -252,18 +252,18 @@ fn jvm_invoke_reply(id: u64, ok: Value, result: Value) -> Result<()> {
         lisp_value_to_arg(result)?
     } else {
         let message: String = result.into_rust()?;
-        commands::LispArg::Str(message)
+        commands::BridgeValue::Str(message)
     };
     let _ = worker::send_command(commands::Cmd::InvokeReply { id, ok, result: arg });
     Ok(())
 }
 
 /// Walks a Lisp list of arguments (as raw `Value`s, same pattern as the
-/// existing `string_list` helper) converting each to a `LispArg` by
+/// existing `string_list` helper) converting each to a `BridgeValue` by
 /// runtime type — see `lisp_value_to_arg`'s doc comment for what each
 /// Lisp type maps to, and what happens to a value this bridge doesn't
 /// recognize.
-fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::LispArg>> {
+fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::BridgeValue>> {
     let mut out = Vec::new();
     while list.is_not_nil() {
         let item: Value = list.car()?;
@@ -273,43 +273,43 @@ fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::LispArg>> {
     Ok(out)
 }
 
-/// Converts a single Lisp value to a `LispArg` by runtime type, trying
+/// Converts a single Lisp value to a `BridgeValue` by runtime type, trying
 /// each marshallable Lisp type in turn.
-fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
+fn lisp_value_to_arg(v: Value) -> Result<commands::BridgeValue> {
     if !v.is_not_nil() {
-        return Ok(commands::LispArg::Nil);
+        return Ok(commands::BridgeValue::Nil);
     }
     if v.env.call("keywordp", (v,))?.is_not_nil() {
         let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
         // `symbol-name` of a keyword includes its leading `:`; strip it so
         // `name` is the bare name the marker carries.
         let name = name.strip_prefix(':').unwrap_or(&name).to_string();
-        return Ok(commands::LispArg::Symbol { name, keyword: true });
+        return Ok(commands::BridgeValue::Symbol { name, keyword: true });
     }
     if let Ok(n) = v.into_rust::<i64>() {
-        return Ok(commands::LispArg::Int(n));
+        return Ok(commands::BridgeValue::Int(n));
     }
     // A Lisp integer (fixnum or bignum) that didn't fit in i64 above is a
     // bignum too large for a 64-bit register — this must be routed
-    // through `LispArg::BigInt` via its exact decimal string, not the
+    // through `BridgeValue::BigInt` via its exact decimal string, not the
     // `f64` attempt below. `extract_float` (which backs `into_rust::<f64>`)
     // coerces any Lisp number, including bignums, so skipping this check
-    // would silently accept a bignum as a lossy `LispArg::Float` instead of
+    // would silently accept a bignum as a lossy `BridgeValue::Float` instead of
     // erroring or round-tripping exactly — the same "don't silently
     // misrepresent" concern `marshal::jvm_value_to_lisp_arg` (Task 4)
     // already applies on the Java-to-Lisp direction for boxed Long/Integer.
     if v.env.call("integerp", (v,))?.is_not_nil() {
         let digits: String = v.env.call("number-to-string", (v,))?.into_rust()?;
-        return Ok(commands::LispArg::BigInt(digits));
+        return Ok(commands::BridgeValue::BigInt(digits));
     }
     if let Ok(f) = v.into_rust::<f64>() {
-        return Ok(commands::LispArg::Float(f));
+        return Ok(commands::BridgeValue::Float(f));
     }
     if let Ok(s) = v.into_rust::<String>() {
-        return Ok(commands::LispArg::Str(s));
+        return Ok(commands::BridgeValue::Str(s));
     }
     if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
-        return Ok(commands::LispArg::Object(h.0));
+        return Ok(commands::BridgeValue::Object(h.0));
     }
     // `t` has no useful into_rust::<T>() scalar conversion (there's no
     // `FromLisp` impl for `bool` — Emacs Lisp has no dedicated boolean
@@ -317,7 +317,7 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     // interned `t` symbol, matching Lisp's own notion of "is this
     // literally `t`" rather than "is this any non-nil symbol".
     if v == v.env.intern("t")? {
-        return Ok(commands::LispArg::True);
+        return Ok(commands::BridgeValue::True);
     }
     // A symbol is data: it crosses as a marker, not a callback. Checked
     // before `functionp` so a symbol holding a function cell (`car`) is a
@@ -327,7 +327,7 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     // and callability is opt-in via `require-symbol`.
     if v.env.call("symbolp", (v,))?.is_not_nil() {
         let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
-        return Ok(commands::LispArg::Symbol { name, keyword: false });
+        return Ok(commands::BridgeValue::Symbol { name, keyword: false });
     }
     // A Lisp function (symbol with a function cell, lambda, closure,
     // subr, or byte-compiled object) is registered Lisp-side in
@@ -346,11 +346,11 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     // crate doesn't expose" pattern already used above for `integerp'.
     if v.env.call("functionp", (v,))?.is_not_nil() {
         let handle: u64 = v.env.call("jvm--register-callback", (v,))?.into_rust()?;
-        return Ok(commands::LispArg::Callback(handle));
+        return Ok(commands::BridgeValue::Callback(handle));
     }
     // Anything else reaching this point (a vector, hash-table, or other
     // unsupported value) is not a value this bridge knows how to marshal.
-    // Earlier code silently treated it as `LispArg::True`, which could mask
+    // Earlier code silently treated it as `BridgeValue::True`, which could mask
     // real caller bugs (e.g. accidentally passing a vector where a number
     // was intended would silently become Java `true`) -- signal a clear
     // error instead.

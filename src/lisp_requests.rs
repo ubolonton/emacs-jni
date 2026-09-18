@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use emacs::{Env, GlobalRef, IntoLisp, Result as EmacsResult, Value};
 
-use crate::commands::{Cmd, LispArg, LispReplyValue};
+use crate::commands::{Cmd, BridgeValue, LispOutcome};
 use crate::{channel, protocol, worker};
 
 /// One value crossing Clojure → Lisp — an `apply` receiver or argument, or
@@ -25,7 +25,7 @@ use crate::{channel, protocol, worker};
 /// thread (`shim::object_to_lisp_request_arg`). See spec "Argument
 /// conversion".
 #[derive(Debug)]
-pub enum LispRequestArg {
+pub enum LispInput {
     /// A `LispObject`, carried by its `ptr` — bound to a `Value` on the
     /// main thread, never freed here (see `borrow`).
     Obj(i64),
@@ -34,11 +34,11 @@ pub enum LispRequestArg {
     /// interned with a leading `:`.
     Symbol { name: String, keyword: bool },
     /// A scalar or other-JVM-object argument, already reduced to a
-    /// `LispArg` the same way an ordinary `jvm-call` argument would be
-    /// (reuses `marshal::jvm_value_to_lisp_arg`) — `LispArg::Callback`
+    /// `BridgeValue` the same way an ordinary `jvm-call` argument would be
+    /// (reuses `marshal::jvm_value_to_lisp_arg`) — `BridgeValue::Callback`
     /// never appears here (that variant is only ever produced from the
     /// Lisp-to-Java direction in `lib.rs`'s `lisp_value_to_arg`).
-    Scalar(LispArg),
+    Scalar(BridgeValue),
 }
 
 /// A single request from a JVM thread to run one `Env` op on the main
@@ -49,10 +49,10 @@ pub enum LispRequestArg {
 #[derive(Debug)]
 pub enum LispRequest {
     Intern { id: u64, name: String },
-    Apply { id: u64, f: LispRequestArg, args: Vec<LispRequestArg> },
-    TypeOf { id: u64, arg: LispRequestArg },
-    IsNotNil { id: u64, arg: LispRequestArg },
-    Eq { id: u64, a: LispRequestArg, b: LispRequestArg },
+    Apply { id: u64, f: LispInput, args: Vec<LispInput> },
+    TypeOf { id: u64, arg: LispInput },
+    IsNotNil { id: u64, arg: LispInput },
+    Eq { id: u64, a: LispInput, b: LispInput },
     Prin1 { id: u64, ptr: i64 },
     FreeRef { ptr: i64 },
 }
@@ -104,59 +104,59 @@ fn borrow<'e>(env: &'e Env, ptr: i64) -> Value<'e> {
 
 /// Converts one already-classified apply argument to a real `Value`,
 /// mirroring spec "Argument conversion" for the main-thread side.
-pub(crate) fn arg_to_value<'e>(env: &'e Env, arg: &LispRequestArg) -> EmacsResult<Value<'e>> {
+pub(crate) fn arg_to_value<'e>(env: &'e Env, arg: &LispInput) -> EmacsResult<Value<'e>> {
     match arg {
-        LispRequestArg::Obj(ptr) => Ok(borrow(env, *ptr)),
+        LispInput::Obj(ptr) => Ok(borrow(env, *ptr)),
         // A keyword interns with its leading `:`; a plain symbol by name.
         // `env.intern` uses the global obarray, so the result round-trips
-        // `eq`-stably back to a Clojure symbol via `value_to_reply`.
-        LispRequestArg::Symbol { name, keyword } => {
+        // `eq`-stably back to a Clojure symbol via `value_to_outcome`.
+        LispInput::Symbol { name, keyword } => {
             if *keyword {
                 env.intern(&format!(":{name}"))
             } else {
                 env.intern(name)
             }
         }
-        LispRequestArg::Scalar(scalar) => lisp_arg_to_value(env, scalar),
+        LispInput::Scalar(scalar) => bridge_value_to_value(env, scalar),
     }
 }
 
-/// Converts a marshalled `LispArg` to a real Lisp `Value` on the main thread.
+/// Converts a marshalled `BridgeValue` to a real Lisp `Value` on the main thread.
 ///
 /// Shared by the Lisp-access apply path (`arg_to_value`'s `Scalar` arm) and
 /// the synchronous `jvm--call-direct` return path (`lib.rs`), which turns the
-/// `LispArg` `jvm_thread::call_direct` produced into the value the defun
+/// `BridgeValue` `jvm_thread::call_direct` produced into the value the defun
 /// returns — the direct-call equivalent of the async path's sexp round trip
 /// through `marshal::lisp_arg_to_sexp` + Lisp's reader.
-pub fn lisp_arg_to_value<'e>(env: &'e Env, arg: &LispArg) -> EmacsResult<Value<'e>> {
+pub fn bridge_value_to_value<'e>(env: &'e Env, arg: &BridgeValue) -> EmacsResult<Value<'e>> {
     match arg {
-        LispArg::Nil => ().into_lisp(env),
-        LispArg::True => true.into_lisp(env),
-        LispArg::Int(n) => n.into_lisp(env),
-        LispArg::Float(f) => f.into_lisp(env),
+        BridgeValue::Nil => ().into_lisp(env),
+        BridgeValue::True => true.into_lisp(env),
+        BridgeValue::Int(n) => n.into_lisp(env),
+        BridgeValue::Float(f) => f.into_lisp(env),
         // Emacs's own reader parses an arbitrary-precision decimal
         // string into a bignum when it doesn't fit a fixnum — reusing
         // it here avoids reimplementing bignum construction.
-        LispArg::BigInt(digits) => env.call("string-to-number", (digits.as_str(),)),
-        LispArg::Str(s) => s.as_str().into_lisp(env),
+        BridgeValue::BigInt(digits) => env.call("string-to-number", (digits.as_str(),)),
+        BridgeValue::Str(s) => s.as_str().into_lisp(env),
         // Round-trips through the same `jvm--wrap-handle` primitive an
         // ordinary `call-done`/`invoke` result does, rather than
         // hand-rolling a second "build a JvmHandle user-ptr" path.
-        LispArg::Object(handle) => env.call("jvm--wrap-handle", (*handle as i64,)),
+        BridgeValue::Object(handle) => env.call("jvm--wrap-handle", (*handle as i64,)),
         // Intern on the main thread, mirroring the `Intern` request
         // (`arg_to_value`): a keyword takes its leading `:`, a plain symbol
         // its bare name. `env.intern` uses the global obarray, so the result
         // is `eq`-stable.
-        LispArg::Symbol { name, keyword } => {
+        BridgeValue::Symbol { name, keyword } => {
             if *keyword {
                 env.intern(&format!(":{name}"))
             } else {
                 env.intern(name)
             }
         }
-        LispArg::Callback(_) => unreachable!(
+        BridgeValue::Callback(_) => unreachable!(
             "neither a Lisp-access apply argument nor a JVM-call return value is ever \
-             classified as LispArg::Callback -- Callback is only produced on the \
+             classified as BridgeValue::Callback -- Callback is only produced on the \
              Lisp-to-Java argument direction (see lib.rs's lisp_value_to_arg)"
         ),
     }
@@ -164,8 +164,8 @@ pub fn lisp_arg_to_value<'e>(env: &'e Env, arg: &LispArg) -> EmacsResult<Value<'
 
 /// Sends a `Cmd::LispReply` for ID. An `Err` is converted to a `Signal`
 /// or `Throw` reply via `error_to_reply` (marshaling the signal symbol/
-/// data or throw tag/value through `value_to_reply`).
-fn reply(env: &Env, id: u64, result: EmacsResult<LispReplyValue>) {
+/// data or throw tag/value through `value_to_outcome`).
+fn reply(env: &Env, id: u64, result: EmacsResult<LispOutcome>) {
     let value = match result {
         Ok(v) => v,
         Err(e) => error_to_reply(env, e),
@@ -173,22 +173,22 @@ fn reply(env: &Env, id: u64, result: EmacsResult<LispReplyValue>) {
     let _ = worker::send_command(Cmd::LispReply { id, value });
 }
 
-/// Converts an `emacs::Error` into a `LispReplyValue::{Signal,Throw}`. A
+/// Converts an `emacs::Error` into a `LispOutcome::{Signal,Throw}`. A
 /// `Signal`/`Throw` `ErrorKind` carries the real symbol/data or tag/value
 /// (each a `TempValue` bound with this `Env` -- sound here because `reply`
 /// runs on the main thread with the `Env` the failing call used). Anything
 /// else (a Rust-internal error, or a marshaling failure while building the
 /// nested values) collapses to a `Signal` whose symbol is `error` and
 /// whose data is the formatted message string.
-fn error_to_reply(env: &Env, e: emacs::Error) -> LispReplyValue {
+fn error_to_reply(env: &Env, e: emacs::Error) -> LispOutcome {
     use emacs::ErrorKind;
-    let boxed = |r: EmacsResult<LispReplyValue>| r.ok().map(Box::new);
+    let boxed = |r: EmacsResult<LispOutcome>| r.ok().map(Box::new);
     match e.downcast_ref::<ErrorKind>() {
         Some(ErrorKind::Signal { symbol, data }) => {
-            let s = boxed(value_to_reply(env, unsafe { symbol.value(env) }));
-            let d = boxed(value_to_reply(env, unsafe { data.value(env) }));
+            let s = boxed(value_to_outcome(env, unsafe { symbol.value(env) }));
+            let d = boxed(value_to_outcome(env, unsafe { data.value(env) }));
             match (s, d) {
-                (Some(symbol), Some(data)) => LispReplyValue::Signal { symbol, data },
+                (Some(symbol), Some(data)) => LispOutcome::Signal { symbol, data },
                 // One side may have marshaled to a `Ptr` (already `box_value`d
                 // a `GlobalRef`) while the other failed. That surviving box is
                 // dropped here, so free its ref first to avoid a leak.
@@ -200,10 +200,10 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispReplyValue {
             }
         }
         Some(ErrorKind::Throw { tag, value }) => {
-            let t = boxed(value_to_reply(env, unsafe { tag.value(env) }));
-            let v = boxed(value_to_reply(env, unsafe { value.value(env) }));
+            let t = boxed(value_to_outcome(env, unsafe { tag.value(env) }));
+            let v = boxed(value_to_outcome(env, unsafe { value.value(env) }));
             match (t, v) {
-                (Some(tag), Some(value)) => LispReplyValue::Throw { tag, value },
+                (Some(tag), Some(value)) => LispOutcome::Throw { tag, value },
                 (t, v) => {
                     free_reply_ptr(env, t);
                     free_reply_ptr(env, v);
@@ -220,9 +220,9 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispReplyValue {
 /// already ran `box_value`) is discarded instead of being handed to Java. No
 /// Java `LispObject`/Cleaner was ever created for this ptr, so this is the
 /// one and only free of it. A `None` or non-`Ptr` value is a no-op.
-fn free_reply_ptr(env: &Env, v: Option<Box<LispReplyValue>>) {
+fn free_reply_ptr(env: &Env, v: Option<Box<LispOutcome>>) {
     if let Some(b) = v {
-        if let LispReplyValue::Ptr(ptr) = *b {
+        if let LispOutcome::Ptr(ptr) = *b {
             let gref = unsafe { Box::from_raw(ptr as *mut GlobalRef) };
             let _ = gref.free(env);
         }
@@ -234,10 +234,10 @@ fn free_reply_ptr(env: &Env, v: Option<Box<LispReplyValue>>) {
 /// Divergence from spec §2 by intent: `data` is a bare string, not a
 /// one-element Lisp list -- this path has no `Env` to build a list and fires
 /// only for Rust-internal errors, never a genuine Lisp signal.
-fn fallback_signal(message: &str) -> LispReplyValue {
-    LispReplyValue::Signal {
-        symbol: Box::new(LispReplyValue::Symbol { name: "error".to_string(), keyword: false }),
-        data: Box::new(LispReplyValue::Str(message.to_string())),
+fn fallback_signal(message: &str) -> LispOutcome {
+    LispOutcome::Signal {
+        symbol: Box::new(LispOutcome::Symbol { name: "error".to_string(), keyword: false }),
+        data: Box::new(LispOutcome::Str(message.to_string())),
     }
 }
 
@@ -247,27 +247,27 @@ fn fallback_signal(message: &str) -> LispReplyValue {
 /// Clojure `nil` and the symbol `t` becomes `true`, so a Lisp predicate's
 /// result is usable directly in a Clojure conditional. The scalar set and
 /// its Java shapes mirror the `jvm-call` return-marshalling table.
-fn value_to_reply(env: &Env, value: Value) -> EmacsResult<LispReplyValue> {
+fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
     if !value.is_not_nil() {
-        return Ok(LispReplyValue::Nil);
+        return Ok(LispOutcome::Nil);
     }
     if env.call("eq", (value, env.intern("t")?))?.is_not_nil() {
-        return Ok(LispReplyValue::Bool(true));
+        return Ok(LispOutcome::Bool(true));
     }
     if env.call("stringp", (value,))?.is_not_nil() {
-        return Ok(LispReplyValue::Str(value.into_rust::<String>()?));
+        return Ok(LispOutcome::Str(value.into_rust::<String>()?));
     }
     if env.call("floatp", (value,))?.is_not_nil() {
-        return Ok(LispReplyValue::Float(value.into_rust::<f64>()?));
+        return Ok(LispOutcome::Float(value.into_rust::<f64>()?));
     }
     if env.call("integerp", (value,))?.is_not_nil() {
         // A fixnum fits an i64; a bignum does not, so render it to its
         // decimal string and rebuild it as a BigInteger on the JVM side.
         if env.call("fixnump", (value,))?.is_not_nil() {
-            return Ok(LispReplyValue::Int(value.into_rust::<i64>()?));
+            return Ok(LispOutcome::Int(value.into_rust::<i64>()?));
         }
         let digits = env.call("number-to-string", (value,))?.into_rust::<String>()?;
-        return Ok(LispReplyValue::BigInt(digits));
+        return Ok(LispOutcome::BigInt(digits));
     }
     // A keyword's `symbol-name` includes the leading `:`; carry the bare
     // name. `keywordp` in Emacs already implies interned, so every keyword
@@ -275,7 +275,7 @@ fn value_to_reply(env: &Env, value: Value) -> EmacsResult<LispReplyValue> {
     if env.call("keywordp", (value,))?.is_not_nil() {
         let full = env.call("symbol-name", (value,))?.into_rust::<String>()?;
         let name = full.strip_prefix(':').unwrap_or(&full).to_string();
-        return Ok(LispReplyValue::Symbol { name, keyword: true });
+        return Ok(LispOutcome::Symbol { name, keyword: true });
     }
     if env.call("symbolp", (value,))?.is_not_nil() {
         // Only an interned symbol (one `eq` to `intern-soft` of its own
@@ -286,10 +286,10 @@ fn value_to_reply(env: &Env, value: Value) -> EmacsResult<LispReplyValue> {
         let name = env.call("symbol-name", (value,))?;
         let interned = env.call("intern-soft", (name,))?;
         if env.call("eq", (value, interned))?.is_not_nil() {
-            return Ok(LispReplyValue::Symbol { name: name.into_rust::<String>()?, keyword: false });
+            return Ok(LispOutcome::Symbol { name: name.into_rust::<String>()?, keyword: false });
         }
     }
-    Ok(LispReplyValue::Ptr(box_value(value)))
+    Ok(LispOutcome::Ptr(box_value(value)))
 }
 
 /// Drains the request queue and runs each request's `Env` op, in the
@@ -340,35 +340,35 @@ pub fn service(env: &Env) -> EmacsResult<()> {
 /// Runs a reply-bearing request's actual `Env` op (everything except
 /// `FreeRef`). Shared by `service` (async: the worker returns the reply over
 /// the channel) and `compute_reply` (the reentrant direct path).
-fn run_request_value(env: &Env, request: &LispRequest) -> EmacsResult<LispReplyValue> {
+fn run_request_value(env: &Env, request: &LispRequest) -> EmacsResult<LispOutcome> {
     match request {
-        // Routed through `value_to_reply` like every other result: an
+        // Routed through `value_to_outcome` like every other result: an
         // interned symbol becomes a Clojure symbol, a keyword a keyword, and
         // `intern "nil"`/`"t"` stay `nil`/`true`.
-        LispRequest::Intern { name, .. } => env.intern(name).and_then(|v| value_to_reply(env, v)),
+        LispRequest::Intern { name, .. } => env.intern(name).and_then(|v| value_to_outcome(env, v)),
         LispRequest::Apply { f, args, .. } => {
             let f_value = arg_to_value(env, f)?;
             let mut arg_values = Vec::with_capacity(args.len());
             for arg in args {
                 arg_values.push(arg_to_value(env, arg)?);
             }
-            value_to_reply(env, f_value.call(&arg_values)?)
+            value_to_outcome(env, f_value.call(&arg_values)?)
         }
         LispRequest::TypeOf { arg, .. } => arg_to_value(env, arg)
             .and_then(|v| env.type_of(v))
-            .and_then(|v| value_to_reply(env, v)),
+            .and_then(|v| value_to_outcome(env, v)),
         LispRequest::IsNotNil { arg, .. } => {
-            arg_to_value(env, arg).map(|v| LispReplyValue::Bool(v.is_not_nil()))
+            arg_to_value(env, arg).map(|v| LispOutcome::Bool(v.is_not_nil()))
         }
         LispRequest::Eq { a, b, .. } => {
             let av = arg_to_value(env, a)?;
             let bv = arg_to_value(env, b)?;
-            Ok(LispReplyValue::Bool(env.call("eq", (av, bv))?.is_not_nil()))
+            Ok(LispOutcome::Bool(env.call("eq", (av, bv))?.is_not_nil()))
         }
         LispRequest::Prin1 { ptr, .. } => env
             .call("prin1-to-string", (borrow(env, *ptr),))
             .and_then(|v| v.into_rust::<String>())
-            .map(LispReplyValue::Str),
+            .map(LispOutcome::Str),
         LispRequest::FreeRef { .. } => unreachable!(
             "FreeRef has no reply: it is handled inline in `service`, and never takes the \
              reentrant direct path (a Cleaner thread pushes no `reentry` scope)"
@@ -376,7 +376,7 @@ fn run_request_value(env: &Env, request: &LispRequest) -> EmacsResult<LispReplyV
     }
 }
 
-/// The single `LispReplyValue` a reentrant direct-path request produces: the
+/// The single `LispOutcome` a reentrant direct-path request produces: the
 /// `run_request_value` result, with a Lisp signal/throw folded into a
 /// `Signal`/`Throw` reply exactly as the async `reply` path does via
 /// `error_to_reply`. Called by the `Lisp.*` natives (`shim.rs`) when the
@@ -385,7 +385,7 @@ fn run_request_value(env: &Env, request: &LispRequest) -> EmacsResult<LispReplyV
 /// main thread). The native then turns this into a Java object or a thrown
 /// `LispNonLocalExit` (`jvm_thread::build_lisp_reply_object` /
 /// `throw_non_local_exit`).
-pub fn compute_reply(env: &Env, request: &LispRequest) -> LispReplyValue {
+pub fn compute_reply(env: &Env, request: &LispRequest) -> LispOutcome {
     match run_request_value(env, request) {
         Ok(v) => v,
         Err(e) => error_to_reply(env, e),
@@ -399,9 +399,9 @@ mod tests {
     #[test]
     fn fallback_signal_is_error_symbol_with_message() {
         match fallback_signal("boom") {
-            LispReplyValue::Signal { symbol, data } => {
-                assert!(matches!(*symbol, LispReplyValue::Symbol { ref name, keyword: false } if name == "error"));
-                assert!(matches!(*data, LispReplyValue::Str(ref s) if s == "boom"));
+            LispOutcome::Signal { symbol, data } => {
+                assert!(matches!(*symbol, LispOutcome::Symbol { ref name, keyword: false } if name == "error"));
+                assert!(matches!(*data, LispOutcome::Str(ref s) if s == "boom"));
             }
             _ => panic!("expected Signal"),
         }
@@ -440,11 +440,11 @@ mod tests {
     /// that same order so the borrow is never dangling when the op runs.
     #[test]
     fn apply_enqueued_before_freeref_for_the_same_ptr_drains_before_it() {
-        enqueue(LispRequest::Apply { id: 1, f: LispRequestArg::Obj(99), args: vec![] });
+        enqueue(LispRequest::Apply { id: 1, f: LispInput::Obj(99), args: vec![] });
         enqueue(LispRequest::FreeRef { ptr: 99 });
         let drained = drain();
         assert_eq!(drained.len(), 2);
-        assert!(matches!(drained[0], LispRequest::Apply { f: LispRequestArg::Obj(99), .. }));
+        assert!(matches!(drained[0], LispRequest::Apply { f: LispInput::Obj(99), .. }));
         assert!(matches!(drained[1], LispRequest::FreeRef { ptr: 99 }));
     }
 

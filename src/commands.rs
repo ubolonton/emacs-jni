@@ -14,7 +14,7 @@ pub enum CallTarget {
 /// as marshalling is implemented; keep this open to growth, don't treat
 /// this exact variant set as final).
 #[derive(Debug, Clone)]
-pub enum LispArg {
+pub enum BridgeValue {
     Nil,
     True,
     Int(i64),
@@ -39,12 +39,12 @@ pub enum LispArg {
 /// with — built by `lisp_requests::service` (which runs the actual `Env`
 /// op) and consumed by `jvm_thread::handle_lisp_reply` (which turns it
 /// into a real Java value on the worker's own JNI attachment). Mirrors
-/// `handle_invoke_reply`'s `ok`/`LispArg` pair, but as a single enum since
+/// `handle_invoke_reply`'s `ok`/`BridgeValue` pair, but as a single enum since
 /// a Lisp-access reply's success shape varies by request kind (a
 /// `LispObject` pointer, a `boolean`, or a `String`), unlike `invoke`'s
-/// reply, which is always a `LispArg`.
+/// reply, which is always a `BridgeValue`.
 #[derive(Debug)]
-pub enum LispReplyValue {
+pub enum LispOutcome {
     /// A boxed `emacs::GlobalRef` pointer — becomes a Java `LispObject`.
     /// Used for any result value that is not a scalar or string (symbols,
     /// conses, vectors, hash tables, ...).
@@ -68,9 +68,9 @@ pub enum LispReplyValue {
     /// `LispNonLocalExit(SIGNAL, symbol, data)`. `symbol` and `data` are
     /// nested, already-marshaled reply values (a symbol marker; the data
     /// list as a `LispObject`).
-    Signal { symbol: Box<LispReplyValue>, data: Box<LispReplyValue> },
+    Signal { symbol: Box<LispOutcome>, data: Box<LispOutcome> },
     /// A Lisp `throw` — `LispNonLocalExit(THROW, tag, value)`.
-    Throw { tag: Box<LispReplyValue>, value: Box<LispReplyValue> },
+    Throw { tag: Box<LispOutcome>, value: Box<LispOutcome> },
 }
 
 #[derive(Debug)]
@@ -83,15 +83,15 @@ pub enum Cmd {
     Pause,
     Stop,
     LoadJar { id: u64, path: String },
-    Call { id: u64, target: CallTarget, member: String, args: Vec<LispArg> },
-    InvokeReply { id: u64, ok: bool, result: LispArg },
+    Call { id: u64, target: CallTarget, member: String, args: Vec<BridgeValue> },
+    InvokeReply { id: u64, ok: bool, result: BridgeValue },
     ReleaseRef { handle: u64 },
     /// Completes a pending Lisp-access native's reply future (`intern`,
     /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by
     /// `jvm--service-lisp-requests` (`lisp_requests::service`) after
     /// running the corresponding `Env` op on the main thread. See
     /// `jvm_thread::handle_lisp_reply`.
-    LispReply { id: u64, value: LispReplyValue },
+    LispReply { id: u64, value: LispOutcome },
     #[cfg(feature = "test-support")]
     TestPanic,
 }
