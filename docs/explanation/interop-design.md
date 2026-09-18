@@ -168,8 +168,12 @@ main-thread native, which is why every `LispObject` operation is
 serviced on the Emacs main thread (see
 [Architecture](architecture.md#why-clojure-calls-into-lisp-run-on-the-emacs-main-thread)).
 This mirrors the other object direction — a JVM object returned to Lisp,
-which Lisp likewise holds as an opaque `user-ptr` token for a reference
-only the JVM side can use.
+which Lisp holds as an opaque `user-ptr` wrapping an `Arc`-shared `Global`
+reference only the JVM side can use. Neither direction keeps a Rust-side
+lookup table: each token owns its reference directly. They differ only in
+what the token holds — a boxed `GlobalRef` pointer for a `LispObject`, an
+`Arc<Global>` for a JVM object — and which thread frees it: the Emacs main
+thread for a `LispObject`, the JVM worker thread for a JVM object.
 
 There is no Rust-side handle table for a `LispObject`: the pointer is
 the reference's sole owner, so its lifetime ends when the one Java

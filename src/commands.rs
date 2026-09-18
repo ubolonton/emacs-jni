@@ -1,11 +1,12 @@
+use crate::handles::JvmObject;
+
 #[derive(Debug, Clone)]
 pub enum CallTarget {
     /// Fully-qualified class name, for a static call or `member ==
     /// "<init>"` construction.
     ClassName(String),
-    /// A previously wrapped JVM object, by its handle in the Rust-side
-    /// GlobalRef table (Task 3).
-    Object(u64),
+    /// A previously wrapped JVM object, by its live shared reference.
+    Object(JvmObject),
 }
 
 /// A single marshalled argument or return value, in Rust form (not yet
@@ -23,8 +24,9 @@ pub enum BridgeValue {
     /// spec "Value marshalling" > "Bignum mechanism".
     BigInt(String),
     Str(String),
-    /// A previously wrapped JVM object, by handle (Task 3).
-    Object(u64),
+    /// A wrapped JVM object, by its live shared reference (Item 6 — no
+    /// handle table).
+    Object(JvmObject),
     /// A Lisp function, by its handle in the Lisp-side function table
     /// (Task 6) — auto-wrapped as `LispFunction` when this crosses into
     /// Java (Task 6).
@@ -95,8 +97,10 @@ pub enum Cmd {
         id: u64,
         outcome: LispOutcome,
     },
+    /// A Lisp `user-ptr` wrapping a JVM object was GC'd; drop its reference
+    /// on the attached worker thread (see `handles::JvmHandle::Drop`).
     ReleaseRef {
-        handle: u64,
+        object: JvmObject,
     },
     /// Completes a pending Lisp-access native's reply future (`intern`,
     /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by

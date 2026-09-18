@@ -216,10 +216,11 @@ pub fn bridge_value_to_value<'e>(env: &'e Env, arg: &BridgeValue) -> EmacsResult
         // it here avoids reimplementing bignum construction.
         BridgeValue::BigInt(digits) => env.call("string-to-number", (digits.as_str(),)),
         BridgeValue::Str(s) => s.as_str().into_lisp(env),
-        // Round-trips through the same `jvm--wrap-handle` primitive an
-        // ordinary `call-done`/`invoke` result does, rather than
-        // hand-rolling a second "build a JvmHandle user-ptr" path.
-        BridgeValue::Object(handle) => env.call("jvm--wrap-handle", (*handle as i64,)),
+        // Build the `JvmHandle` `user-ptr` directly from the shared
+        // reference — no wire, no table, no `jvm--wrap-handle` round trip.
+        BridgeValue::Object(object) => {
+            Box::new(crate::handles::JvmHandle(object.clone())).into_lisp(env)
+        }
         // Intern on the main thread, mirroring the `Intern` request
         // (`arg_to_value`): a keyword takes its leading `:`, a plain symbol
         // its bare name. `env.intern` uses the global obarray, so the result

@@ -149,7 +149,7 @@ fn parse_call_target(target: Value) -> Result<commands::CallTarget> {
         Ok(commands::CallTarget::ClassName(class_name))
     } else {
         let h: &handles::JvmHandle = target.into_rust()?;
-        Ok(commands::CallTarget::Object(h.0))
+        Ok(commands::CallTarget::Object(h.0.clone()))
     }
 }
 
@@ -207,17 +207,6 @@ fn jvm_call_direct<'e>(
         }
         Err(jvm_thread::DirectError::Jni(e)) => env.signal(jvm_error, (e.to_string(),)),
     }
-}
-
-/// Constructs a `JvmHandle` `user-ptr` from a raw handle integer already
-/// produced by the native inbound drain (`lisp_requests::bridge_value_to_
-/// value`). The Rust-side handle table entry itself already exists by the
-/// time this runs (it was populated by `marshal::jvm_value_to_lisp_arg`
-/// when the value first crossed from Java to Lisp); this just gives Lisp a
-/// `user-ptr` wrapper for the handle number it already received.
-#[defun(mod_in_name = false, name = "jvm--wrap-handle")]
-fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
-    Ok(Box::new(handles::JvmHandle(handle)))
 }
 
 /// Drains the inbound queue (`lisp_requests`) and runs each message's `Env`
@@ -327,7 +316,7 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::BridgeValue> {
         return Ok(commands::BridgeValue::Str(s));
     }
     if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
-        return Ok(commands::BridgeValue::Object(h.0));
+        return Ok(commands::BridgeValue::Object(h.0.clone()));
     }
     // `t` has no useful into_rust::<T>() scalar conversion (there's no
     // `FromLisp` impl for `bool` — Emacs Lisp has no dedicated boolean

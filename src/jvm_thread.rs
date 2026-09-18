@@ -72,17 +72,15 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 false
             }
             // Handled inline, like `Cmd::InvokeReply` — dropping a
-            // `GlobalRef` is a single cheap JNI call (`DeleteGlobalRef`),
-            // not an arbitrary user method, so it doesn't need its own
-            // thread (spec "Worker thread role"). This is the other half
-            // of `handles::JvmHandle::Drop`'s round trip: Lisp's GC
-            // collected a `user-ptr` wrapping a JVM object, which posted
-            // this command instead of releasing the ref directly (that
-            // `Drop` may run on a thread with no JNI attachment at all —
-            // see its own doc comment), and now the worker thread (which
-            // *is* attached) actually drops it.
-            Cmd::ReleaseRef { handle } => {
-                crate::handles::release(handle);
+            // `GlobalRef` is one cheap JNI call (`DeleteGlobalRef`), not an
+            // arbitrary user method (spec "Worker thread role"). Lisp's GC
+            // collected a `user-ptr` wrapping a JVM object; its `Drop`
+            // handed the shared reference here (its own `Drop` may run on a
+            // thread with no JNI attachment). Dropping this last `Arc` runs
+            // `Global::Drop`'s `DeleteGlobalRef` on this attached worker
+            // thread.
+            Cmd::ReleaseRef { object } => {
+                std::mem::drop(object);
                 false
             }
             // Handled inline, same reasoning as `Cmd::InvokeReply`: completing
@@ -834,10 +832,8 @@ pub(crate) fn resolve_and_invoke(
             };
             (class, None)
         }
-        crate::commands::CallTarget::Object(handle) => {
-            let global = crate::handles::resolve(*handle)
-                .ok_or_else(|| marshal_error(&format!("unknown JVM object handle {handle}")))?;
-            let local = env.new_local_ref(global.as_obj())?;
+        crate::commands::CallTarget::Object(object) => {
+            let local = env.new_local_ref(object.0.as_obj())?;
             (env.get_object_class(&local)?, Some(local))
         }
     };

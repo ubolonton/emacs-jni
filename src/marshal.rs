@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use jni::objects::{JClass, JObject, JValueOwned};
 
 use crate::commands::BridgeValue;
-use crate::handles;
+use crate::handles::JvmObject;
 
 /// Converts ARG to a JNI value matching PARAM_TYPE's actual declared type
 /// — see spec "Value marshalling": this is deliberately type-directed,
@@ -69,19 +71,10 @@ pub fn lisp_arg_to_jvalue<'local>(
             let jstr = env.new_string(s)?;
             Ok(JValueOwned::Object(jstr.into()))
         }
-        // `handles::resolve` returns `Option<Arc<Global<JObject<'static>>>>`
-        // (Task 3's corrected signature, verified against the committed
-        // `src/handles.rs` — jni 0.22.4's `Global` has no `Clone` impl, so
-        // the table stores `Arc`-wrapped `Global`s instead). `Arc` derefs
-        // to `Global<JObject<'static>>` the same way a bare `Global` would,
-        // so `.as_obj()` works unchanged.
-        (BridgeValue::Object(handle), _) => match handles::resolve(*handle) {
-            Some(global) => {
-                let local = env.new_local_ref(global.as_obj())?;
-                Ok(JValueOwned::Object(local))
-            }
-            None => Err(marshal_error(&format!("unknown JVM object handle {handle}"))),
-        },
+        (BridgeValue::Object(object), _) => {
+            let local = env.new_local_ref(object.0.as_obj())?;
+            Ok(JValueOwned::Object(local))
+        }
         // The handle here already denotes a live entry in Lisp's own
         // `jvm--lisp-callbacks' table (`lisp_value_to_arg` in `lib.rs`
         // registered it there before this `BridgeValue` was ever built —
@@ -322,10 +315,10 @@ where
 
 /// Converts a JNI return value back to a `BridgeValue`. Non-scalar returns
 /// (any Java object that isn't null/Boolean/a numeric wrapper/String/
-/// BigInteger) get wrapped via `handles::register` — this is the
-/// mechanism behind "wrap a JVM object as a Lisp value" whenever it
-/// happens as a side effect of a method's return value, not just via an
-/// explicit call.
+/// BigInteger) are wrapped as a fresh `Global` reference carried directly
+/// (Item 6 — no handle table) — this is the mechanism behind "wrap a JVM
+/// object as a Lisp value" whenever it happens as a side effect of a
+/// method's return value, not just via an explicit call.
 pub fn jvm_value_to_lisp_arg<'local>(
     env: &mut jni::Env<'local>,
     value: JValueOwned<'local>,
@@ -418,8 +411,7 @@ fn object_to_lisp_arg<'local>(
     }
 
     let global = env.new_global_ref(&obj)?;
-    let handle = handles::register(global);
-    Ok(BridgeValue::Object(handle))
+    Ok(BridgeValue::Object(JvmObject(Arc::new(global))))
 }
 
 #[cfg(test)]
@@ -429,10 +421,15 @@ mod jvm_tests {
     use jni::JNIVersion;
 
     /// jni-rs 0.22.4's `JavaVM::new` does a racy check-then-create against
-    /// its process-global singleton (see `src/handles.rs`'s
-    /// `create_test_jvm` for the full explanation) -- mirrored here rather
-    /// than shared, per Task 3's report noting a shared helper is a
-    /// candidate for later cleanup, not required now.
+    /// its process-global singleton, with no synchronization of its own: if
+    /// this test's `JNI_CreateJavaVM` call collides with another
+    /// JVM-creating test in this crate running concurrently under `cargo
+    /// test`'s default parallelism, the loser gets
+    /// `Create(JniCall(AlreadyCreated))` even though a JVM now genuinely
+    /// exists -- retrying picks up the winner's now-populated
+    /// `JavaVM::singleton()` on the next attempt. Mirrored here rather than
+    /// shared, per Task 3's report noting a shared helper is a candidate
+    /// for later cleanup, not required now.
     fn create_test_jvm() -> JavaVM {
         let mut last_err = None;
         for _ in 0..20 {

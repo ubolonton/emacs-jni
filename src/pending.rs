@@ -52,7 +52,7 @@ mod tests {
     use jni::JNIVersion;
 
     /// Retries against jni-rs 0.22.4's racy check-then-create singleton --
-    /// see `handles.rs`'s `create_test_jvm` for the full explanation. This
+    /// see `marshal.rs`'s `create_test_jvm` for the full explanation. This
     /// test used to create its JVM directly; with more JVM-creating tests
     /// now running in this same binary (`shim.rs`), the race became
     /// reliably hit rather than a rare fluke.
