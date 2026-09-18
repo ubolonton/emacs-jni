@@ -350,6 +350,22 @@ pub(crate) fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutco
 /// non-Lisp-access variants have no such ordering requirement among
 /// themselves, but still run in FIFO order for the same reason `Log`/
 /// `Status` lines must stay in the order they were produced.
+///
+/// One drained `Vec` can hold several unrelated messages coalesced from
+/// multiple wakeups (`drain`'s own doc comment). Each message here must
+/// therefore be fault-isolated from its siblings: the six non-Lisp-access
+/// arms call an Elisp helper that funcalls arbitrary user code
+/// (`jvm--resolve-call`/`jvm--resolve-invoke`/`jvm--resolve-load-jar` each
+/// funcall a user callback; `jvm--apply-status` runs `jvm-status-hook`), so
+/// that helper signalling is a NORMAL event, not a bug. Letting it
+/// propagate with `?` would abort this whole `for` loop and silently
+/// strand every later message in the same batch (already removed from
+/// `QUEUE`, never re-enqueued) — see review finding I1. `handle_message`
+/// is therefore called, not `?`-chained: its `Err` is logged and the loop
+/// moves on, mirroring the `FreeRef` arm's own log-and-continue error path
+/// below. The reply-bearing arms already isolate the same way, via
+/// `reply`/`error_to_reply` turning an `Err` into a Lisp signal/throw
+/// instead of propagating it.
 pub fn service_inbound(env: &Env) -> EmacsResult<()> {
     for req in drain() {
         match &req {
@@ -383,31 +399,70 @@ pub fn service_inbound(env: &Env) -> EmacsResult<()> {
                 let result = run_request_value(env, &req);
                 reply(env, id, result);
             }
-            Inbound::CallDone { id, ok, result, err } => {
-                let value = bridge_value_to_value(env, result)?;
-                env.call("jvm--resolve-call", (*id as i64, *ok, value, err.as_deref()))?;
-            }
-            Inbound::Invoke { id, handle, args } => {
-                let mut arg_values = Vec::with_capacity(args.len());
-                for arg in args {
-                    arg_values.push(bridge_value_to_value(env, arg)?);
+            Inbound::CallDone { .. }
+            | Inbound::Invoke { .. }
+            | Inbound::Release { .. }
+            | Inbound::Log { .. }
+            | Inbound::Status { .. }
+            | Inbound::LoadJarDone { .. } => {
+                if let Err(e) = handle_message(env, &req) {
+                    enqueue(Inbound::Log {
+                        level: "error".to_string(),
+                        text: format!("jvm--service-inbound: failed to handle {req:?}: {e}"),
+                    });
+                    channel::poke();
                 }
-                let args_list = env.list(&arg_values)?;
-                env.call("jvm--resolve-invoke", (*id as i64, *handle as i64, args_list))?;
-            }
-            Inbound::Release { handle } => {
-                env.call("jvm--drop-callback", (*handle as i64,))?;
-            }
-            Inbound::Log { level, text } => {
-                env.call("jvm--log-message", (level.as_str(), text.as_str()))?;
-            }
-            Inbound::Status { status, detail } => {
-                env.call("jvm--apply-status", (status.as_tag(), detail.as_deref()))?;
-            }
-            Inbound::LoadJarDone { id, ok, err } => {
-                env.call("jvm--resolve-load-jar", (*id as i64, *ok, err.as_deref()))?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Runs one of the six non-Lisp-access messages' `Env` op. Split out of
+/// `service_inbound` so its caller can catch an `Err` per-message instead
+/// of letting `?` propagate out of the drain loop and abort the rest of
+/// the batch — see `service_inbound`'s own doc comment and review finding
+/// I1.
+fn handle_message(env: &Env, request: &Inbound) -> EmacsResult<()> {
+    match request {
+        Inbound::CallDone { id, ok, result, err } => {
+            let value = bridge_value_to_value(env, result)?;
+            env.call("jvm--resolve-call", (*id as i64, *ok, value, err.as_deref()))?;
+        }
+        Inbound::Invoke { id, handle, args } => {
+            let mut arg_values = Vec::with_capacity(args.len());
+            for arg in args {
+                arg_values.push(bridge_value_to_value(env, arg)?);
+            }
+            let args_list = env.list(&arg_values)?;
+            env.call("jvm--resolve-invoke", (*id as i64, *handle as i64, args_list))?;
+        }
+        Inbound::Release { handle } => {
+            env.call("jvm--drop-callback", (*handle as i64,))?;
+        }
+        Inbound::Log { level, text } => {
+            env.call("jvm--log-message", (level.as_str(), text.as_str()))?;
+        }
+        Inbound::Status { status, detail } => {
+            env.call("jvm--apply-status", (status.as_tag(), detail.as_deref()))?;
+        }
+        Inbound::LoadJarDone { id, ok, err } => {
+            env.call("jvm--resolve-load-jar", (*id as i64, *ok, err.as_deref()))?;
+        }
+        // Only the six non-Lisp-access variants ever reach `handle_message`
+        // (see its one caller, `service_inbound`) -- match ergonomics still
+        // require a catch-all since this function's parameter type is the
+        // whole `Inbound` enum.
+        Inbound::FreeRef { .. }
+        | Inbound::Intern { .. }
+        | Inbound::Apply { .. }
+        | Inbound::TypeOf { .. }
+        | Inbound::IsNotNil { .. }
+        | Inbound::Eq { .. }
+        | Inbound::Prin1 { .. } => unreachable!(
+            "handle_message only ever receives one of the six non-Lisp-access variants -- \
+             see this function's own doc comment"
+        ),
     }
     Ok(())
 }

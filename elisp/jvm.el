@@ -71,17 +71,20 @@ docs/explanation/architecture.md).")
 (defun jvm--resolve-invoke (id handle args)
   "Funcall the callback registered for HANDLE with ARGS (already real Lisp
 values, converted on the Rust side -- see the comment above), and reply to
-the JVM with the result via `jvm--invoke-reply'. On a Lisp error,
-ERR is the real `(SYMBOL . DATA)' `condition-case' caught -- passed through
-as-is, not flattened into a string, so `jvm--invoke-reply' (`lib.rs') can
-marshal the real symbol/data into a `LispSignal' the JVM caller actually
-sees."
+the JVM with the result via `jvm--invoke-reply'. On a Lisp error or other
+signal (including `quit', e.g. `C-g' during the callback), ERR is the real
+`(SYMBOL . DATA)' `condition-case' caught -- passed through as-is, not
+flattened into a string, so `jvm--invoke-reply' (`lib.rs') can marshal the
+real symbol/data into a `LispSignal' the JVM caller actually sees. The
+handler condition is `t', not `error', so the pending JVM future always
+completes: `quit' is not a subtype of `error' and would otherwise escape
+`condition-case' uncaught, leaving the future waiting forever."
   (let ((fn (gethash handle jvm--lisp-callbacks)))
     (if (null fn)
         (jvm--invoke-reply id nil (cons 'error (list (format "no such callback handle %s" handle))))
       (condition-case err
           (jvm--invoke-reply id t (apply fn args))
-        (error (jvm--invoke-reply id nil err))))))
+        (t (jvm--invoke-reply id nil err))))))
 
 (defun jvm--resolve-load-jar (id ok err)
   "Resolve the pending `jvm-load-jar-async' callback for ID."

@@ -84,7 +84,7 @@ pub enum Cmd {
     ReleaseRef { handle: u64 },
     /// Completes a pending Lisp-access native's reply future (`intern`,
     /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by
-    /// `jvm--service-lisp-requests` (`lisp_requests::service`) after
+    /// `jvm--service-inbound` (`lisp_requests::service_inbound`) after
     /// running the corresponding `Env` op on the main thread. See
     /// `jvm_thread::handle_lisp_reply`.
     LispReply { id: u64, value: LispOutcome },
