@@ -216,16 +216,17 @@ fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
     Ok(Box::new(handles::JvmHandle(handle)))
 }
 
-/// Drains the Lisp-access request queue (`lisp_requests`) and runs each
-/// request's `Env` op on this (the main) thread — the module-primitive
-/// half of the built-in-Lisp-access design (see design spec, "Request/
-/// reply flow"). Called from `jvm--dispatch-message`'s `(lisp-request)`
-/// case (`elisp/jvm.el`), itself triggered by a JVM thread's
-/// `channel::send`-based wakeup after enqueuing a request (`shim.rs`'s
-/// `Lisp.*`/`LispRefReleaseNotifier` natives).
-#[defun(mod_in_name = false, name = "jvm--service-lisp-requests")]
-fn jvm_service_lisp_requests(env: &Env) -> Result<()> {
-    lisp_requests::service(env)
+/// Drains the inbound queue (`lisp_requests`) and runs each message's `Env`
+/// op on this (the main) thread — the module-primitive half of both the
+/// built-in-Lisp-access design (see design spec, "Request/reply flow") and,
+/// as of the marshalling-consolidation plan, every other JVM→Emacs message
+/// once its producer is migrated (Tasks 6-8). Called from `jvm--dispatch-
+/// message`'s `(lisp-request)` case (`elisp/jvm.el`), itself triggered by a
+/// JVM thread's `channel::send`-based wakeup after enqueuing a message
+/// (`shim.rs`'s `Lisp.*`/`LispRefReleaseNotifier` natives).
+#[defun(mod_in_name = false, name = "jvm--service-inbound")]
+fn jvm_service_inbound(env: &Env) -> Result<()> {
+    lisp_requests::service_inbound(env)
 }
 
 /// Replies to a pending JVM-initiated `invoke` request: RESULT is either

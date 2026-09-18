@@ -1,12 +1,24 @@
-//! The Rust-side half of "Clojure holds and manipulates Lisp values" (see
-//! design spec `docs/superpowers/specs/2026-09-08-clojure-lisp-access-design.md`).
+//! The single typed inbound queue for every JVM→Emacs message.
+//!
+//! Started (design spec
+//! `docs/superpowers/specs/2026-09-08-clojure-lisp-access-design.md`) as
+//! the Rust-side half of "Clojure holds and manipulates Lisp values" only;
+//! the marshalling-consolidation plan generalises it to carry every other
+//! JVM→Emacs message too (`CallDone`/`Invoke`/`Release`/`Log`/`Status`/
+//! `LoadJarDone`), migrated one at a time off the older text protocol
+//! (`protocol.rs` + `jvm--dispatch-message` in `elisp/jvm.el`).
 //!
 //! A JVM thread (a `Lisp.*` native method, `src/shim.rs`) never has an
 //! `emacs::Env` — that only exists on the Emacs main thread, during a
-//! module call. So a native method enqueues a `LispRequest` here and wakes
-//! Emacs up (`(lisp-request)`, over `channel::send`); `jvm--service-lisp-
-//! requests` (`lib.rs`) drains this queue on the main thread, via
-//! `service` below, and replies over the worker's `Cmd::LispReply`.
+//! module call. So a native method enqueues an `Inbound` here and wakes
+//! Emacs up (`(lisp-request)`, over `channel::send`); `jvm--service-
+//! inbound` (`lib.rs`) drains this queue on the main thread, via
+//! `service_inbound` below. The reply-bearing Lisp-access variants
+//! (`Intern`/`Apply`/`TypeOf`/`IsNotNil`/`Eq`/`Prin1`) reply over the
+//! worker's `Cmd::LispReply`; the other variants instead call an Elisp
+//! helper directly (`jvm--resolve-call`, `jvm--resolve-invoke`,
+//! `jvm--drop-callback`, `jvm--log-message`, `jvm--apply-status`,
+//! `jvm--resolve-load-jar`).
 //!
 //! No handle table: a `LispObject`'s `ptr` field IS `Box::into_raw` of its
 //! `emacs::GlobalRef` — this module only borrows it (`borrow`) or, for
@@ -18,6 +30,7 @@ use std::sync::Mutex;
 use emacs::{Env, GlobalRef, IntoLisp, Result as EmacsResult, Value};
 
 use crate::commands::{Cmd, BridgeValue, LispOutcome};
+use crate::status::Status;
 use crate::{channel, protocol, worker};
 
 /// One value crossing Clojure → Lisp — an `apply` receiver or argument, or
@@ -41,13 +54,16 @@ pub enum LispInput {
     Scalar(BridgeValue),
 }
 
-/// A single request from a JVM thread to run one `Env` op on the main
-/// thread. `FreeRef` carries no `id` and produces no reply (see spec
-/// "Request/reply flow"). `Prin1` alone keeps a raw `ptr`: it is
-/// `LispObject.prin1ToString`, so its receiver is always a real
-/// `LispObject`, never a symbol/scalar.
+/// A single message from a JVM thread to run one `Env` op on the main
+/// thread. The first seven variants are the original Lisp-access requests:
+/// `FreeRef` carries no `id` and produces no reply (see spec "Request/reply
+/// flow"); `Prin1` alone keeps a raw `ptr`: it is `LispObject.
+/// prin1ToString`, so its receiver is always a real `LispObject`, never a
+/// symbol/scalar. The remaining six variants generalise this queue to every
+/// other JVM→Emacs message (still produced by the older text protocol as of
+/// this task — see this module's doc comment).
 #[derive(Debug)]
-pub enum LispRequest {
+pub enum Inbound {
     Intern { id: u64, name: String },
     Apply { id: u64, f: LispInput, args: Vec<LispInput> },
     TypeOf { id: u64, arg: LispInput },
@@ -55,31 +71,67 @@ pub enum LispRequest {
     Eq { id: u64, a: LispInput, b: LispInput },
     Prin1 { id: u64, ptr: i64 },
     FreeRef { ptr: i64 },
+    /// A `jvm-call-async`/`jvm-new-async` call finished — mirrors
+    /// `protocol::call_done_message`'s shape exactly.
+    ///
+    /// No producer enqueues this yet (Task 6 flips `handle_call`'s
+    /// text-protocol send over to it); the `expect` only applies outside
+    /// `cfg(test)`, since this crate's own unit test constructs it (see
+    /// `new_inbound_variants_drain_in_fifo_order`).
+    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 6"))]
+    CallDone { id: u64, ok: bool, result: BridgeValue, err: Option<String> },
+    /// A JVM-initiated call into a previously wrapped Lisp function (see
+    /// `jvm--register-callback`) — mirrors `protocol::invoke_message`. No
+    /// producer yet (Task 7 flips `lisp_function_call`); see `CallDone`'s
+    /// own note on the `expect`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 7"))]
+    Invoke { id: u64, handle: u64, args: Vec<BridgeValue> },
+    /// A JVM-side `LispFunction` proxy was garbage collected — mirrors
+    /// `protocol::release_message`. No producer yet (Task 7 flips
+    /// `release_notifier_run`); see `CallDone`'s own note on the `expect`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 7"))]
+    Release { handle: u64 },
+    /// A log line from the worker thread — mirrors `protocol::log_message`.
+    /// No producer yet (Task 8 flips every `channel::send(&protocol::
+    /// log_message(...))` call site); see `CallDone`'s own note on the
+    /// `expect`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 8"))]
+    Log { level: String, text: String },
+    /// A JVM lifecycle status transition — mirrors
+    /// `protocol::status_message`. No producer yet (Task 8 flips every
+    /// status-send call site); see `CallDone`'s own note on the `expect`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 8"))]
+    Status { status: Status, detail: Option<String> },
+    /// A `jvm-load-jar-async` call finished — mirrors
+    /// `protocol::load_jar_done_message`. No producer yet (Task 6 flips
+    /// `handle_load_jar`); see `CallDone`'s own note on the `expect`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 6"))]
+    LoadJarDone { id: u64, ok: bool, err: Option<String> },
 }
 
-static QUEUE: Mutex<VecDeque<LispRequest>> = Mutex::new(VecDeque::new());
+static QUEUE: Mutex<VecDeque<Inbound>> = Mutex::new(VecDeque::new());
 
 /// Adds REQ to the tail of the queue. Called from a JVM thread (inside a
 /// `Lisp.*`/`LispRefReleaseNotifier` native), before waking the main
 /// thread with `(lisp-request)`.
-pub fn enqueue(req: LispRequest) {
+pub fn enqueue(req: Inbound) {
     QUEUE.lock().unwrap().push_back(req);
 }
 
-/// Removes and returns every currently-queued request, in FIFO order.
-/// Requests enqueued *during* `service`'s processing of this batch are not
-/// included — they wait for the next `(lisp-request)` wakeup, which is
-/// harmless (see spec "Ordering invariant": what matters is that entries
+/// Removes and returns every currently-queued message, in FIFO order.
+/// Messages enqueued *during* `service_inbound`'s processing of this batch
+/// are not included — they wait for the next `(lisp-request)` wakeup, which
+/// is harmless (see spec "Ordering invariant": what matters is that entries
 /// already in the queue are drained in the order they were pushed, not
-/// that every request enqueued before `service` returns gets included in
-/// the same batch).
-fn drain() -> Vec<LispRequest> {
+/// that every message enqueued before `service_inbound` returns gets
+/// included in the same batch).
+fn drain() -> Vec<Inbound> {
     QUEUE.lock().unwrap().drain(..).collect()
 }
 
 /// Boxes VALUE's `GlobalRef`, handing ownership to the eventual Java
 /// `LispObject` — freed exactly once, later, by a `FreeRef` request (see
-/// `service`'s own `LispRequest::FreeRef` arm).
+/// `service_inbound`'s own `Inbound::FreeRef` arm).
 fn box_value(value: Value) -> i64 {
     Box::into_raw(Box::new(value.make_global_ref())) as i64
 }
@@ -298,18 +350,26 @@ fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
     Ok(LispOutcome::Ptr(box_value(value)))
 }
 
-/// Drains the request queue and runs each request's `Env` op, in the
-/// order `drain` returned them. Registered as `#[defun]
-/// jvm--service-lisp-requests` (`lib.rs`), called from `jvm--dispatch-
-/// message`'s `(lisp-request)` case (`elisp/jvm.el`).
+/// Drains the inbound queue and runs each message's `Env` op, in the order
+/// `drain` returned them. Registered as `#[defun] jvm--service-inbound`
+/// (`lib.rs`), called from `jvm--dispatch-message`'s `(lisp-request)` case
+/// (`elisp/jvm.el`).
 ///
 /// Must not reorder or batch-by-kind — see spec "Ordering invariant": a
 /// `FreeRef` is only sound to run exactly when it's reached in this order,
-/// not eagerly and not deferred to the end of the batch.
-pub fn service(env: &Env) -> EmacsResult<()> {
+/// not eagerly and not deferred to the end of the batch. The six
+/// non-Lisp-access variants have no such ordering requirement among
+/// themselves, but still run in FIFO order for the same reason `Log`/
+/// `Status` lines must stay in the order they were produced.
+///
+/// The six non-Lisp-access arms below are unreached this task — no
+/// producer enqueues them yet (see this module's doc comment) — but their
+/// bodies are the real Task 6-8 handlers, so those tasks only need to flip
+/// the producer, not touch this drain.
+pub fn service_inbound(env: &Env) -> EmacsResult<()> {
     for req in drain() {
         match &req {
-            LispRequest::FreeRef { ptr } => {
+            Inbound::FreeRef { ptr } => {
                 // Safety: PTR is a `LispObject`'s own `ptr`, sent exactly
                 // once by its Cleaner (`LispRefReleaseNotifier.run`, which
                 // only ever fires after the object it was registered
@@ -319,7 +379,7 @@ pub fn service(env: &Env) -> EmacsResult<()> {
                 if let Err(e) = gref.free(env) {
                     channel::send(&protocol::log_message(
                         "error",
-                        &format!("jvm--service-lisp-requests: failed to free a LispObject ref: {e}"),
+                        &format!("jvm--service-inbound: failed to free a LispObject ref: {e}"),
                     ));
                 }
             }
@@ -328,15 +388,39 @@ pub fn service(env: &Env) -> EmacsResult<()> {
             // difference is that here the worker sends the reply back over
             // `Cmd::LispReply`, and there the `Lisp.*` native consumes it in
             // place. See `compute_reply`.
-            LispRequest::Intern { id, .. }
-            | LispRequest::Apply { id, .. }
-            | LispRequest::TypeOf { id, .. }
-            | LispRequest::IsNotNil { id, .. }
-            | LispRequest::Eq { id, .. }
-            | LispRequest::Prin1 { id, .. } => {
+            Inbound::Intern { id, .. }
+            | Inbound::Apply { id, .. }
+            | Inbound::TypeOf { id, .. }
+            | Inbound::IsNotNil { id, .. }
+            | Inbound::Eq { id, .. }
+            | Inbound::Prin1 { id, .. } => {
                 let id = *id;
                 let result = run_request_value(env, &req);
                 reply(env, id, result);
+            }
+            Inbound::CallDone { id, ok, result, err } => {
+                let value = bridge_value_to_value(env, result)?;
+                env.call("jvm--resolve-call", (*id as i64, *ok, value, err.as_deref()))?;
+            }
+            Inbound::Invoke { id, handle, args } => {
+                let mut arg_values = Vec::with_capacity(args.len());
+                for arg in args {
+                    arg_values.push(bridge_value_to_value(env, arg)?);
+                }
+                let args_list = env.list(&arg_values)?;
+                env.call("jvm--resolve-invoke", (*id as i64, *handle as i64, args_list))?;
+            }
+            Inbound::Release { handle } => {
+                env.call("jvm--drop-callback", (*handle as i64,))?;
+            }
+            Inbound::Log { level, text } => {
+                env.call("jvm--log-message", (level.as_str(), text.as_str()))?;
+            }
+            Inbound::Status { status, detail } => {
+                env.call("jvm--apply-status", (status.as_tag(), detail.as_deref()))?;
+            }
+            Inbound::LoadJarDone { id, ok, err } => {
+                env.call("jvm--resolve-load-jar", (*id as i64, *ok, err.as_deref()))?;
             }
         }
     }
@@ -344,15 +428,15 @@ pub fn service(env: &Env) -> EmacsResult<()> {
 }
 
 /// Runs a reply-bearing request's actual `Env` op (everything except
-/// `FreeRef`). Shared by `service` (async: the worker returns the reply over
-/// the channel) and `compute_reply` (the reentrant direct path).
-fn run_request_value(env: &Env, request: &LispRequest) -> EmacsResult<LispOutcome> {
+/// `FreeRef`). Shared by `service_inbound` (async: the worker returns the
+/// reply over the channel) and `compute_reply` (the reentrant direct path).
+fn run_request_value(env: &Env, request: &Inbound) -> EmacsResult<LispOutcome> {
     match request {
         // Routed through `value_to_outcome` like every other result: an
         // interned symbol becomes a Clojure symbol, a keyword a keyword, and
         // `intern "nil"`/`"t"` stay `nil`/`true`.
-        LispRequest::Intern { name, .. } => env.intern(name).and_then(|v| value_to_outcome(env, v)),
-        LispRequest::Apply { f, args, .. } => {
+        Inbound::Intern { name, .. } => env.intern(name).and_then(|v| value_to_outcome(env, v)),
+        Inbound::Apply { f, args, .. } => {
             let f_value = arg_to_value(env, f)?;
             let mut arg_values = Vec::with_capacity(args.len());
             for arg in args {
@@ -360,24 +444,38 @@ fn run_request_value(env: &Env, request: &LispRequest) -> EmacsResult<LispOutcom
             }
             value_to_outcome(env, f_value.call(&arg_values)?)
         }
-        LispRequest::TypeOf { arg, .. } => arg_to_value(env, arg)
+        Inbound::TypeOf { arg, .. } => arg_to_value(env, arg)
             .and_then(|v| env.type_of(v))
             .and_then(|v| value_to_outcome(env, v)),
-        LispRequest::IsNotNil { arg, .. } => {
+        Inbound::IsNotNil { arg, .. } => {
             arg_to_value(env, arg).map(|v| LispOutcome::Bool(v.is_not_nil()))
         }
-        LispRequest::Eq { a, b, .. } => {
+        Inbound::Eq { a, b, .. } => {
             let av = arg_to_value(env, a)?;
             let bv = arg_to_value(env, b)?;
             Ok(LispOutcome::Bool(env.call("eq", (av, bv))?.is_not_nil()))
         }
-        LispRequest::Prin1 { ptr, .. } => env
+        Inbound::Prin1 { ptr, .. } => env
             .call("prin1-to-string", (borrow(env, *ptr),))
             .and_then(|v| v.into_rust::<String>())
             .map(|s| LispOutcome::Value(BridgeValue::Str(s))),
-        LispRequest::FreeRef { .. } => unreachable!(
-            "FreeRef has no reply: it is handled inline in `service`, and never takes the \
-             reentrant direct path (a Cleaner thread pushes no `reentry` scope)"
+        // Only the seven Lisp-access variants ever reach `run_request_value`
+        // (see its two callers, `service_inbound` and `compute_reply`,
+        // neither of which passes it a `FreeRef` or one of the six other
+        // messages) -- match ergonomics still require a catch-all since this
+        // function's parameter type is the whole `Inbound` enum.
+        Inbound::FreeRef { .. } => unreachable!(
+            "FreeRef has no reply: it is handled inline in `service_inbound`, and never \
+             takes the reentrant direct path (a Cleaner thread pushes no `reentry` scope)"
+        ),
+        Inbound::CallDone { .. }
+        | Inbound::Invoke { .. }
+        | Inbound::Release { .. }
+        | Inbound::Log { .. }
+        | Inbound::Status { .. }
+        | Inbound::LoadJarDone { .. } => unreachable!(
+            "run_request_value only ever receives one of the seven Lisp-access variants -- \
+             see this function's own doc comment"
         ),
     }
 }
@@ -391,7 +489,7 @@ fn run_request_value(env: &Env, request: &LispRequest) -> EmacsResult<LispOutcom
 /// main thread). The native then turns this into a Java object or a thrown
 /// `LispNonLocalExit` (`jvm_thread::build_lisp_reply_object` /
 /// `throw_non_local_exit`).
-pub fn compute_reply(env: &Env, request: &LispRequest) -> LispOutcome {
+pub fn compute_reply(env: &Env, request: &Inbound) -> LispOutcome {
     match run_request_value(env, request) {
         Ok(v) => v,
         Err(e) => error_to_reply(env, e),
@@ -419,16 +517,16 @@ mod tests {
     #[test]
     fn drain_returns_requests_in_fifo_order() {
         // Uses `FreeRef` (the variant with the fewest fields) purely as a
-        // distinguishable marker; this test never calls `service` (no
-        // `Env` here), so no real free happens.
-        enqueue(LispRequest::FreeRef { ptr: 1 });
-        enqueue(LispRequest::FreeRef { ptr: 2 });
-        enqueue(LispRequest::FreeRef { ptr: 3 });
+        // distinguishable marker; this test never calls `service_inbound`
+        // (no `Env` here), so no real free happens.
+        enqueue(Inbound::FreeRef { ptr: 1 });
+        enqueue(Inbound::FreeRef { ptr: 2 });
+        enqueue(Inbound::FreeRef { ptr: 3 });
         let drained = drain();
         let ptrs: Vec<i64> = drained
             .iter()
             .map(|r| match r {
-                LispRequest::FreeRef { ptr } => *ptr,
+                Inbound::FreeRef { ptr } => *ptr,
                 _ => unreachable!(),
             })
             .collect();
@@ -437,7 +535,7 @@ mod tests {
 
     #[test]
     fn drain_empties_the_queue() {
-        enqueue(LispRequest::FreeRef { ptr: 42 });
+        enqueue(Inbound::FreeRef { ptr: 42 });
         assert_eq!(drain().len(), 1);
         assert!(drain().is_empty());
     }
@@ -449,12 +547,40 @@ mod tests {
     /// that same order so the borrow is never dangling when the op runs.
     #[test]
     fn apply_enqueued_before_freeref_for_the_same_ptr_drains_before_it() {
-        enqueue(LispRequest::Apply { id: 1, f: LispInput::Obj(99), args: vec![] });
-        enqueue(LispRequest::FreeRef { ptr: 99 });
+        enqueue(Inbound::Apply { id: 1, f: LispInput::Obj(99), args: vec![] });
+        enqueue(Inbound::FreeRef { ptr: 99 });
         let drained = drain();
         assert_eq!(drained.len(), 2);
-        assert!(matches!(drained[0], LispRequest::Apply { f: LispInput::Obj(99), .. }));
-        assert!(matches!(drained[1], LispRequest::FreeRef { ptr: 99 }));
+        assert!(matches!(drained[0], Inbound::Apply { f: LispInput::Obj(99), .. }));
+        assert!(matches!(drained[1], Inbound::FreeRef { ptr: 99 }));
+    }
+
+    /// The six variants Task 5 adds to generalise this queue (`CallDone`/
+    /// `Invoke`/`Release`/`Log`/`Status`/`LoadJarDone`) — no producer
+    /// enqueues them yet (Tasks 6-8 flip the producers one at a time), so
+    /// this test is what proves they construct and drain FIFO alongside
+    /// the original seven, and (per this crate's dead-code policy) is what
+    /// keeps the compiler from flagging them as unused this task.
+    #[test]
+    fn new_inbound_variants_drain_in_fifo_order() {
+        enqueue(Inbound::CallDone { id: 1, ok: true, result: BridgeValue::Nil, err: None });
+        enqueue(Inbound::Invoke { id: 2, handle: 3, args: vec![] });
+        enqueue(Inbound::Release { handle: 4 });
+        enqueue(Inbound::Log { level: "info".to_string(), text: "x".to_string() });
+        enqueue(Inbound::Status { status: Status::Ready, detail: None });
+        enqueue(Inbound::LoadJarDone { id: 5, ok: true, err: None });
+
+        let drained = drain();
+        assert_eq!(drained.len(), 6);
+        assert!(matches!(
+            drained[0],
+            Inbound::CallDone { id: 1, ok: true, result: BridgeValue::Nil, err: None }
+        ));
+        assert!(matches!(drained[1], Inbound::Invoke { id: 2, handle: 3, .. }));
+        assert!(matches!(drained[2], Inbound::Release { handle: 4 }));
+        assert!(matches!(drained[3], Inbound::Log { .. }));
+        assert!(matches!(drained[4], Inbound::Status { status: Status::Ready, detail: None }));
+        assert!(matches!(drained[5], Inbound::LoadJarDone { id: 5, ok: true, err: None }));
     }
 
     /// Box/borrow/free discipline, without a real `Env` (this crate's

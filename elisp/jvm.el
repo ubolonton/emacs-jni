@@ -102,13 +102,15 @@ docs/explanation/architecture.md).")
            (error
             (jvm--invoke-reply id nil (format "%S" err)))))))
     (`(lisp-request)
-     ;; A JVM thread enqueued one or more Lisp-access requests (`intern',
-     ;; `apply', `type-of', `is-not-nil?', `eq', `prin1-to-string', or a
-     ;; GC-driven `FreeRef') on the Rust-side queue and woke us up to
-     ;; service them -- see `jvm--service-lisp-requests' and the design
-     ;; spec's "Request/reply flow". No payload: the request itself rides
-     ;; the Rust queue, not this message.
-     (jvm--service-lisp-requests))
+     ;; A JVM thread enqueued one or more inbound messages (a Lisp-access
+     ;; `intern'/`apply'/`type-of'/`is-not-nil?'/`eq'/`prin1-to-string', a
+     ;; GC-driven `FreeRef', or -- once its producer is migrated, see Tasks
+     ;; 6-8 -- a `call-done'/`invoke'/`release'/`log'/`status'/
+     ;; `load-jar-done') on the Rust-side queue and woke us up to service
+     ;; them -- see `jvm--service-inbound' and the design spec's "Request/
+     ;; reply flow". No payload: the message itself rides the Rust queue,
+     ;; not this wire message.
+     (jvm--service-inbound))
     (`(release ,handle)
      ;; The JVM-side LispFunction proxy for HANDLE was garbage collected
      ;; (see `ReleaseNotifier' in java/emacs_jni and its native `run',
@@ -126,6 +128,49 @@ into its final Lisp-visible form."
     (`(jvm-symbol ,name ,keyword)
      (intern (if keyword (concat ":" name) name)))
     (_ result)))
+
+;; The five helpers below are the native-queue (`jvm--service-inbound')
+;; counterparts of `jvm--dispatch-message''s `call-done'/`load-jar-done'/
+;; `status'/`log'/`release' cases above -- same logic, called instead from
+;; `lisp_requests.rs''s `service_inbound' once VALUE/ARGS have already been
+;; converted to real Lisp values on the Rust side (no `jvm--resolve-sexp-
+;; result' needed here: that function only undoes the wire's `(jvm-handle
+;; N)'/`(jvm-symbol ...)' tags, which the native path never produces).
+;; Dormant until Tasks 6-8 move each message's producer off the text
+;; protocol onto `lisp_requests::Inbound' -- see that module's doc comment.
+
+(defun jvm--resolve-call (id ok value err)
+  "Resolve the pending `jvm-call-async' callback for ID."
+  (when-let ((callback (alist-get id jvm--pending-call)))
+    (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
+    (funcall callback ok value err)))
+
+(defun jvm--resolve-invoke (id handle args)
+  "Stub for the native-queue `invoke' path; filled in by Task 7.
+ID, HANDLE, and ARGS mirror the wire `invoke' case's own bindings
+in `jvm--dispatch-message'."
+  (ignore id handle args))
+
+(defun jvm--resolve-load-jar (id ok err)
+  "Resolve the pending `jvm-load-jar-async' callback for ID."
+  (when-let ((callback (alist-get id jvm--pending-load-jar)))
+    (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
+    (funcall callback ok err)))
+
+(defun jvm--apply-status (state detail)
+  "Apply a JVM lifecycle transition to STATE, logging optional DETAIL."
+  (setq jvm--status (intern state))
+  (when detail (jvm--log "[status] %s: %s" state detail))
+  (run-hook-with-args 'jvm-status-hook (intern state)))
+
+(defun jvm--log-message (level text)
+  "Append a `[LEVEL] TEXT' line to the `*jvm-log*' buffer and echo it."
+  (jvm--log "[%s] %s" level text)
+  (message "emacs-jni [%s]: %s" level text))
+
+(defun jvm--drop-callback (handle)
+  "Drop HANDLE's entry from `jvm--lisp-callbacks' (its JVM proxy was GC'd)."
+  (remhash handle jvm--lisp-callbacks))
 
 (defun jvm--process-filter (_proc data)
   "Accumulate DATA and dispatch each complete newline-terminated S-expression."

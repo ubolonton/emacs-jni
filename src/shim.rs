@@ -402,7 +402,7 @@ fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors:
 /// handing the future back to the Java caller.
 fn service_lisp_request_sync<'local>(
     env: &mut jni::Env<'local>,
-    build_request: impl FnOnce(u64) -> crate::lisp_requests::LispRequest,
+    build_request: impl FnOnce(u64) -> crate::lisp_requests::Inbound,
 ) -> jni::errors::Result<JObject<'local>> {
     // Reentrant case: this native runs on the Emacs main thread, inside a
     // `jvm--call-direct`. That thread is blocked in the JVM right now, so the
@@ -430,7 +430,7 @@ fn service_lisp_request_sync<'local>(
 /// equivalent of `block_on_lisp_reply`'s checked-exception rethrow.
 fn service_lisp_request_direct<'local>(
     env: &mut jni::Env<'local>,
-    request: crate::lisp_requests::LispRequest,
+    request: crate::lisp_requests::Inbound,
 ) -> jni::errors::Result<JObject<'local>> {
     let reply = crate::reentry::with_current_env(|lisp_env| {
         crate::lisp_requests::compute_reply(lisp_env, &request)
@@ -522,14 +522,14 @@ fn rethrow_lisp_reply_exception(env: &mut jni::Env) -> jni::errors::Error {
 }
 
 /// `Lisp.intern`'s native implementation: `env.intern(name)` on the main
-/// thread, via a `LispRequest::Intern` round trip.
+/// thread, via an `Inbound::Intern` round trip.
 fn lisp_intern<'local>(
     env: &mut jni::Env<'local>,
     _class: JClass<'local>,
     name: JString<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
     let name = name.try_to_string(env)?;
-    service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::Intern { id, name })
+    service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Intern { id, name })
 }
 
 /// `Lisp.typeOf`'s native implementation.
@@ -539,13 +539,13 @@ fn lisp_type_of<'local>(
     v: JObject<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
     let arg = object_to_lisp_request_arg(env, v)?;
-    service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::TypeOf { id, arg })
+    service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::TypeOf { id, arg })
 }
 
 /// `Lisp.isNotNil`'s native implementation.
 fn lisp_is_not_nil<'local>(env: &mut jni::Env<'local>, _class: JClass<'local>, v: JObject<'local>) -> jni::errors::Result<bool> {
     let arg = object_to_lisp_request_arg(env, v)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::IsNotNil { id, arg })?;
+    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::IsNotNil { id, arg })?;
     unbox_boolean(env, &result)
 }
 
@@ -558,7 +558,7 @@ fn lisp_eq<'local>(
 ) -> jni::errors::Result<bool> {
     let a = object_to_lisp_request_arg(env, a)?;
     let b = object_to_lisp_request_arg(env, b)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::Eq { id, a, b })?;
+    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Eq { id, a, b })?;
     unbox_boolean(env, &result)
 }
 
@@ -579,7 +579,7 @@ fn lisp_apply_async<'local>(
     // `(deref (applyAsync ...))` returns at once without needing the blocked
     // main thread to drain the queue.
     if crate::reentry::in_scope() {
-        let request = crate::lisp_requests::LispRequest::Apply { id: 0, f, args: request_args };
+        let request = crate::lisp_requests::Inbound::Apply { id: 0, f, args: request_args };
         let reply = crate::reentry::with_current_env(|lisp_env| {
             crate::lisp_requests::compute_reply(lisp_env, &request)
         })
@@ -596,7 +596,7 @@ fn lisp_apply_async<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::pending::register(id, future_global);
 
-    crate::lisp_requests::enqueue(crate::lisp_requests::LispRequest::Apply { id, f, args: request_args });
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Apply { id, f, args: request_args });
     crate::channel::send(&crate::protocol::lisp_request_message());
     Ok(future)
 }
@@ -607,17 +607,17 @@ fn lisp_object_prin1_to_string<'local>(
     this: JObject<'local>,
 ) -> jni::errors::Result<JString<'local>> {
     let ptr = get_ptr_field(env, &this)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::Prin1 { id, ptr })?;
+    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Prin1 { id, ptr })?;
     env.cast_local::<JString>(result)
 }
 
 /// `LispRefReleaseNotifier.run`'s native implementation: enqueues a
 /// `FreeRef` for this notifier's own `ptr` and wakes the main thread up.
-/// No reply -- see `lisp_requests::LispRequest::FreeRef`'s own doc
+/// No reply -- see `lisp_requests::Inbound::FreeRef`'s own doc
 /// comment ("carries no `id` and produces no reply").
 fn lisp_ref_release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
     let ptr = get_ptr_field(env, &this)?;
-    crate::lisp_requests::enqueue(crate::lisp_requests::LispRequest::FreeRef { ptr });
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::FreeRef { ptr });
     crate::channel::send(&crate::protocol::lisp_request_message());
     Ok(())
 }
@@ -751,7 +751,7 @@ mod tests {
     /// End-to-end proof that `intern`/`isNotNil`/`eq`/`typeOf`/`applyAsync`/
     /// `prin1ToString` actually work against a *real* Lisp-like `Env` --
     /// but this crate's unit tests have no real Emacs process to service
-    /// `(lisp-request)`, so this test instead drives `lisp_requests::service`
+    /// `(lisp-request)`, so this test instead drives `lisp_requests::service_inbound`
     /// directly against a throwaway in-process "Env" substitute... which
     /// this crate cannot construct outside of a real Emacs module call
     /// (`emacs::Env` has no public constructor). The Lisp-access round
