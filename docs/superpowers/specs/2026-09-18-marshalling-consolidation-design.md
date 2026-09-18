@@ -49,8 +49,9 @@ and is used by both the generic direct path and the Clojure natives.
 ## Goals
 
 - One Lisp-value→`LispArg` function (kill the twin).
-- One `LispArg`→Lisp-value function for results, on both call paths — deliver the
-  `LispArg` to the main thread instead of serialising it to text.
+- No text protocol. Every inbound (JVM→Lisp) message becomes a typed Rust queue
+  entry drained by a native dispatch on the main thread; the pipe is a pure
+  wakeup. All inbound values convert through the single `lisp_arg_to_value`.
 - Lisp non-local exits are first-class in the core: distinct Java exception
   classes carrying the marshalled parts, so Clojure catches them by type and the
   `ex-info` translation becomes optional.
@@ -66,7 +67,10 @@ and is used by both the generic direct path and the Clojure natives.
 - Removing the `Lisp.*` convenience natives. Reimplementing them as
   Clojure-on-top is possible but is a performance/scope call left as an optional
   follow-up (see Item 5).
-- Any change to the JVM lifecycle, classpath, or reflection/overload resolution.
+- Any change to the JVM lifecycle *state machine*, classpath, or
+  reflection/overload resolution. (Item 2 changes how `status` messages are
+  *delivered* to Lisp — typed queue instead of text — not the state machine or
+  the `jvm-status` contract.)
 
 ## Work items
 
@@ -90,33 +94,60 @@ Test: a JVM→Lisp callback returning a keyword, a symbol, and a function; asser
 each round-trips (keyword/symbol as themselves, function as a callable
 `LispFunction` on the JVM side).
 
-### Item 2 — deliver results over the wakeup+queue, not text (Q2)
+### Item 2 — remove the text protocol entirely; native inbound dispatch (Q2)
 
-The async worker serialises a result `LispArg` to a text sexp
-(`protocol::call_done_message`, `src/protocol.rs:20`) and ships it over the pipe;
-the main thread's reader plus `jvm--resolve-sexp-result` (`jvm.el:121`) rebuilds
-it. This predates the `lisp_requests` mechanism, which already does the better
-thing: `enqueue` a Rust-side value and send a bare `(lisp-request)` wakeup
-(`shim.rs:406`), then `jvm--service-lisp-requests` drains and converts with a
-live `Env`.
+The inbound direction (worker/JVM → Emacs main thread) is the ONLY user of the
+text protocol. `channel::send` (`src/channel.rs:21`) writes formatted sexps into
+a pipe opened by `env.open_channel`; the Elisp filter `jvm--process-filter`
+(`jvm.el:130`) buffers partial lines, `read`s each, and `jvm--dispatch-message`
+pcase-dispatches `call-done`/`invoke`/`lisp-request`/`release`/`log`/`status`.
+The reverse direction already avoids text — main → worker rides a typed
+`mpsc::Sender<Cmd>` (`src/worker.rs:9`).
 
-Change: route `call-done` results (and the `invoke` callback-args path,
-`protocol::invoke_message`, `src/protocol.rs:32`) through a Rust-side results
-queue carrying the `LispArg` (plus id / ok / outcome), waking the main thread
-with a notification; the main thread pops and runs `lisp_arg_to_value`
-(`lisp_requests.rs:131`). Both call paths then converge on that one converter.
+`lisp_requests` is already the target pattern for ONE message type: it `enqueue`s
+a typed Rust value and sends a bare `(lisp-request)` wakeup (`shim.rs:406`); the
+native `jvm--service-lisp-requests` (`lib.rs:226`) drains and converts with a
+live `Env`. Generalise that to EVERY inbound message.
 
-Removes: `lisp_arg_to_sexp` and the `(jvm-handle …)`/`(jvm-symbol …)` wire tags
-and their reify arms in `jvm--resolve-sexp-result`. The text protocol keeps only
-control/log/lifecycle framing, not value payloads.
+Change:
 
-Interaction with Item 3: the result queue entry should carry a structured
-*outcome* (value or non-local exit), so design its type with Item 3 in mind (a
-callback that signals delivers a Signal/Throw outcome, not a stringified error).
+- Add a typed inbound queue (generalise `lisp_requests`' queue), with a variant
+  per current message: `CallDone { id, outcome }`, `Invoke { id, handle, args:
+  Vec<LispArg> }`, `Release { handle }`, `Log { text }`, `Status { status,
+  detail }`, plus the existing lisp-access requests. `outcome` is the structured
+  value-or-exit from Item 3.
+- The pipe becomes a pure wakeup: `channel::send` writes a single constant byte
+  (no formatting). Producers `enqueue(msg)` then poke the pipe.
+- Dispatch moves to the native side: one drain defun (extend/rename
+  `jvm--service-lisp-requests` to `jvm--service-inbound`) runs on the main thread
+  when the filter fires, drains ALL queued messages FIFO, and handles each with a
+  live `Env` — `CallDone` resolves the pending call via `lisp_arg_to_value`,
+  `Invoke` funcalls the callback and replies with `Cmd::InvokeReply`, etc. The
+  filter is a trivial `(lambda (_proc _data) (jvm--service-inbound))`, or a
+  `#[defun]` set directly as the filter (either works; a module function is a
+  valid process filter and runs on the main thread).
 
-Tests: existing `jvm-call`/`jvm-call-await` return-value and callback tests must
-stay green; add a keyword/symbol return over the async path (previously covered
-only by the now-removed sexp reify).
+Deletes: all of `src/protocol.rs`'s value/message formatters, `lisp_arg_to_sexp`
+(`marshal.rs:427`) and the `(jvm-handle …)`/`(jvm-symbol …)` wire tags,
+`jvm--process-filter`'s line buffering, `jvm--dispatch-message`, and
+`jvm--resolve-sexp-result`. Every inbound value converts through the single
+`lisp_arg_to_value`. No text protocol remains; the pipe carries only wakeups.
+
+Why the pipe stays at all: a background thread cannot touch Lisp (Emacs is
+single-threaded), so it still needs to wake the main thread's event loop. The
+pipe + process filter is that mechanism; only its payload goes away. Wakeups may
+coalesce — harmless, because each drain empties the whole queue (the invariant
+`lisp_requests` already relies on: enqueue-then-poke; a drain sees every item
+enqueued before its poke, later items ride the next poke).
+
+Staging (keep green): (1) build the typed queue + native drain alongside the
+text path, migrating one message type at a time (`call-done`, then `invoke`,
+`release`, `log`, `status`); (2) once all types are migrated and the Elisp
+dispatch is unused, delete the text formatters and the Elisp reader/dispatch.
+
+Tests: every existing `jvm-call`/`-await`, callback, nREPL, and status test must
+stay green through each migration step; add a keyword/symbol return over the
+async path (previously exercised only via the now-removed sexp reify).
 
 ### Item 3 — first-class Lisp non-local exits in the core (Q3b)
 
@@ -182,8 +213,10 @@ Recommend deferring until Items 1–4 land and the payoff is measured.
 ## Decisions
 
 - Keep three enums (do not fuse). Rationale in Non-goals.
-- Result delivery moves off the text protocol onto the queue+wakeup mechanism
-  (Item 2); the text protocol carries only control/log/lifecycle framing after.
+- The text protocol is removed entirely (Item 2). ALL inbound message types
+  move to the typed queue, including `status`/`log`/`release` — not just value
+  payloads — so nothing is left to justify keeping a text framing. The pipe is a
+  pure wakeup.
 - Non-local exits become first-class classes shared by both reply paths (Item 3).
 - `ex-info` is removed by default: Clojure catches `LispSignal`/`LispThrow` by
   type. (See open question if a consumer needs `ex-data`.)
@@ -193,10 +226,14 @@ Recommend deferring until Items 1–4 land and the payoff is measured.
 1. Enum names — confirm `BridgeValue`/`LispInput`/`LispOutcome` or pick others.
 2. `ex-info` — remove entirely, or keep a one-line optional wrapper for callers
    who prefer `ex-data` over field access? Default: remove.
-3. Item 2 scope — do the `invoke` (callback-args) path in the same change as
-   `call-done`, or land `call-done` first and `invoke` second? Both end on
-   `lisp_arg_to_value`; splitting is lower-risk.
-4. Item 5 — do it, or leave the natives as an optimisation? Default: leave.
+3. Item 2 — confirm ALL inbound types move (incl. `status`/`log`), fully
+   deleting `src/protocol.rs` and the Elisp dispatch. Default: yes. Alternative:
+   stop at value payloads and keep a minimal text framing for lifecycle — not
+   recommended (leaves two mechanisms).
+4. Item 2 filter form — a trivial Elisp filter calling one native drain defun,
+   or a `#[defun]` set directly as the process filter? Default: trivial Elisp
+   filter → native drain (smaller change, mirrors today's `lisp-request` path).
+5. Item 5 — do it, or leave the natives as an optimisation? Default: leave.
 
 ## Sequencing and risk
 
@@ -206,13 +243,24 @@ Recommended order, each green before the next:
 2. **Item 4 rename** (mechanical; do before the deeper refactors so later diffs
    use the final names). The `LispOutcome` dedup can ride with Item 3.
 3. **Item 3** (exit classes; the `LispOutcome` shape settles here).
-4. **Item 2** (result delivery onto the queue; depends on Item 3's outcome type).
+4. **Item 2** (the whole inbound path onto the typed queue + native drain,
+   deleting the text protocol; staged per message type). Depends on Item 3's
+   outcome type for `CallDone`/`Invoke`. Largest item — land it last of the
+   non-optional ones.
 5. **Item 5** (optional, last).
 
 Risks:
-- Item 2 touches async call completion (`jvm--pending-call` matching) and the
-  worker↔main handoff — the highest-risk item. Keep the text protocol's control
-  messages; only value payloads move. Land `call-done` and `invoke` separately.
+- Item 2 is the largest and highest-risk: it touches async call completion
+  (`jvm--pending-call` matching), the worker↔main handoff, and status/lifecycle
+  delivery (`jvm-status`). Mitigate by staging — build the typed queue + native
+  drain alongside the text path and migrate one message type at a time
+  (`call-done` → `invoke` → `release` → `log` → `status`), keeping the suite
+  green at each step; delete `src/protocol.rs` and the Elisp dispatch only once
+  every type is migrated. A wakeup byte must follow every `enqueue` (the
+  enqueue-then-poke invariant) or a message can sit undrained until the next poke.
+- Item 2 removes the human-readable wire — text-log debugging of the channel is
+  lost. Minor; add a `Log` queue variant (kept) and optionally a debug dump of
+  the queue.
 - Item 3 changes a public Clojure-facing contract (exception type instead of
   `ex-info`). Any external consumer catching `ex-info`/using `lisp-signal?`
   breaks — acceptable for this solo prototype, but note it in the changelog.
