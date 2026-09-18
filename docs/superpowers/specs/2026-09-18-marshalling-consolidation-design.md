@@ -1,8 +1,10 @@
 # Marshalling consolidation — design
 
-Status: proposed. Handoff for a future session to plan (superpowers:writing-plans)
-then implement. Experimental, additive-then-subtractive; keep tests green at each
-step. Builds on the shipped unified symbol/keyword work
+Status: Items 1–4 shipped on main (twin removed, typed inbound queue replacing the
+text protocol, `LispSignal`/`LispThrow` classes, enum rename + dedup). Item 5
+remains optional. Items 6–7 below are new follow-ups this doc now tracks.
+Experimental, additive-then-subtractive; keep tests green at each step. Builds on
+the shipped unified symbol/keyword work
 (`docs/superpowers/specs/2026-09-16-unify-symbol-marshalling-design.md`).
 
 ## Motivation
@@ -21,27 +23,33 @@ Clojure-only behaviours into the core, leaving Clojure as a thin layer on top.
 
 ## Current state (map)
 
-Two subsystems, two value vocabularies:
+Items 1–4 collapsed the earlier multiplicity. The value vocabulary is now three
+direction-named enums that share scalars:
 
-- **Generic JVM bridge** — `commands::LispArg` (`src/commands.rs:17`), used by
-  `jvm-call`/`jvm-new` (async worker) and `jvm-call-direct` (main thread).
-- **Clojure Lisp-access** — `LispRequestArg` (`src/lisp_requests.rs:28`, Clojure→Lisp
-  args) and `commands::LispReplyValue` (`src/commands.rs:43`, Lisp→Clojure results
-  incl. non-local exits), driven by the `Lisp.*` natives and `emacs-jni.clj`'s
-  `->lisp`/`<-lisp`.
+- `commands::BridgeValue` (`src/commands.rs:17`) — the generic Lisp↔JVM carrier
+  (scalars, symbol marker, JVM-object handle, Lisp-callback handle).
+- `lisp_requests::LispInput` (`src/lisp_requests.rs:42`) — a value handed INTO Lisp
+  from Clojure; `Scalar(BridgeValue)` composes the carrier.
+- `commands::LispOutcome` (`src/commands.rs:49`) — a result FROM Lisp;
+  `Value(BridgeValue)` composes the carrier, plus `Bool`/`Ptr`/`Signal`/`Throw`.
 
-The Java-facing halves are already single paths: `lisp_arg_to_jvalue`
-(`marshal.rs:10`) for Lisp→JVM, `object_to_lisp_arg` (`marshal.rs:346`) for
-JVM→Lisp. The Lisp-facing halves are where the multiplicity lives:
+Six converters, split at the two JNI-edge halves (each row's args and returns reuse
+the same pair):
 
-| Site | Value→LispArg / LispArg→Value | Notes |
+| Direction | Lisp-side half | JVM-side half |
 |---|---|---|
-| Lisp→JVM call args | `lisp_value_to_arg` (`lib.rs:318`) | full: keyword/symbol/callback arms |
-| Callback return → JVM | `lisp_value_to_arg_no_callback` (`lib.rs:272`) | **trimmed twin**, missing those arms |
-| JVM→Lisp return, direct | `lisp_arg_to_value` (`lisp_requests.rs:131`) | main thread, live `Env` |
-| JVM→Lisp return/args, async | `lisp_arg_to_sexp` (`marshal.rs:427`) → `jvm--resolve-sexp-result` (`jvm.el:121`) | worker has no `Env` → **text sexp** over the pipe |
-| Clojure→Lisp args | `arg_to_value` (`lisp_requests.rs:107`) | `LispRequestArg`; `Scalar` arm already wraps `LispArg` |
-| Lisp→Clojure result | `value_to_reply` (`lisp_requests.rs:250`) → `build_lisp_reply_object` (`jvm_thread.rs:578`) → `<-lisp` (`clj.clj:24`) | `LispReplyValue`, incl. Signal/Throw |
+| Lisp → JVM (call args, callback return) | `lisp_value_to_arg` (`lib.rs:291`) | `lisp_arg_to_jvalue` (`marshal.rs:10`) |
+| JVM → Lisp (call return, callback args) | `bridge_value_to_value` (`lisp_requests.rs:165`) | `jvm_value_to_lisp_arg`→`object_to_lisp_arg` (`marshal.rs:328`/`:346`) |
+| Clojure → Lisp (typed) | `arg_to_value`/`LispInput` (`lisp_requests.rs:140`) + `->lisp` (`clj.clj:14`) | — |
+| Lisp → Clojure (typed) | `value_to_outcome` (`lisp_requests.rs:293`) + `->clj` (`clj.clj:24`) | `build_lisp_reply_object`/`complete_future_with_reply` (`jvm_thread.rs:599`/`:643`) |
+
+Gone since the original plan: the trimmed twin `lisp_value_to_arg_no_callback`
+(Item 1), and the whole text protocol — `lisp_arg_to_sexp`, the sexp wire tags, and
+the Elisp reader/dispatch (Item 2). Inbound is now a typed queue (`Inbound`,
+`src/lisp_requests.rs:66`) drained by the `jvm--service-inbound` filter
+(`elisp/jvm.el:116`), and the pipe (`channel::poke`, `src/channel.rs:23`) carries
+only a wakeup byte. Every JVM→Lisp value converts on the main thread through
+`bridge_value_to_value`.
 
 Already shared, no work: reentrant same-thread service lives in `src/reentry.rs`
 and is used by both the generic direct path and the Clojure natives.
@@ -77,7 +85,7 @@ and is used by both the generic direct path and the Clojure natives.
 Each item is independently shippable and independently testable; the ordering in
 "Sequencing" keeps the tree green throughout.
 
-### Item 1 — one Lisp-value→`LispArg` function (Q1)
+### Item 1 (shipped) — one Lisp-value→`BridgeValue` function (Q1)
 
 `lisp_value_to_arg_no_callback` (`lib.rs:272`) is a trimmed copy of
 `lisp_value_to_arg` (`lib.rs:318`) missing the keyword, symbol, and
@@ -94,7 +102,7 @@ Test: a JVM→Lisp callback returning a keyword, a symbol, and a function; asser
 each round-trips (keyword/symbol as themselves, function as a callable
 `LispFunction` on the JVM side).
 
-### Item 2 — remove the text protocol entirely; native inbound dispatch (Q2)
+### Item 2 (shipped) — remove the text protocol entirely; native inbound dispatch (Q2)
 
 The inbound direction (worker/JVM → Emacs main thread) is the ONLY user of the
 text protocol. `channel::send` (`src/channel.rs:21`) writes formatted sexps into
@@ -149,7 +157,7 @@ Tests: every existing `jvm-call`/`-await`, callback, nREPL, and status test must
 stay green through each migration step; add a keyword/symbol return over the
 async path (previously exercised only via the now-removed sexp reify).
 
-### Item 3 — first-class Lisp non-local exits in the core (Q3b)
+### Item 3 (shipped) — first-class Lisp non-local exits in the core (Q3b)
 
 Today a Lisp signal/throw crossing to the JVM is one neutral carrier
 `LispNonLocalExit` (`kind` + `symbolOrTag` + `dataOrValue`,
@@ -179,7 +187,7 @@ Tests: Clojure `apply` of a Lisp fn that `signal`s / `throw`s is caught by type
 with correct symbol/data; a generic JVM→Lisp callback that signals surfaces the
 structured exception (not a string).
 
-### Item 4 — rename and dedup the value enums (enums)
+### Item 4 (shipped) — rename and dedup the value enums (enums)
 
 Keep three types (distinct roles) but (a) rename for direction and (b) make the
 Clojure result type compose `LispArg` instead of re-listing scalars, mirroring
@@ -210,6 +218,61 @@ shrinking the native surface and the `LispRequest` enum. Left OPTIONAL: the
 natives avoid a full `apply` round trip per call (a real, if small, cost).
 Recommend deferring until Items 1–4 land and the payoff is measured.
 
+### Item 6 — remove the JVM-object handle table (unblocked by Item 2)
+
+`src/handles.rs` maps a `u64` → `Arc<Global<JObject>>` in a process-global
+`Mutex<HashMap>`; `BridgeValue::Object` carries the `u64`, and the Lisp `JvmHandle`
+`user-ptr` holds the same integer. The table existed so a JVM object could become a
+text-serialisable integer over the old sexp pipe. Item 2 deleted that pipe, so the
+reason is gone. The table gives no identity dedup either — each `object_to_lisp_arg`
+mints a fresh `Global` and a fresh handle.
+
+`jni::refs::Global` is `Send + Sync`, so it can ride the typed queue directly.
+Change: carry `Arc<Global<JObject>>` in `BridgeValue::Object` and box it straight
+into the `JvmHandle` `user-ptr`, deleting `handles::{TABLE,register,resolve,release}`
+and the integer indirection. This is the JVM-object mirror of what Item 2 already
+proved for the Lisp direction: no wire, no table, the ref itself is the value.
+
+Caveats:
+- `src/commands.rs` (hence `BridgeValue`) is deliberately `jni`-free today (std types
+  only). Carrying `Arc<Global>` couples it to `jni`; confirm nothing (direct path,
+  Rust round-trip tests) relies on that decoupling, or hold the `Arc` behind a small
+  newtype.
+- Keep releasing on the worker thread (today's `JvmHandle::Drop` → `Cmd::ReleaseRef`
+  dance). `jni::Global::Drop` *will* work from the Emacs GC thread, but auto-attaches
+  with a logged perf warning (`jni-0.22.4/src/refs/global.rs:293`) — not wanted on
+  every GC.
+
+Contrast — NOT reducible: the Lisp-object `long` (`LispObject.ptr`,
+`box_value`/`borrow`). It is forced by the FFI, not by threading: a Java field holds
+only a primitive, and an `emacs::GlobalRef` derefs/frees only on the main thread with
+a live `Env`. Sharing the Rust reference with Java is impossible. `Global`'s
+`Send`/`Sync` is irrelevant there. See the object-model note in
+`docs/explanation/interop-design.md`.
+
+Tests: object round-trip (`jvm-call` returning an object, passing it back);
+release-on-GC still fires (manual, per the existing GC-notification caveat).
+
+### Item 7 — direct-path marshalling fusion (Q2, OPTIONAL)
+
+On the async path `BridgeValue` is forced: args/results cross main↔worker and a
+`JValueOwned`/`emacs::Value` is neither `Send` nor `Env`/frame-free. On the
+synchronous direct path (`jvm-call-direct` → `call_direct`, and the Clojure calls it
+drives) both the `Env` and an attached JNI env are live in one main-thread extent, so
+nothing crosses a thread — the value still goes Lisp `Value` → `BridgeValue` →
+`jvalue` (and back) only to reuse the async converters.
+
+Optional change: a fused `lisp_value_to_jvalue(&Env, &mut jni::Env, Value, &JClass)`
+for the direct path, skipping the intermediate `BridgeValue`, the `Vec`, and the
+scalar `String` allocations. The fused path still does the same sub-steps (callback
+registration, `handles::register`/object wrapping, `box_value`) — the win is the
+carrier and its allocations, not fewer logical steps.
+
+Trade-off: a second copy of the type-directed rules, OR making the two converters
+generic over source (`Value` vs `BridgeValue`) and sink (`jvalue` vs `Value`).
+Low payoff on a path already dominated by JVM call cost; do only if profiling shows
+the direct/Clojure hot path spending real time in marshalling. Recommend deferring.
+
 ## Decisions
 
 - Keep three enums (do not fuse). Rationale in Non-goals.
@@ -220,6 +283,16 @@ Recommend deferring until Items 1–4 land and the payoff is measured.
 - Non-local exits become first-class classes shared by both reply paths (Item 3).
 - `ex-info` is removed by default: Clojure catches `LispSignal`/`LispThrow` by
   type. (See open question if a consumer needs `ex-data`.)
+- `BridgeValue` stays. Its reason is the async worker-thread crossing (a `Send`,
+  `Env`-free, frame-free carrier), not the wire format Item 2 removed. It only
+  disappears if the async worker thread does, which would cost non-blocking calls.
+- The JVM-object handle table is removable now (Item 6); the Lisp-object `long` is
+  not (FFI + main-thread-only `GlobalRef` deref). The two object directions stay
+  asymmetric for that reason.
+- `LispObject` identity is a load-bearing invariant: exactly one instance per
+  `ptr`, enforced by `final` class / `final ptr` / package-private ctor / no
+  clone / not `Serializable`, each crossing minting a fresh `GlobalRef`. A copy
+  path or reused pointer would double-free. Preserve it.
 
 ## Open questions for the planner / user
 

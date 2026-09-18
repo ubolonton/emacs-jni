@@ -55,6 +55,44 @@ of which numeric width to pick. This is also why
 can behave differently for numeric arguments than for string or object
 arguments — the marshalling rules it depends on are not symmetric.
 
+## Where a value converts, and why there is a middle form
+
+A value crossing between Lisp and the JVM passes through two converters,
+not one: a Lisp-side half that speaks a live `emacs::Value` and needs
+the main-thread `Env`, and a JVM-side half that speaks a JNI
+`jvalue`/`JObject`. Between them sits an owned, `Env`-free,
+JNI-frame-free carrier — `commands::BridgeValue` — that both halves
+understand. Four converters cover the base directions; a `jvm-call`'s
+arguments and a callback's return reuse the Lisp-to-JVM pair, and a
+`jvm-call`'s return and a callback's arguments reuse the JVM-to-Lisp
+pair:
+
+- Lisp to JVM: `lisp_value_to_arg` reads the Lisp value, then
+  `lisp_arg_to_jvalue` builds the Java value.
+- JVM to Lisp: `jvm_value_to_lisp_arg` reads the Java value, then
+  `bridge_value_to_value` builds the Lisp value.
+
+The Clojure layer adds a thin JVM-side wrapper on the same edge —
+`->lisp`/`->clj` in `emacs-jni.clj` map a Clojure symbol or keyword to
+and from a `LispSymbol` marker — and two direction-named enums,
+`LispInput` (into Lisp) and `LispOutcome` (out of Lisp), that compose
+`BridgeValue` rather than restate its scalar cases.
+
+The middle form is not decoration. The async path runs the JVM-side
+work on a different OS thread from Lisp, and a `JValueOwned` or
+`emacs::Value` cannot cross a thread — each is bound to a JNI local
+frame or to the main-thread `Env`. `BridgeValue` is the owned snapshot
+that can sit in the command queue between the two threads; objects
+reduce to a token there (see below), scalars inline.
+
+The synchronous direct path (`jvm-call-direct`, and the Clojure calls
+it drives) is the exception. It runs on the main thread, where both the
+`Env` and an attached JNI env are live at once, so nothing crosses a
+thread. There the middle `BridgeValue` is a code-reuse choice — the
+same two converters serve both paths — not a requirement: a fused
+Lisp-value-to-`jvalue` conversion would also work, trading the saved
+intermediate for a second copy of the type-directed rules.
+
 ## Why a Lisp function becomes a real Java object
 
 Passing a Lisp function into `jvm-call` wraps it as an instance of a
@@ -119,12 +157,30 @@ is no matching case in the other direction.
 
 Underneath, a `LispObject` owns an `emacs::GlobalRef` — the `emacs`
 crate's mechanism for a Lisp value that outlives a single module call.
-The Java object holds the pointer to it; there is no Rust-side handle
-table, so the `GlobalRef`'s owner is unambiguously the one Java object,
-and its lifetime ends when that object is collected. A `GlobalRef` can
-only be created, read, or freed with a live `Env`, which is why every
-`LispObject` operation is serviced on the Emacs main thread — see
-[Architecture](architecture.md#why-clojure-calls-into-lisp-run-on-the-emacs-main-thread).
+The Java object holds a `long`, the boxed pointer to that `GlobalRef`,
+rather than the reference itself. This is not a threading shortcut: a
+Java field can hold only a primitive, and a `GlobalRef` can be
+dereferenced or freed only on the Emacs main thread with a live `Env`.
+Handing the Rust reference to Java directly is therefore impossible —
+Java has nothing to hold it in, and could not use it off the main
+thread if it did. The `long` is a token Java parks and hands back to a
+main-thread native, which is why every `LispObject` operation is
+serviced on the Emacs main thread (see
+[Architecture](architecture.md#why-clojure-calls-into-lisp-run-on-the-emacs-main-thread)).
+This mirrors the other object direction — a JVM object returned to Lisp,
+which Lisp likewise holds as an opaque `user-ptr` token for a reference
+only the JVM side can use.
+
+There is no Rust-side handle table for a `LispObject`: the pointer is
+the reference's sole owner, so its lifetime ends when the one Java
+object is collected. Correctness depends on exactly one `LispObject`
+holding a given pointer. `LispObject` is a `final` class with a `final
+ptr` and a package-private constructor, is neither `Cloneable` nor
+`Serializable`, and is built only from Rust — each crossing mints a
+fresh `GlobalRef`. So no two instances can share a pointer, and the
+free, driven by one `Cleaner` per instance, runs exactly once. A copy
+path or a reused pointer would double-free; those guardrails are
+load-bearing.
 
 ## The no-cycles assumption
 

@@ -34,20 +34,24 @@ the Rust side. Each Lisp-facing primitive (`jvm--start`, `jvm--pause`,
 this is why the plain (non-`-sync`) functions are async by default,
 not a fetched-in-later design choice.
 
-The worker thread talks back to Lisp through a different mechanism: an
-Emacs pipe process, backed by `Env::open_channel`, carrying
-newline-terminated S-expressions. `jvm--process-filter` in
-`elisp/jvm.el` accumulates bytes until it sees a complete line,
-reads it as a Lisp form, and dispatches on its head symbol:
-`status`, `log`, `load-jar-done`, `call-done`, `invoke`, `release`, or
-`lisp-request`.
+The worker thread talks back through a typed inbound queue plus an
+Emacs pipe process. Every JVM-to-Emacs message — a finished call, a
+callback into a Lisp function, a `LispObject` free, a log line, a
+status transition, a Clojure `apply`/`intern`/`eq` request — is pushed
+onto the queue (`lisp_requests::Inbound`) as a typed Rust value. The
+pipe, backed by `Env::open_channel`, then carries one wakeup byte, with
+no payload. Its filter, the `jvm--service-inbound` module function,
+ignores the byte and drains the whole queue on the Emacs main thread,
+converting each message with a live `Env`.
 
 Two separate channels, rather than one bidirectional one, follows from
 which side can block. The worker thread can block on the `mpsc`
 channel between commands, with no ill effect. Lisp cannot block
 waiting on the JVM without freezing Emacs — so the worker-to-Lisp
 direction has to arrive as an event the existing Emacs process filter
-mechanism already knows how to schedule, not as a blocking read.
+mechanism already knows how to schedule, not as a blocking read. The
+queue carries the data; the pipe only schedules the drain, so coalesced
+wakeups are harmless — each drain empties the queue.
 
 ## A call gets its own thread, not the worker thread
 
@@ -119,10 +123,12 @@ the Emacs main thread, during a module call. The JVM thread the Clojure
 code runs on has no `Env`.
 
 So those operations do not run on the JVM thread. The JVM thread
-enqueues a request, sends a one-symbol `(lisp-request)` wakeup over the
-same worker-to-Lisp pipe, and blocks. Emacs services the queue on its
-main thread, the next time it pumps that pipe — either while idle, or
-inside an `-await` wrapper's own `accept-process-output` loop. That
+enqueues the request on the same inbound queue every JVM-to-Emacs
+message uses, pokes the worker-to-Lisp pipe with a wakeup byte, and
+blocks. Emacs services the queue on its main thread — one
+`jvm--service-inbound` drain handles this request together with any
+other queued message — the next time it pumps that pipe, either while
+idle, or inside an `-await` wrapper's own `accept-process-output` loop. That
 second case is what makes these calls reentrant: a Clojure call that
 reaches back into Lisp from inside a `jvm-clj-eval-string-await` is
 serviced by the very `accept-process-output` loop that is already

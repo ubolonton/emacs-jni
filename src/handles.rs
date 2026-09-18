@@ -6,6 +6,12 @@ use jni::objects::JObject;
 use jni::refs::Global;
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+// TODO: This table is likely removable. It existed so a JVM object could be a
+// text-serialisable integer over the old sexp pipe; that pipe is gone (typed
+// inbound queue). `Global` is `Send + Sync`, so `BridgeValue::Object` could carry
+// `Arc<Global>` directly and the `JvmHandle` user-ptr could box it, deleting this
+// map. See Item 6 in
+// `docs/superpowers/specs/2026-09-18-marshalling-consolidation-design.md`.
 // Entries are `Arc`-wrapped, not bare `Global`s: jni 0.22's `Global` has no
 // `Clone` impl (a real clone would mean a fresh `NewGlobalRef` JNI call,
 // which needs a live `Env` that `resolve` below doesn't have) -- see
