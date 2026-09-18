@@ -236,8 +236,11 @@ fn free_reply_ptr(env: &Env, v: Option<Box<LispOutcome>>) {
 /// only for Rust-internal errors, never a genuine Lisp signal.
 fn fallback_signal(message: &str) -> LispOutcome {
     LispOutcome::Signal {
-        symbol: Box::new(LispOutcome::Symbol { name: "error".to_string(), keyword: false }),
-        data: Box::new(LispOutcome::Str(message.to_string())),
+        symbol: Box::new(LispOutcome::Value(BridgeValue::Symbol {
+            name: "error".to_string(),
+            keyword: false,
+        })),
+        data: Box::new(LispOutcome::Value(BridgeValue::Str(message.to_string()))),
     }
 }
 
@@ -249,25 +252,25 @@ fn fallback_signal(message: &str) -> LispOutcome {
 /// its Java shapes mirror the `jvm-call` return-marshalling table.
 fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
     if !value.is_not_nil() {
-        return Ok(LispOutcome::Nil);
+        return Ok(LispOutcome::Value(BridgeValue::Nil));
     }
     if env.call("eq", (value, env.intern("t")?))?.is_not_nil() {
         return Ok(LispOutcome::Bool(true));
     }
     if env.call("stringp", (value,))?.is_not_nil() {
-        return Ok(LispOutcome::Str(value.into_rust::<String>()?));
+        return Ok(LispOutcome::Value(BridgeValue::Str(value.into_rust::<String>()?)));
     }
     if env.call("floatp", (value,))?.is_not_nil() {
-        return Ok(LispOutcome::Float(value.into_rust::<f64>()?));
+        return Ok(LispOutcome::Value(BridgeValue::Float(value.into_rust::<f64>()?)));
     }
     if env.call("integerp", (value,))?.is_not_nil() {
         // A fixnum fits an i64; a bignum does not, so render it to its
         // decimal string and rebuild it as a BigInteger on the JVM side.
         if env.call("fixnump", (value,))?.is_not_nil() {
-            return Ok(LispOutcome::Int(value.into_rust::<i64>()?));
+            return Ok(LispOutcome::Value(BridgeValue::Int(value.into_rust::<i64>()?)));
         }
         let digits = env.call("number-to-string", (value,))?.into_rust::<String>()?;
-        return Ok(LispOutcome::BigInt(digits));
+        return Ok(LispOutcome::Value(BridgeValue::BigInt(digits)));
     }
     // A keyword's `symbol-name` includes the leading `:`; carry the bare
     // name. `keywordp` in Emacs already implies interned, so every keyword
@@ -275,7 +278,7 @@ fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
     if env.call("keywordp", (value,))?.is_not_nil() {
         let full = env.call("symbol-name", (value,))?.into_rust::<String>()?;
         let name = full.strip_prefix(':').unwrap_or(&full).to_string();
-        return Ok(LispOutcome::Symbol { name, keyword: true });
+        return Ok(LispOutcome::Value(BridgeValue::Symbol { name, keyword: true }));
     }
     if env.call("symbolp", (value,))?.is_not_nil() {
         // Only an interned symbol (one `eq` to `intern-soft` of its own
@@ -286,7 +289,10 @@ fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
         let name = env.call("symbol-name", (value,))?;
         let interned = env.call("intern-soft", (name,))?;
         if env.call("eq", (value, interned))?.is_not_nil() {
-            return Ok(LispOutcome::Symbol { name: name.into_rust::<String>()?, keyword: false });
+            return Ok(LispOutcome::Value(BridgeValue::Symbol {
+                name: name.into_rust::<String>()?,
+                keyword: false,
+            }));
         }
     }
     Ok(LispOutcome::Ptr(box_value(value)))
@@ -368,7 +374,7 @@ fn run_request_value(env: &Env, request: &LispRequest) -> EmacsResult<LispOutcom
         LispRequest::Prin1 { ptr, .. } => env
             .call("prin1-to-string", (borrow(env, *ptr),))
             .and_then(|v| v.into_rust::<String>())
-            .map(LispOutcome::Str),
+            .map(|s| LispOutcome::Value(BridgeValue::Str(s))),
         LispRequest::FreeRef { .. } => unreachable!(
             "FreeRef has no reply: it is handled inline in `service`, and never takes the \
              reentrant direct path (a Cleaner thread pushes no `reentry` scope)"
@@ -400,8 +406,11 @@ mod tests {
     fn fallback_signal_is_error_symbol_with_message() {
         match fallback_signal("boom") {
             LispOutcome::Signal { symbol, data } => {
-                assert!(matches!(*symbol, LispOutcome::Symbol { ref name, keyword: false } if name == "error"));
-                assert!(matches!(*data, LispOutcome::Str(ref s) if s == "boom"));
+                assert!(matches!(
+                    *symbol,
+                    LispOutcome::Value(BridgeValue::Symbol { ref name, keyword: false }) if name == "error"
+                ));
+                assert!(matches!(*data, LispOutcome::Value(BridgeValue::Str(ref s)) if s == "boom"));
             }
             _ => panic!("expected Signal"),
         }

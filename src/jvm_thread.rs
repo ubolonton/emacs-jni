@@ -520,11 +520,13 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::
                 env,
                 &future_local,
                 crate::commands::LispOutcome::Signal {
-                    symbol: Box::new(crate::commands::LispOutcome::Symbol {
+                    symbol: Box::new(crate::commands::LispOutcome::Value(crate::commands::BridgeValue::Symbol {
                         name: "error".to_string(),
                         keyword: false,
-                    }),
-                    data: Box::new(crate::commands::LispOutcome::Str(message)),
+                    })),
+                    data: Box::new(crate::commands::LispOutcome::Value(
+                        crate::commands::BridgeValue::Str(message),
+                    )),
                 },
             )?;
         }
@@ -580,9 +582,13 @@ pub(crate) fn build_lisp_reply_object<'local>(
     value: crate::commands::LispOutcome,
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
     match value {
-        crate::commands::LispOutcome::Ptr(ptr) => {
-            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
-            env.new_object(&class, jni::jni_sig!((ptr: long) -> void), &[jni::objects::JValue::Long(ptr)])
+        crate::commands::LispOutcome::Value(bridge) => {
+            // Reuse the one Lisp->JVM marshaller against java.lang.Object,
+            // then box any primitive — identical to how handle_invoke_reply
+            // completes a callback's return value.
+            let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
+            let jvalue = crate::marshal::lisp_arg_to_jvalue(env, &bridge, &object_class)?;
+            crate::marshal::box_if_primitive(env, jvalue)
         }
         crate::commands::LispOutcome::Bool(b) => {
             let class = env.find_class(jni::jni_str!("java/lang/Boolean"))?;
@@ -594,48 +600,9 @@ pub(crate) fn build_lisp_reply_object<'local>(
             )?
             .l()
         }
-        crate::commands::LispOutcome::Str(s) => {
-            let jstr = env.new_string(&s)?;
-            Ok(jstr.into())
-        }
-        crate::commands::LispOutcome::Nil => Ok(jni::objects::JObject::null()),
-        crate::commands::LispOutcome::Int(n) => {
-            let class = env.find_class(jni::jni_str!("java/lang/Long"))?;
-            env.call_static_method(
-                &class,
-                jni::jni_str!("valueOf"),
-                jni::jni_sig!((v: long) -> java.lang.Long),
-                &[jni::objects::JValue::Long(n)],
-            )?
-            .l()
-        }
-        crate::commands::LispOutcome::Float(f) => {
-            let class = env.find_class(jni::jni_str!("java/lang/Double"))?;
-            env.call_static_method(
-                &class,
-                jni::jni_str!("valueOf"),
-                jni::jni_sig!((v: double) -> java.lang.Double),
-                &[jni::objects::JValue::Double(f)],
-            )?
-            .l()
-        }
-        crate::commands::LispOutcome::BigInt(digits) => {
-            let jstr = env.new_string(&digits)?;
-            let class = env.find_class(jni::jni_str!("java/math/BigInteger"))?;
-            env.new_object(
-                &class,
-                jni::jni_sig!((val: java.lang.String) -> void),
-                &[jni::objects::JValueOwned::Object(jstr.into()).borrow()],
-            )
-        }
-        crate::commands::LispOutcome::Symbol { name, keyword } => {
-            let jname: jni::objects::JObject = env.new_string(&name)?.into();
-            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
-            env.new_object(
-                &class,
-                jni::jni_sig!((name: java.lang.String, keyword: boolean) -> void),
-                &[jni::objects::JValue::Object(&jname), jni::objects::JValue::Bool(keyword)],
-            )
+        crate::commands::LispOutcome::Ptr(ptr) => {
+            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
+            env.new_object(&class, jni::jni_sig!((ptr: long) -> void), &[jni::objects::JValue::Long(ptr)])
         }
         crate::commands::LispOutcome::Signal { .. } | crate::commands::LispOutcome::Throw { .. } => {
             unreachable!("Signal/Throw are handled by handle_lisp_reply before build_lisp_reply_object")

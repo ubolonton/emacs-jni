@@ -45,31 +45,19 @@ pub enum BridgeValue {
 /// reply, which is always a `BridgeValue`.
 #[derive(Debug)]
 pub enum LispOutcome {
-    /// A boxed `emacs::GlobalRef` pointer — becomes a Java `LispObject`.
-    /// Used for any result value that is not a scalar or string (symbols,
-    /// conses, vectors, hash tables, ...).
-    Ptr(i64),
-    /// Lisp `nil` — becomes Clojure `nil` (Java `null`).
-    Nil,
+    /// A scalar or symbol result, reusing the generic bridge carrier — the
+    /// dedup'd overlap with `BridgeValue` (was `Nil`/`Int`/`Float`/`BigInt`/
+    /// `Str`/`Symbol`). `nil` is `BridgeValue::Nil`, the symbol `t` stays
+    /// `Bool(true)` below (a Lisp predicate result usable as a Clojure boolean).
+    Value(BridgeValue),
+    /// A computed boolean from `eq`/`is-not-nil?`, or the Lisp symbol `t` —
+    /// always a real Java `Boolean`, never `nil`/null.
     Bool(bool),
-    /// A fixnum — becomes a boxed `Long`.
-    Int(i64),
-    /// A float — becomes a boxed `Double`.
-    Float(f64),
-    /// Decimal digits of a bignum too large for `i64` — becomes a boxed
-    /// `BigInteger`, matching the `jvm-call` marshalling table.
-    BigInt(String),
-    Str(String),
-    /// An interned Lisp symbol or keyword — becomes an `emacs_jni.core.LispSymbol`
-    /// marker the `emacs-jni.clj` namespace turns into a Clojure
-    /// symbol/keyword. `name` is the bare name (no leading `:`).
-    Symbol { name: String, keyword: bool },
-    /// A Lisp `signal` — the future completes exceptionally with a
-    /// `LispNonLocalExit(SIGNAL, symbol, data)`. `symbol` and `data` are
-    /// nested, already-marshaled reply values (a symbol marker; the data
-    /// list as a `LispObject`).
+    /// A boxed `emacs::GlobalRef` pointer — an opaque Lisp `LispObject`.
+    Ptr(i64),
+    /// A Lisp `signal`: completes exceptionally with a `LispSignal`.
     Signal { symbol: Box<LispOutcome>, data: Box<LispOutcome> },
-    /// A Lisp `throw` — `LispNonLocalExit(THROW, tag, value)`.
+    /// A Lisp `throw`: completes exceptionally with a `LispThrow`.
     Throw { tag: Box<LispOutcome>, value: Box<LispOutcome> },
 }
 
