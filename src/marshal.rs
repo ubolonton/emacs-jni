@@ -20,15 +20,15 @@ pub fn lisp_arg_to_jvalue<'local>(
         }
         (BridgeValue::Nil, _) => Ok(JValueOwned::Object(JObject::null())),
         (BridgeValue::True, _) => Ok(JValueOwned::Bool(true)),
-        (BridgeValue::Int(n), "int") => i32::try_from(*n)
-            .map(JValueOwned::Int)
-            .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type int"))),
-        (BridgeValue::Int(n), "short") => i16::try_from(*n)
-            .map(JValueOwned::Short)
-            .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type short"))),
-        (BridgeValue::Int(n), "byte") => i8::try_from(*n)
-            .map(JValueOwned::Byte)
-            .map_err(|_| marshal_error(&format!("integer {n} out of range for parameter type byte"))),
+        (BridgeValue::Int(n), "int") => i32::try_from(*n).map(JValueOwned::Int).map_err(|_| {
+            marshal_error(&format!("integer {n} out of range for parameter type int"))
+        }),
+        (BridgeValue::Int(n), "short") => i16::try_from(*n).map(JValueOwned::Short).map_err(|_| {
+            marshal_error(&format!("integer {n} out of range for parameter type short"))
+        }),
+        (BridgeValue::Int(n), "byte") => i8::try_from(*n).map(JValueOwned::Byte).map_err(|_| {
+            marshal_error(&format!("integer {n} out of range for parameter type byte"))
+        }),
         // The "java.lang.Object" arms below matter beyond Task 5's own
         // `Method.invoke`/`Constructor.newInstance` callers (where a
         // declared parameter type of plain `Object` is just one possible
@@ -44,24 +44,27 @@ pub fn lisp_arg_to_jvalue<'local>(
         // number", so a value that crosses Java -> Lisp -> Java this way
         // round-trips through the same representation rather than
         // silently narrowing.
-        (BridgeValue::Int(n), "long") | (BridgeValue::Int(n), "java.lang.Object") => Ok(JValueOwned::Long(*n)),
+        (BridgeValue::Int(n), "long") | (BridgeValue::Int(n), "java.lang.Object") => {
+            Ok(JValueOwned::Long(*n))
+        }
         (BridgeValue::Int(n), "float") => Ok(JValueOwned::Float(*n as f32)),
         (BridgeValue::Int(n), "double") => Ok(JValueOwned::Double(*n as f64)),
         (BridgeValue::Int(n), "java.math.BigInteger") => big_integer_from_str(env, &n.to_string()),
-        (BridgeValue::Int(_), other) => Err(marshal_error(&format!(
-            "integer argument doesn't fit parameter type {other}"
-        ))),
-        (BridgeValue::Float(f), "float") => Ok(JValueOwned::Float(*f as f32)),
-        (BridgeValue::Float(f), "double") | (BridgeValue::Float(f), "java.lang.Object") => Ok(JValueOwned::Double(*f)),
-        (BridgeValue::Float(_), other) => Err(marshal_error(&format!(
-            "float argument doesn't fit parameter type {other}"
-        ))),
-        (BridgeValue::BigInt(digits), "java.math.BigInteger") | (BridgeValue::BigInt(digits), "java.lang.Object") => {
-            big_integer_from_str(env, digits)
+        (BridgeValue::Int(_), other) => {
+            Err(marshal_error(&format!("integer argument doesn't fit parameter type {other}")))
         }
-        (BridgeValue::BigInt(_), other) => Err(marshal_error(&format!(
-            "bignum argument too large for parameter type {other}"
-        ))),
+        (BridgeValue::Float(f), "float") => Ok(JValueOwned::Float(*f as f32)),
+        (BridgeValue::Float(f), "double") | (BridgeValue::Float(f), "java.lang.Object") => {
+            Ok(JValueOwned::Double(*f))
+        }
+        (BridgeValue::Float(_), other) => {
+            Err(marshal_error(&format!("float argument doesn't fit parameter type {other}")))
+        }
+        (BridgeValue::BigInt(digits), "java.math.BigInteger")
+        | (BridgeValue::BigInt(digits), "java.lang.Object") => big_integer_from_str(env, digits),
+        (BridgeValue::BigInt(_), other) => {
+            Err(marshal_error(&format!("bignum argument too large for parameter type {other}")))
+        }
         (BridgeValue::Str(s), _) => {
             let jstr = env.new_string(s)?;
             Ok(JValueOwned::Object(jstr.into()))
@@ -90,7 +93,8 @@ pub fn lisp_arg_to_jvalue<'local>(
         // `invoke`/`InvokeReply` round-tripping (Task 7) to call back
         // into Lisp by that handle.
         (BridgeValue::Callback(handle), _) => {
-            let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
+            let lisp_function_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
             let obj = env.new_object(
                 &lisp_function_class,
                 jni::jni_sig!((handle: long) -> void),
@@ -110,10 +114,7 @@ pub fn lisp_arg_to_jvalue<'local>(
             let obj = env.new_object(
                 &class,
                 jni::jni_sig!((name: java.lang.String, keyword: boolean) -> void),
-                &[
-                    JValueOwned::Object(jname.into()).borrow(),
-                    JValueOwned::Bool(*keyword).borrow(),
-                ],
+                &[JValueOwned::Object(jname.into()).borrow(), JValueOwned::Bool(*keyword).borrow()],
             )?;
             Ok(JValueOwned::Object(obj))
         }
@@ -380,7 +381,12 @@ fn object_to_lisp_arg<'local>(
     }
     if env.is_instance_of(&obj, &big_integer_class)? {
         let s = env
-            .call_method(&obj, jni::jni_str!("toString"), jni::jni_sig!(() -> java.lang.String), &[])?
+            .call_method(
+                &obj,
+                jni::jni_str!("toString"),
+                jni::jni_sig!(() -> java.lang.String),
+                &[],
+            )?
             .l()?;
         let s = env.cast_local::<jni::objects::JString>(s)?;
         return Ok(BridgeValue::BigInt(s.to_string()));
@@ -404,13 +410,10 @@ fn object_to_lisp_arg<'local>(
 
     let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
     if env.is_instance_of(&obj, &lisp_symbol_class)? {
-        let name = env
-            .get_field(&obj, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?
-            .l()?;
+        let name =
+            env.get_field(&obj, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?.l()?;
         let name = env.cast_local::<jni::objects::JString>(name)?.to_string();
-        let keyword = env
-            .get_field(&obj, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?
-            .z()?;
+        let keyword = env.get_field(&obj, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?.z()?;
         return Ok(BridgeValue::Symbol { name, keyword });
     }
 
@@ -514,22 +517,35 @@ mod jvm_tests {
     // Task 6's varargs-style Method.invoke callers) for Task 6 to resolve
     // — not solved here; see plan's Task 5 section, where `box_if_primitive`
     // is later introduced for exactly that purpose.
-    fn arg_to_object<'local>(env: &mut jni::Env<'local>, v: JValueOwned<'local>) -> jni::errors::Result<JObject<'local>> {
+    fn arg_to_object<'local>(
+        env: &mut jni::Env<'local>,
+        v: JValueOwned<'local>,
+    ) -> jni::errors::Result<JObject<'local>> {
         match v {
             JValueOwned::Object(o) => Ok(o),
             JValueOwned::Long(n) => {
                 let long_class = env.find_class(jni::jni_str!("java/lang/Long"))?;
-                env.call_static_method(&long_class, jni::jni_str!("valueOf"), jni::jni_sig!((v: long) -> java.lang.Long), &[JValueOwned::Long(n).borrow()])?.l()
+                env.call_static_method(
+                    &long_class,
+                    jni::jni_str!("valueOf"),
+                    jni::jni_sig!((v: long) -> java.lang.Long),
+                    &[JValueOwned::Long(n).borrow()],
+                )?
+                .l()
             }
             _ => panic!("test helper only handles the cases this test needs"),
         }
     }
 
-    fn primitive_long_class<'local>(env: &mut jni::Env<'local>) -> jni::errors::Result<JClass<'local>> {
+    fn primitive_long_class<'local>(
+        env: &mut jni::Env<'local>,
+    ) -> jni::errors::Result<JClass<'local>> {
         // java.lang.Long.TYPE is the live Class<Long> representing the
         // primitive `long`, distinct from the boxed Long.class.
         let long_class = env.find_class(jni::jni_str!("java/lang/Long"))?;
-        let field = env.get_static_field(&long_class, jni::jni_str!("TYPE"), jni::jni_sig!(java.lang.Class))?.l()?;
+        let field = env
+            .get_static_field(&long_class, jni::jni_str!("TYPE"), jni::jni_sig!(java.lang.Class))?
+            .l()?;
         env.cast_local::<JClass>(field)
     }
 }

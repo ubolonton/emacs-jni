@@ -168,7 +168,12 @@ fn parse_call_target(target: Value) -> Result<commands::CallTarget> {
 /// blocks Emacs's main loop for its whole duration — the caller must keep
 /// heavy/blocking work on the Clojure side's own threads.
 #[defun(mod_in_name = false, name = "jvm--call-direct")]
-fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value) -> Result<Value<'e>> {
+fn jvm_call_direct<'e>(
+    env: &'e Env,
+    target: Value,
+    member: String,
+    args: Value,
+) -> Result<Value<'e>> {
     if STATUS.get() != Status::Ready {
         return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
     }

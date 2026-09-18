@@ -32,7 +32,10 @@ pub enum BridgeValue {
     /// An interned Lisp symbol or keyword, crossing as an
     /// `emacs_jni.core.LispSymbol` marker (the same class the Clojure
     /// Lisp-access path uses). `name` is the bare name (no leading `:`).
-    Symbol { name: String, keyword: bool },
+    Symbol {
+        name: String,
+        keyword: bool,
+    },
 }
 
 /// The value a `Cmd::LispReply` or `Cmd::InvokeReply` completes a pending
@@ -72,22 +75,38 @@ pub enum Cmd {
     Resume,
     Pause,
     Stop,
-    LoadJar { id: u64, path: String },
-    Call { id: u64, target: CallTarget, member: String, args: Vec<BridgeValue> },
+    LoadJar {
+        id: u64,
+        path: String,
+    },
+    Call {
+        id: u64,
+        target: CallTarget,
+        member: String,
+        args: Vec<BridgeValue>,
+    },
     /// Completes a pending `LispFunction.call` future (`shim::
     /// lisp_function_call`) with the Lisp callback's outcome — sent by
     /// `jvm--invoke-reply` once `jvm--resolve-invoke` (`elisp/jvm.el`) has
     /// funcalled the callback and marshalled its return value or its real
     /// `condition-case` signal into a `LispOutcome`. See
     /// `jvm_thread::handle_invoke_reply`.
-    InvokeReply { id: u64, outcome: LispOutcome },
-    ReleaseRef { handle: u64 },
+    InvokeReply {
+        id: u64,
+        outcome: LispOutcome,
+    },
+    ReleaseRef {
+        handle: u64,
+    },
     /// Completes a pending Lisp-access native's reply future (`intern`,
     /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by
     /// `jvm--service-inbound` (`lisp_requests::service_inbound`) after
     /// running the corresponding `Env` op on the main thread. See
     /// `jvm_thread::handle_lisp_reply`.
-    LispReply { id: u64, value: LispOutcome },
+    LispReply {
+        id: u64,
+        value: LispOutcome,
+    },
     #[cfg(feature = "test-support")]
     TestPanic,
 }

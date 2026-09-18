@@ -295,10 +295,8 @@ fn handle_pause(vm: &JavaVM) {
 fn handle_stop(vm: JavaVM) {
     // Safety: `destroy` requires no Java methods on the calling thread's
     // stack (true here — we're between command handlers) and that the
-    // JavaVM isn't used again afterward except to drop it, which is
-    // exactly what follows.
+    // JavaVM isn't used again afterward — nothing below touches `vm`.
     let result = unsafe { vm.destroy() };
-    std::mem::drop(vm);
     // Drop the shared handles the main thread reads for `call_direct`: the VM
     // is gone now. The main thread already detached itself in the `jvm--stop`
     // defun (before this `Cmd::Stop` was sent), so no main-thread attachment
@@ -508,10 +506,7 @@ fn add_jar_url(
         &method,
         jni::jni_str!("invoke"),
         jni::jni_sig!((obj: java.lang.Object, args: [java.lang.Object]) -> java.lang.Object),
-        &[
-            jni::objects::JValue::Object(loader),
-            jni::objects::JValue::Object(&invoke_args),
-        ],
+        &[jni::objects::JValue::Object(loader), jni::objects::JValue::Object(&invoke_args)],
     )?;
 
     Ok(())
@@ -621,9 +616,14 @@ pub(crate) fn build_lisp_reply_object<'local>(
         }
         crate::commands::LispOutcome::Ptr(ptr) => {
             let class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
-            env.new_object(&class, jni::jni_sig!((ptr: long) -> void), &[jni::objects::JValue::Long(ptr)])
+            env.new_object(
+                &class,
+                jni::jni_sig!((ptr: long) -> void),
+                &[jni::objects::JValue::Long(ptr)],
+            )
         }
-        crate::commands::LispOutcome::Signal { .. } | crate::commands::LispOutcome::Throw { .. } => {
+        crate::commands::LispOutcome::Signal { .. }
+        | crate::commands::LispOutcome::Throw { .. } => {
             unreachable!(
                 "Signal/Throw are handled by complete_future_with_reply/throw_non_local_exit \
                  before build_lisp_reply_object"
@@ -792,7 +792,12 @@ pub(crate) fn resolve_and_invoke(
         let loader_local = env.new_local_ref(global.as_obj())?;
         let thread_class = env.find_class(jni::jni_str!("java/lang/Thread"))?;
         let current_thread = env
-            .call_static_method(&thread_class, jni::jni_str!("currentThread"), jni::jni_sig!(() -> java.lang.Thread), &[])?
+            .call_static_method(
+                &thread_class,
+                jni::jni_str!("currentThread"),
+                jni::jni_sig!(() -> java.lang.Thread),
+                &[],
+            )?
             .l()?;
         env.call_method(
             &current_thread,
@@ -875,7 +880,11 @@ pub(crate) enum DirectError {
     /// `LispNonLocalExit`. `kind` is 0 (signal) or 1 (throw); `a`/`b` are the
     /// already-classified symbol/data or tag/value, ready to rebind to the
     /// caller's `Env` and re-raise via `(signal …)`/`(throw …)`.
-    NonLocalExit { kind: i32, a: crate::lisp_requests::LispInput, b: crate::lisp_requests::LispInput },
+    NonLocalExit {
+        kind: i32,
+        a: crate::lisp_requests::LispInput,
+        b: crate::lisp_requests::LispInput,
+    },
     /// Any other JVM-side failure — surfaced as `jvm-error` with this message.
     Jni(jni::errors::Error),
 }
@@ -910,17 +919,19 @@ pub(crate) fn call_direct(
     // `make-thread` Lisp thread) is never recorded as main, so its scoped
     // attach owns the attachment and detaches on return — transient, no leaked
     // attachment to block a later `destroy`.
-    if crate::runtime::on_main_thread() && !crate::runtime::main_attached() {
-        if vm.attach_current_thread(|_env| Ok::<(), jni::errors::Error>(())).is_ok() {
-            crate::runtime::set_main_attached(true);
-        }
+    if crate::runtime::on_main_thread()
+        && !crate::runtime::main_attached()
+        && vm.attach_current_thread(|_env| Ok::<(), jni::errors::Error>(())).is_ok()
+    {
+        crate::runtime::set_main_attached(true);
     }
 
     // The actual invoke always goes through a *scoped* attach: a no-op on the
     // permanently-attached main thread, an owning attach-and-detach on any
     // other thread.
-    let result =
-        vm.attach_current_thread_for_scope(|env| resolve_and_invoke(env, loader, target, member, args));
+    let result = vm.attach_current_thread_for_scope(|env| {
+        resolve_and_invoke(env, loader, target, member, args)
+    });
 
     ATTACH_DEPTH.with(|d| d.set(d.get() - 1));
     match result {
@@ -981,7 +992,9 @@ fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
     let caught = match env.exception_catch() {
         Err(e) => e,
         Ok(()) => {
-            return marshal_error("expected a pending Java exception (Error::JavaException) but found none")
+            return marshal_error(
+                "expected a pending Java exception (Error::JavaException) but found none",
+            )
         }
     };
     let jni::errors::Error::CaughtJavaException { name, msg, exception, .. } = caught else {
@@ -1112,7 +1125,12 @@ fn invoke_method(
     for i in 0..count {
         let candidate = methods.get_element(env, i)?;
         let name = env
-            .call_method(&candidate, jni::jni_str!("getName"), jni::jni_sig!(() -> java.lang.String), &[])?
+            .call_method(
+                &candidate,
+                jni::jni_str!("getName"),
+                jni::jni_sig!(() -> java.lang.String),
+                &[],
+            )?
             .l()?;
         let name = env.cast_local::<jni::objects::JString>(name)?.to_string();
         if name != method_name {
@@ -1146,25 +1164,24 @@ fn invoke_method(
             &candidate,
             jni::jni_str!("invoke"),
             jni::jni_sig!((obj: java.lang.Object, args: [java.lang.Object]) -> java.lang.Object),
-            &[
-                jni::objects::JValue::Object(receiver),
-                jni::objects::JValue::Object(&invoke_args),
-            ],
+            &[jni::objects::JValue::Object(receiver), jni::objects::JValue::Object(&invoke_args)],
         ) {
             Ok(v) => v.l()?,
             // See `describe_pending_java_exception`'s doc comment: without
             // this, the caller only ever learns "a Java exception was
             // thrown", not what it actually said.
-            Err(jni::errors::Error::JavaException) => return Err(describe_pending_java_exception(env)),
+            Err(jni::errors::Error::JavaException) => {
+                return Err(describe_pending_java_exception(env))
+            }
             Err(e) => return Err(e),
         };
-        return crate::marshal::jvm_value_to_lisp_arg(env, jni::objects::JValueOwned::Object(result));
+        return crate::marshal::jvm_value_to_lisp_arg(
+            env,
+            jni::objects::JValueOwned::Object(result),
+        );
     }
 
-    Err(marshal_error(&format!(
-        "no method {method_name} with {} argument(s) found",
-        args.len()
-    )))
+    Err(marshal_error(&format!("no method {method_name} with {} argument(s) found", args.len())))
 }
 
 fn invoke_constructor(
@@ -1213,16 +1230,18 @@ fn invoke_constructor(
             &[jni::objects::JValue::Object(&invoke_args)],
         ) {
             Ok(v) => v.l()?,
-            Err(jni::errors::Error::JavaException) => return Err(describe_pending_java_exception(env)),
+            Err(jni::errors::Error::JavaException) => {
+                return Err(describe_pending_java_exception(env))
+            }
             Err(e) => return Err(e),
         };
-        return crate::marshal::jvm_value_to_lisp_arg(env, jni::objects::JValueOwned::Object(instance));
+        return crate::marshal::jvm_value_to_lisp_arg(
+            env,
+            jni::objects::JValueOwned::Object(instance),
+        );
     }
 
-    Err(marshal_error(&format!(
-        "no constructor with {} argument(s) found",
-        args.len()
-    )))
+    Err(marshal_error(&format!("no constructor with {} argument(s) found", args.len())))
 }
 
 /// Shared by `invoke_method`/`invoke_constructor`: marshals ARGS against
@@ -1235,7 +1254,8 @@ fn build_invoke_args<'local>(
     args: &[crate::commands::BridgeValue],
 ) -> jni::errors::Result<jni::objects::JObjectArray<'local>> {
     let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
-    let invoke_args = env.new_object_array(args.len() as i32, &object_class, jni::objects::JObject::null())?;
+    let invoke_args =
+        env.new_object_array(args.len() as i32, &object_class, jni::objects::JObject::null())?;
     for (i, arg) in args.iter().enumerate() {
         let param_type_obj = param_types.get_element(env, i)?;
         let param_type = env.cast_local::<jni::objects::JClass>(param_type_obj)?;

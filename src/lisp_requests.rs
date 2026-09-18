@@ -64,30 +64,73 @@ pub enum LispInput {
 /// other JVM→Emacs message.
 #[derive(Debug)]
 pub enum Inbound {
-    Intern { id: u64, name: String },
-    Apply { id: u64, f: LispInput, args: Vec<LispInput> },
-    TypeOf { id: u64, arg: LispInput },
-    IsNotNil { id: u64, arg: LispInput },
-    Eq { id: u64, a: LispInput, b: LispInput },
-    Prin1 { id: u64, ptr: i64 },
-    FreeRef { ptr: i64 },
+    Intern {
+        id: u64,
+        name: String,
+    },
+    Apply {
+        id: u64,
+        f: LispInput,
+        args: Vec<LispInput>,
+    },
+    TypeOf {
+        id: u64,
+        arg: LispInput,
+    },
+    IsNotNil {
+        id: u64,
+        arg: LispInput,
+    },
+    Eq {
+        id: u64,
+        a: LispInput,
+        b: LispInput,
+    },
+    Prin1 {
+        id: u64,
+        ptr: i64,
+    },
+    FreeRef {
+        ptr: i64,
+    },
     /// A `jvm-call-async`/`jvm-new-async` call finished. Enqueued by
     /// `handle_call`.
-    CallDone { id: u64, ok: bool, result: BridgeValue, err: Option<String> },
+    CallDone {
+        id: u64,
+        ok: bool,
+        result: BridgeValue,
+        err: Option<String>,
+    },
     /// A JVM-initiated call into a previously wrapped Lisp function (see
     /// `jvm--register-callback`). Enqueued by `shim::lisp_function_call`.
-    Invoke { id: u64, handle: u64, args: Vec<BridgeValue> },
+    Invoke {
+        id: u64,
+        handle: u64,
+        args: Vec<BridgeValue>,
+    },
     /// A JVM-side `LispFunction` proxy was garbage collected. Enqueued by
     /// `shim::release_notifier_run`.
-    Release { handle: u64 },
+    Release {
+        handle: u64,
+    },
     /// A log line from the worker thread. Enqueued by every log call site
     /// in `jvm_thread`/`lisp_requests`.
-    Log { level: String, text: String },
+    Log {
+        level: String,
+        text: String,
+    },
     /// A JVM lifecycle status transition. Enqueued by every status-send
     /// call site in `jvm_thread`.
-    Status { status: Status, detail: Option<String> },
+    Status {
+        status: Status,
+        detail: Option<String>,
+    },
     /// A `jvm-load-jar-async` call finished. Enqueued by `handle_load_jar`.
-    LoadJarDone { id: u64, ok: bool, err: Option<String> },
+    LoadJarDone {
+        id: u64,
+        ok: bool,
+        err: Option<String>,
+    },
 }
 
 static QUEUE: Mutex<VecDeque<Inbound>> = Mutex::new(VecDeque::new());
@@ -548,7 +591,9 @@ mod tests {
                     *symbol,
                     LispOutcome::Value(BridgeValue::Symbol { ref name, keyword: false }) if name == "error"
                 ));
-                assert!(matches!(*data, LispOutcome::Value(BridgeValue::Str(ref s)) if s == "boom"));
+                assert!(
+                    matches!(*data, LispOutcome::Value(BridgeValue::Str(ref s)) if s == "boom")
+                );
             }
             _ => panic!("expected Signal"),
         }

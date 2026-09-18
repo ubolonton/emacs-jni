@@ -1,9 +1,15 @@
-use jni::objects::{JClass, JClassLoader, JObject, JObjectArray, JString, JThrowable, JValue, JValueOwned};
+use jni::objects::{
+    JClass, JClassLoader, JObject, JObjectArray, JString, JThrowable, JValue, JValueOwned,
+};
 
-const LISP_CALLABLE_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispCallable.class"));
-const LISP_FUNCTION_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispFunction.class"));
+const LISP_CALLABLE_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispCallable.class"
+));
+const LISP_FUNCTION_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispFunction.class"
+));
 const LISP_NON_LOCAL_EXIT_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/LispNonLocalExit.class"
@@ -20,16 +26,22 @@ const RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/ReleaseNotifier.class"
 ));
-const LISP_OBJECT_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispObject.class"));
-const LISP_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/Lisp.class"));
+const LISP_OBJECT_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispObject.class"
+));
+const LISP_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/Lisp.class"
+));
 const LISP_REF_RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/LispRefReleaseNotifier.class"
 ));
-const LISP_SYMBOL_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispSymbol.class"));
+const LISP_SYMBOL_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispSymbol.class"
+));
 
 /// Defines the `emacs_jni.core.{LispCallable,LispFunction,LispNonLocalExit,
 /// LispSignal,LispThrow,ReleaseNotifier,LispObject,Lisp,
@@ -108,17 +120,32 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     // go anywhere.
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispCallable", LISP_CALLABLE_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispFunction", LISP_FUNCTION_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/core/LispNonLocalExit", LISP_NON_LOCAL_EXIT_CLASS)?;
+    define_if_absent(
+        env,
+        &platform_loader,
+        "emacs_jni/core/LispNonLocalExit",
+        LISP_NON_LOCAL_EXIT_CLASS,
+    )?;
     // LispSignal/LispThrow extend LispNonLocalExit, so the base must already
     // be defined -- same ordering reasoning as LispCallable/LispFunction.
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispSignal", LISP_SIGNAL_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispThrow", LISP_THROW_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/core/ReleaseNotifier", RELEASE_NOTIFIER_CLASS)?;
+    define_if_absent(
+        env,
+        &platform_loader,
+        "emacs_jni/core/ReleaseNotifier",
+        RELEASE_NOTIFIER_CLASS,
+    )?;
     // LispRefReleaseNotifier has no class-loading dependency on LispObject
     // (LispObject's constructor only *references* it inside a method body,
     // which the verifier resolves lazily) -- defined first anyway, out of
     // the same caution as LispCallable/LispFunction's ordering above.
-    define_if_absent(env, &platform_loader, "emacs_jni/core/LispRefReleaseNotifier", LISP_REF_RELEASE_NOTIFIER_CLASS)?;
+    define_if_absent(
+        env,
+        &platform_loader,
+        "emacs_jni/core/LispRefReleaseNotifier",
+        LISP_REF_RELEASE_NOTIFIER_CLASS,
+    )?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispObject", LISP_OBJECT_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/Lisp", LISP_CLASS)?;
     // Pure data carrier (no natives, no dependencies) -- the wire form for
@@ -264,7 +291,10 @@ fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<(
 ///
 /// Registered (not called directly) via `register_release_notifier_native`
 /// above.
-fn release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
+fn release_notifier_run<'local>(
+    env: &mut jni::Env<'local>,
+    this: JObject<'local>,
+) -> jni::errors::Result<()> {
     let handle = get_handle_field(env, &this)?;
     crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Release { handle });
     crate::channel::poke();
@@ -467,7 +497,11 @@ fn block_on_lisp_reply<'local>(
 ) -> jni::errors::Result<JObject<'local>> {
     let time_unit_class = env.find_class(jni::jni_str!("java/util/concurrent/TimeUnit"))?;
     let seconds = env
-        .get_static_field(&time_unit_class, jni::jni_str!("SECONDS"), jni::jni_sig!(java.util.concurrent.TimeUnit))?
+        .get_static_field(
+            &time_unit_class,
+            jni::jni_str!("SECONDS"),
+            jni::jni_sig!(java.util.concurrent.TimeUnit),
+        )?
         .l()?;
     match env.call_method(
         future,
@@ -547,9 +581,14 @@ fn lisp_type_of<'local>(
 }
 
 /// `Lisp.isNotNil`'s native implementation.
-fn lisp_is_not_nil<'local>(env: &mut jni::Env<'local>, _class: JClass<'local>, v: JObject<'local>) -> jni::errors::Result<bool> {
+fn lisp_is_not_nil<'local>(
+    env: &mut jni::Env<'local>,
+    _class: JClass<'local>,
+    v: JObject<'local>,
+) -> jni::errors::Result<bool> {
     let arg = object_to_lisp_request_arg(env, v)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::IsNotNil { id, arg })?;
+    let result =
+        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::IsNotNil { id, arg })?;
     unbox_boolean(env, &result)
 }
 
@@ -562,7 +601,8 @@ fn lisp_eq<'local>(
 ) -> jni::errors::Result<bool> {
     let a = object_to_lisp_request_arg(env, a)?;
     let b = object_to_lisp_request_arg(env, b)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Eq { id, a, b })?;
+    let result =
+        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Eq { id, a, b })?;
     unbox_boolean(env, &result)
 }
 
@@ -588,7 +628,8 @@ fn lisp_apply_async<'local>(
             crate::lisp_requests::compute_reply(lisp_env, &request)
         })
         .ok_or_else(|| crate::marshal::marshal_error("reentrant apply lost its Env scope"))?;
-        let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
+        let future_class =
+            env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
         let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
         crate::jvm_thread::complete_future_with_reply(env, &future, reply)?;
         return Ok(future);
@@ -600,7 +641,11 @@ fn lisp_apply_async<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::pending::register(id, future_global);
 
-    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Apply { id, f, args: request_args });
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Apply {
+        id,
+        f,
+        args: request_args,
+    });
     crate::channel::poke();
     Ok(future)
 }
@@ -611,7 +656,8 @@ fn lisp_object_prin1_to_string<'local>(
     this: JObject<'local>,
 ) -> jni::errors::Result<JString<'local>> {
     let ptr = get_ptr_field(env, &this)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Prin1 { id, ptr })?;
+    let result =
+        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Prin1 { id, ptr })?;
     env.cast_local::<JString>(result)
 }
 
@@ -619,7 +665,10 @@ fn lisp_object_prin1_to_string<'local>(
 /// `FreeRef` for this notifier's own `ptr` and wakes the main thread up.
 /// No reply -- see `lisp_requests::Inbound::FreeRef`'s own doc
 /// comment ("carries no `id` and produces no reply").
-fn lisp_ref_release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
+fn lisp_ref_release_notifier_run<'local>(
+    env: &mut jni::Env<'local>,
+    this: JObject<'local>,
+) -> jni::errors::Result<()> {
     let ptr = get_ptr_field(env, &this)?;
     crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::FreeRef { ptr });
     crate::channel::poke();
@@ -667,10 +716,12 @@ pub(crate) fn object_to_lisp_request_arg<'local>(
     }
     let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
     if env.is_instance_of(&elem, &lisp_symbol_class)? {
-        let name_obj = env.get_field(&elem, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?.l()?;
+        let name_obj =
+            env.get_field(&elem, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?.l()?;
         let name = env.cast_local::<JString>(name_obj)?;
         let name = name.try_to_string(env)?;
-        let keyword = env.get_field(&elem, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?.z()?;
+        let keyword =
+            env.get_field(&elem, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?.z()?;
         return Ok(LispInput::Symbol { name, keyword });
     }
     let lisp_arg = crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(elem))?;
@@ -730,19 +781,24 @@ mod tests {
             define_classes(env)?;
             // Confirm LispFunction really implements LispCallable, not
             // just that both classes independently exist.
-            let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
-            let lisp_callable_class = env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
-            let is_assignable = env.is_assignable_from(&lisp_function_class, &lisp_callable_class)?;
+            let lisp_function_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
+            let lisp_callable_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
+            let is_assignable =
+                env.is_assignable_from(&lisp_function_class, &lisp_callable_class)?;
             assert!(is_assignable, "LispFunction should implement LispCallable");
             // Same shape of check for ReleaseNotifier/LispRefReleaseNotifier:
             // confirm both really implement Runnable.
             let runnable_class = env.find_class(jni::jni_str!("java/lang/Runnable"))?;
-            let release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
+            let release_notifier_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
             assert!(
                 env.is_assignable_from(&release_notifier_class, &runnable_class)?,
                 "ReleaseNotifier should implement Runnable"
             );
-            let lisp_ref_release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
+            let lisp_ref_release_notifier_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
             assert!(
                 env.is_assignable_from(&lisp_ref_release_notifier_class, &runnable_class)?,
                 "LispRefReleaseNotifier should implement Runnable"
