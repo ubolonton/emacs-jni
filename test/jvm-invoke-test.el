@@ -8,7 +8,12 @@
                      (file-name-directory (or load-file-name buffer-file-name))))
 
 (ert-deftest emacs-jni-jvm-invoke-test/java-calls-lisp-and-gets-the-result-back ()
-  (should (eq (jvm-start-await) 'ready))
+  ;; ERT's `t' selector enumerates tests via `apropos-internal' over the
+  ;; obarray, sorted alphabetically -- not definition order (see
+  ;; `jvm-call-test--ensure-ready' for the same note) -- so this cannot
+  ;; assume it is the first test to touch the shared JVM singleton.
+  (unless (eq (jvm-status) 'ready)
+    (should (eq (jvm-start-await) 'ready)))
   (jvm-load-jar-await jvm-invoke-test--calc-jar)
   (should (equal (jvm-call-await "Calc" "callWithArg" (list (lambda (n) (* n 2)) 21))
                  42)))
@@ -42,6 +47,22 @@ OBJ below would have been the 2-element list `(jvm-handle N)' and
                                    (list (lambda (received)
                                            (if (user-ptrp received) "yes" "no"))))
                    "yes"))))
+
+(ert-deftest emacs-jni-jvm-invoke-test/callback-returning-keyword-symbol-function ()
+  "A JVM->Lisp callback may return a keyword, a symbol, or a function.
+Before Item 1 the invoke-reply path used a trimmed converter missing those
+arms, so a keyword return signalled `jvm-invalid-argument' and surfaced as a
+`jvm-error'."
+  (unless (eq (jvm-status) 'ready)
+    (should (eq (jvm-start-await) 'ready)))
+  (jvm-load-jar-await jvm-invoke-test--calc-jar)
+  ;; Keyword and symbol round-trip as themselves.
+  (should (eq (jvm-call-await "Calc" "callWithArg" (list (lambda (_n) :a) 1)) :a))
+  (should (eq (jvm-call-await "Calc" "callWithArg" (list (lambda (_n) 'foo) 1)) 'foo))
+  ;; A function return marshals as a Callback -> LispFunction on the JVM,
+  ;; which crosses back as an opaque handle (a user-ptr), not an error.
+  (should (user-ptrp (jvm-call-await "Calc" "callWithArg"
+                                     (list (lambda (_n) (lambda () 1)) 1)))))
 
 (provide 'jvm-invoke-test)
 ;;; jvm-invoke-test.el ends here

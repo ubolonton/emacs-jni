@@ -249,53 +249,13 @@ fn jvm_invoke_reply(id: u64, ok: Value, result: Value) -> Result<()> {
     // `t` or `nil`.
     let ok = ok.is_not_nil();
     let arg = if ok {
-        lisp_value_to_arg_no_callback(result)?
+        lisp_value_to_arg(result)?
     } else {
         let message: String = result.into_rust()?;
         commands::LispArg::Str(message)
     };
     let _ = worker::send_command(commands::Cmd::InvokeReply { id, ok, result: arg });
     Ok(())
-}
-
-/// Same scalar cases as `lisp_value_to_arg` (Task 6) minus the
-/// function-wrapping case — a callback's *own* return value being itself
-/// another bare Lisp function is out of scope for this plan (nothing in
-/// the spec's marshalling table requires it, and it would need the same
-/// `env`-threading `lisp_value_to_arg` already does, for a case this plan
-/// doesn't need to support yet). Values this function doesn't recognize —
-/// including a bare Lisp function, since the function-wrapping case above
-/// is unsupported here — signal `jvm-invalid-argument`, the same
-/// "don't silently misrepresent an unmarshallable value" convention
-/// `lisp_value_to_arg` itself established, rather than the older, since-
-/// corrected behavior of silently defaulting to `t`.
-fn lisp_value_to_arg_no_callback(v: Value) -> Result<commands::LispArg> {
-    if !v.is_not_nil() {
-        return Ok(commands::LispArg::Nil);
-    }
-    if let Ok(n) = v.into_rust::<i64>() {
-        return Ok(commands::LispArg::Int(n));
-    }
-    // See `lisp_value_to_arg`'s matching check for why bignums must be
-    // routed through `LispArg::BigInt` rather than falling through to the
-    // lossy `f64` conversion below.
-    if v.env.call("integerp", (v,))?.is_not_nil() {
-        let digits: String = v.env.call("number-to-string", (v,))?.into_rust()?;
-        return Ok(commands::LispArg::BigInt(digits));
-    }
-    if let Ok(f) = v.into_rust::<f64>() {
-        return Ok(commands::LispArg::Float(f));
-    }
-    if let Ok(s) = v.into_rust::<String>() {
-        return Ok(commands::LispArg::Str(s));
-    }
-    if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
-        return Ok(commands::LispArg::Object(h.0));
-    }
-    if v == v.env.intern("t")? {
-        return Ok(commands::LispArg::True);
-    }
-    v.env.signal(jvm_invalid_argument, (v,))
 }
 
 /// Walks a Lisp list of arguments (as raw `Value`s, same pattern as the
