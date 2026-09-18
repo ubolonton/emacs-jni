@@ -60,9 +60,9 @@ pub enum LispInput {
 /// flow"); `Prin1` alone keeps a raw `ptr`: it is `LispObject.
 /// prin1ToString`, so its receiver is always a real `LispObject`, never a
 /// symbol/scalar. The remaining six variants generalise this queue to every
-/// other JVM→Emacs message; `CallDone`/`LoadJarDone`/`Invoke` are now live
-/// (Tasks 6-7), `Release`/`Log`/`Status` are still produced by the older
-/// text protocol (see this module's doc comment).
+/// other JVM→Emacs message; all six are now live (Tasks 6-8) — the only
+/// text protocol message left is the `(lisp-request)` wakeup itself,
+/// removed in Task 9.
 #[derive(Debug)]
 pub enum Inbound {
     Intern { id: u64, name: String },
@@ -82,20 +82,16 @@ pub enum Inbound {
     /// `shim::lisp_function_call` (Task 7).
     Invoke { id: u64, handle: u64, args: Vec<BridgeValue> },
     /// A JVM-side `LispFunction` proxy was garbage collected — mirrors
-    /// `protocol::release_message`. No producer yet (Task 8 flips
-    /// `release_notifier_run`); see `CallDone`'s own note on the `expect`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 8"))]
+    /// `protocol::release_message`. Enqueued by `shim::release_notifier_run`
+    /// (Task 8).
     Release { handle: u64 },
     /// A log line from the worker thread — mirrors `protocol::log_message`.
-    /// No producer yet (Task 8 flips every `channel::send(&protocol::
-    /// log_message(...))` call site); see `CallDone`'s own note on the
-    /// `expect`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 8"))]
+    /// Enqueued by every log call site in `jvm_thread`/`lisp_requests`
+    /// (Task 8).
     Log { level: String, text: String },
     /// A JVM lifecycle status transition — mirrors
-    /// `protocol::status_message`. No producer yet (Task 8 flips every
-    /// status-send call site); see `CallDone`'s own note on the `expect`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 8"))]
+    /// `protocol::status_message`. Enqueued by every status-send call site
+    /// in `jvm_thread` (Task 8).
     Status { status: Status, detail: Option<String> },
     /// A `jvm-load-jar-async` call finished — mirrors
     /// `protocol::load_jar_done_message`. Enqueued by `handle_load_jar`
@@ -364,11 +360,10 @@ pub(crate) fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutco
 ///
 /// The six non-Lisp-access arms below are the real Task 6-8 handlers.
 /// `CallDone`/`LoadJarDone` are reached as of Task 6 (`handle_call`/
-/// `handle_load_jar` enqueue them) and `Invoke` as of Task 7
-/// (`shim::lisp_function_call` enqueues it); `Release`/`Log`/`Status` are
-/// still unreached — no producer enqueues them yet (see this module's doc
-/// comment) — so Task 8 only needs to flip their producer, not touch this
-/// drain.
+/// `handle_load_jar` enqueue them), `Invoke` as of Task 7
+/// (`shim::lisp_function_call` enqueues it), and `Release`/`Log`/`Status`
+/// as of Task 8 (`shim::release_notifier_run` and every `jvm_thread`
+/// log/status-send call site).
 pub fn service_inbound(env: &Env) -> EmacsResult<()> {
     for req in drain() {
         match &req {
@@ -380,10 +375,11 @@ pub fn service_inbound(env: &Env) -> EmacsResult<()> {
                 // and spec "Object model".
                 let gref = unsafe { Box::from_raw(*ptr as *mut GlobalRef) };
                 if let Err(e) = gref.free(env) {
-                    channel::send(&protocol::log_message(
-                        "error",
-                        &format!("jvm--service-inbound: failed to free a LispObject ref: {e}"),
-                    ));
+                    enqueue(Inbound::Log {
+                        level: "error".to_string(),
+                        text: format!("jvm--service-inbound: failed to free a LispObject ref: {e}"),
+                    });
+                    channel::send(&protocol::lisp_request_message());
                 }
             }
             // Every reply-bearing request runs the same `Env` op as the
@@ -558,14 +554,10 @@ mod tests {
         assert!(matches!(drained[1], Inbound::FreeRef { ptr: 99 }));
     }
 
-    /// The six variants Task 5 adds to generalise this queue (`CallDone`/
-    /// `Invoke`/`Release`/`Log`/`Status`/`LoadJarDone`) — `CallDone`/
-    /// `LoadJarDone` now have real producers (Task 6); `Invoke`/`Release`/
-    /// `Log`/`Status` don't yet (Tasks 7-8 flip the rest one at a time), so
-    /// this test is what proves all six construct and drain FIFO alongside
-    /// the original seven, and (per this crate's dead-code policy) is what
-    /// keeps the compiler from flagging the still-unproduced four as unused
-    /// this task.
+    /// The six variants Task 5 added to generalise this queue (`CallDone`/
+    /// `Invoke`/`Release`/`Log`/`Status`/`LoadJarDone`) all now have real
+    /// producers (Tasks 6-8). This test proves all six still construct and
+    /// drain FIFO alongside the original seven.
     #[test]
     fn new_inbound_variants_drain_in_fifo_order() {
         enqueue(Inbound::CallDone { id: 1, ok: true, result: BridgeValue::Nil, err: None });

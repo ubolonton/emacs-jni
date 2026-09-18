@@ -32,20 +32,22 @@ purpose below."
   (should (eq (jvm-status) 'ready)))
 
 (ert-deftest emacs-jni-jvm-start-test/start-failed-message-reaches-log-buffer ()
-  "A `(status start-failed MSG)' channel message must not silently drop MSG
-\(Fix 1 of the final review\): it should be appended to the `*jvm-log*'
-buffer. This drives `jvm--dispatch-message' directly with a synthetic
-message rather than provoking a real `start-failed', since there's no
-reliable way to make `JavaVM::new' fail fast from Elisp.
-`jvm--status' is saved/restored around the synthetic dispatch so this
-doesn't leak a fake `start-failed' status into the other tests sharing
-this batch process."
+  "A `start-failed' status transition with a detail message must not
+silently drop it \(Fix 1 of the final review\): it should be appended to
+the `*jvm-log*' buffer. This drives `jvm--apply-status' directly with a
+synthetic message rather than provoking a real `start-failed', since
+there's no reliable way to make `JavaVM::new' fail fast from Elisp.
+\(Before Task 8, this drove `jvm--dispatch-message' with a `(status ...)'
+wire message; `jvm--apply-status' is now its native-queue counterpart —
+see `lisp_requests.rs''s `service_inbound'.\) `jvm--status' is
+saved/restored around the synthetic dispatch so this doesn't leak a fake
+`start-failed' status into the other tests sharing this batch process."
   (when (get-buffer jvm--log-buffer-name)
     (kill-buffer jvm--log-buffer-name))
   (let ((previous-status jvm--status))
     (unwind-protect
         (progn
-          (jvm--dispatch-message '(status start-failed "synthetic failure for test"))
+          (jvm--apply-status "start-failed" "synthetic failure for test")
           (with-current-buffer (get-buffer-create jvm--log-buffer-name)
             (should (string-match-p "synthetic failure for test" (buffer-string)))))
       (setq jvm--status previous-status))))

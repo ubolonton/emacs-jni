@@ -63,31 +63,15 @@ docs/explanation/architecture.md).")
 (defun jvm--dispatch-message (sexp)
   "Handle one parsed message SEXP from the JVM worker thread."
   (pcase sexp
-    (`(status ,state ,msg)
-     (setq jvm--status state)
-     (when msg
-       (jvm--log "[status] %s: %s" state msg))
-     (run-hook-with-args 'jvm-status-hook state))
-    (`(log ,level ,msg)
-     (jvm--log "[%s] %s" level msg)
-     (message "emacs-jni [%s]: %s" level msg))
     (`(lisp-request)
      ;; A JVM thread enqueued one or more inbound messages (a Lisp-access
      ;; `intern'/`apply'/`type-of'/`is-not-nil?'/`eq'/`prin1-to-string', a
-     ;; GC-driven `FreeRef', a `call-done'/`load-jar-done'/`invoke' (migrated
-     ;; in Tasks 6-7), or -- once its producer is migrated, see Task 8 -- a
+     ;; GC-driven `FreeRef', or a `call-done'/`load-jar-done'/`invoke'/
      ;; `release'/`log'/`status') on the Rust-side queue and woke us up to
      ;; service them -- see `jvm--service-inbound' and the design spec's
      ;; "Request/reply flow". No payload: the message itself rides the Rust
      ;; queue, not this wire message.
      (jvm--service-inbound))
-    (`(release ,handle)
-     ;; The JVM-side LispFunction proxy for HANDLE was garbage collected
-     ;; (see `ReleaseNotifier' in java/emacs_jni and its native `run',
-     ;; registered from `marshal.rs''s `register_release_on_gc'): drop our
-     ;; own function-table entry so it doesn't outlive the proxy that
-     ;; referenced it. A no-op if HANDLE is already gone.
-     (remhash handle jvm--lisp-callbacks))
     (_ (message "emacs-jni: unrecognized channel message: %S" sexp))))
 
 (defun jvm--resolve-sexp-result (result)
@@ -101,16 +85,12 @@ into its final Lisp-visible form."
 
 ;; The helpers below are the native-queue (`jvm--service-inbound')
 ;; counterparts of `jvm--dispatch-message''s former `call-done'/
-;; `load-jar-done'/`invoke' cases and its still-live `status'/`log'/`release'
-;; cases -- same logic, called instead from `lisp_requests.rs''s
-;; `service_inbound' once VALUE/ARGS have already been converted to real
-;; Lisp values on the Rust side (no `jvm--resolve-sexp-result' needed here:
-;; that function only undoes the wire's `(jvm-handle N)'/`(jvm-symbol ...)'
-;; tags, which the native path never produces). `jvm--resolve-call'/
-;; `jvm--resolve-load-jar'/`jvm--resolve-invoke' are live as of Tasks 6-7;
-;; the rest stay dormant until Task 8 moves each remaining message's
-;; producer off the text protocol onto `lisp_requests::Inbound' -- see that
-;; module's doc comment.
+;; `load-jar-done'/`invoke'/`status'/`log'/`release' cases -- same logic,
+;; called instead from `lisp_requests.rs''s `service_inbound' once
+;; VALUE/ARGS have already been converted to real Lisp values on the Rust
+;; side (no `jvm--resolve-sexp-result' needed here: that function only
+;; undoes the wire's `(jvm-handle N)'/`(jvm-symbol ...)' tags, which the
+;; native path never produces). All six are live as of Task 8.
 
 (defun jvm--resolve-call (id ok value err)
   "Resolve the pending `jvm-call-async' callback for ID."
@@ -385,8 +365,9 @@ for the non-blocking form and `jvm-new-await' for the worker-blocking form.")
 
 (defvar jvm--lisp-callbacks (make-hash-table :test 'eql)
   "Handle -> Lisp function, for functions wrapped as JVM LispFunction
-proxies. Entries are removed when the JVM notifies us via `(release
-HANDLE)' that the corresponding proxy was garbage collected.")
+proxies. Entries are removed via `jvm--drop-callback' when the JVM notifies
+us (an `Inbound::Release' on the Rust-side queue) that the corresponding
+proxy was garbage collected.")
 
 (defvar jvm--next-callback-handle 1
   "Monotonic counter for `jvm--lisp-callbacks' keys.")

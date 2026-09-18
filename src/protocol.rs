@@ -1,5 +1,9 @@
 use crate::status::Status;
 
+/// No longer called outside this file's own tests: every `jvm_thread`
+/// status-send call site enqueues `Inbound::Status` instead as of Task 8.
+/// See `load_jar_done_message`'s own note on why this stays until Task 9.
+#[cfg_attr(not(test), expect(dead_code, reason = "protocol.rs deleted whole in Task 9"))]
 pub fn status_message(status: Status, message: Option<&str>) -> String {
     let msg_sexp = match message {
         Some(m) => quote(m),
@@ -48,6 +52,10 @@ pub fn invoke_message(id: u64, handle: u64, args: &str) -> String {
     format!("(invoke {id} {handle} {args})\n")
 }
 
+/// No longer called outside this file's own tests: `shim::release_notifier_run`
+/// enqueues `Inbound::Release` instead as of Task 8. See
+/// `load_jar_done_message`'s own note on why this stays until Task 9.
+#[cfg_attr(not(test), expect(dead_code, reason = "protocol.rs deleted whole in Task 9"))]
 pub fn release_message(handle: u64) -> String {
     format!("(release {handle})\n")
 }
@@ -60,6 +68,10 @@ pub fn lisp_request_message() -> String {
     "(lisp-request)\n".to_string()
 }
 
+/// No longer called outside this file's own tests: every log call site in
+/// `jvm_thread`/`lisp_requests` enqueues `Inbound::Log` instead as of Task 8.
+/// See `load_jar_done_message`'s own note on why this stays until Task 9.
+#[cfg_attr(not(test), expect(dead_code, reason = "protocol.rs deleted whole in Task 9"))]
 pub fn log_message(level: &str, message: &str) -> String {
     format!("(log {} {})\n", level, quote(message))
 }

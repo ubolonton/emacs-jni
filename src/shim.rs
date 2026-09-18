@@ -257,19 +257,23 @@ fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<(
 /// `user-ptr` GC'd -> tell Rust to drop a `GlobalRef`, over the Lisp-to-
 /// worker `Cmd` channel). Here, the JVM-side `LispFunction` proxy this
 /// notifier was registered against (via `marshal::register_release_on_gc`)
-/// was collected, so Lisp needs telling -- over the worker-to-Lisp
-/// `channel::send` wire, not a `Cmd` -- to drop its own function-table
-/// entry for the same handle. Runs on a `Cleaner`-managed background
-/// thread, not the worker thread, but that's fine: `get_handle_field` is
-/// plain JNI field access (needs only the `Env` this native call itself
-/// provides) and `channel::send` just writes to a process-global pipe
-/// writer, neither of which cares which thread calls them.
+/// was collected, so Lisp needs telling -- via an `Inbound::Release` on the
+/// worker-to-Lisp queue, not a `Cmd` -- to drop its own function-table entry
+/// for the same handle. Runs on a `Cleaner`-managed background thread, not
+/// the worker thread, but that's fine: `get_handle_field` is plain JNI
+/// field access (needs only the `Env` this native call itself provides)
+/// and `lisp_requests::enqueue`/`channel::send` just write to process-
+/// global state, neither of which cares which thread calls them.
 ///
 /// Registered (not called directly) via `register_release_notifier_native`
 /// above.
 fn release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
     let handle = get_handle_field(env, &this)?;
-    crate::channel::send(&crate::protocol::release_message(handle));
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Release { handle });
+    // Wakeup: reuse the existing text (lisp-request) message the live filter
+    // still dispatches to jvm--service-inbound. Task 9 swaps this for the
+    // raw-byte channel::poke() together with the #[defun] filter.
+    crate::channel::send(&crate::protocol::lisp_request_message());
     Ok(())
 }
 
