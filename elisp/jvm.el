@@ -42,9 +42,6 @@ docs/explanation/architecture.md).")
 (defvar jvm--pipe-process nil
   "The pipe process used to receive messages from the JVM worker thread.")
 
-(defvar jvm--filter-buffer ""
-  "Accumulates partial output from `jvm--pipe-process' between newlines.")
-
 (defvar jvm--pending-load-jar nil
   "Alist of request-id -> callback for in-flight `jvm-load-jar-async' calls.")
 
@@ -60,37 +57,10 @@ docs/explanation/architecture.md).")
     (goto-char (point-max))
     (insert (apply #'format format-string args) "\n")))
 
-(defun jvm--dispatch-message (sexp)
-  "Handle one parsed message SEXP from the JVM worker thread."
-  (pcase sexp
-    (`(lisp-request)
-     ;; A JVM thread enqueued one or more inbound messages (a Lisp-access
-     ;; `intern'/`apply'/`type-of'/`is-not-nil?'/`eq'/`prin1-to-string', a
-     ;; GC-driven `FreeRef', or a `call-done'/`load-jar-done'/`invoke'/
-     ;; `release'/`log'/`status') on the Rust-side queue and woke us up to
-     ;; service them -- see `jvm--service-inbound' and the design spec's
-     ;; "Request/reply flow". No payload: the message itself rides the Rust
-     ;; queue, not this wire message.
-     (jvm--service-inbound))
-    (_ (message "emacs-jni: unrecognized channel message: %S" sexp))))
-
-(defun jvm--resolve-sexp-result (result)
-  "Convert RESULT as parsed from the wire (may contain `(jvm-handle N)')
-into its final Lisp-visible form."
-  (pcase result
-    (`(jvm-handle ,n) (jvm--wrap-handle n))
-    (`(jvm-symbol ,name ,keyword)
-     (intern (if keyword (concat ":" name) name)))
-    (_ result)))
-
-;; The helpers below are the native-queue (`jvm--service-inbound')
-;; counterparts of `jvm--dispatch-message''s former `call-done'/
-;; `load-jar-done'/`invoke'/`status'/`log'/`release' cases -- same logic,
-;; called instead from `lisp_requests.rs''s `service_inbound' once
-;; VALUE/ARGS have already been converted to real Lisp values on the Rust
-;; side (no `jvm--resolve-sexp-result' needed here: that function only
-;; undoes the wire's `(jvm-handle N)'/`(jvm-symbol ...)' tags, which the
-;; native path never produces). All six are live as of Task 8.
+;; The helpers below are called from `lisp_requests.rs''s `service_inbound'
+;; (the `#[defun]' process filter, `jvm--service-inbound') once VALUE/ARGS
+;; have already been converted to real Lisp values on the Rust side -- the
+;; pipe carries only a raw wakeup byte, never the payload itself.
 
 (defun jvm--resolve-call (id ok value err)
   "Resolve the pending `jvm-call-async' callback for ID."
@@ -100,8 +70,8 @@ into its final Lisp-visible form."
 
 (defun jvm--resolve-invoke (id handle args)
   "Funcall the callback registered for HANDLE with ARGS (already real Lisp
-values -- no `jvm--resolve-sexp-result' needed, see the comment above), and
-reply to the JVM with the result via `jvm--invoke-reply'. On a Lisp error,
+values, converted on the Rust side -- see the comment above), and reply to
+the JVM with the result via `jvm--invoke-reply'. On a Lisp error,
 ERR is the real `(SYMBOL . DATA)' `condition-case' caught -- passed through
 as-is, not flattened into a string, so `jvm--invoke-reply' (`lib.rs') can
 marshal the real symbol/data into a `LispSignal' the JVM caller actually
@@ -134,23 +104,13 @@ sees."
   "Drop HANDLE's entry from `jvm--lisp-callbacks' (its JVM proxy was GC'd)."
   (remhash handle jvm--lisp-callbacks))
 
-(defun jvm--process-filter (_proc data)
-  "Accumulate DATA and dispatch each complete newline-terminated S-expression."
-  (setq jvm--filter-buffer (concat jvm--filter-buffer data))
-  (let (newline-pos)
-    (while (setq newline-pos (string-search "\n" jvm--filter-buffer))
-      (let ((line (substring jvm--filter-buffer 0 newline-pos)))
-        (setq jvm--filter-buffer (substring jvm--filter-buffer (1+ newline-pos)))
-        (unless (string-empty-p line)
-          (jvm--dispatch-message (read line)))))))
-
 (defun jvm--ensure-pipe-process ()
   "Create the pipe process and open the Rust-side channel, once."
   (unless (process-live-p jvm--pipe-process)
     (setq jvm--pipe-process
           (make-pipe-process
            :name "emacs-jni-channel"
-           :filter #'jvm--process-filter
+           :filter #'jvm--service-inbound
            :noquery t))
     ;; Multiple Lisp threads may independently call a `-await' wrapper;
     ;; without this, any thread other than whichever one created the

@@ -13,13 +13,15 @@ pub fn init(env: &Env, process: Value) -> Result<()> {
     Ok(())
 }
 
-/// Writes a pre-formatted message (as produced by the `protocol` module) to
-/// the channel. Silently drops the message if the channel hasn't been
-/// initialized or the write fails — the worker thread has no way to
-/// recover from a broken channel; the Elisp-side `-sync` wrappers' timeouts
-/// are what catch a message that never arrives.
-pub fn send(message: &str) {
+/// Wakes the Emacs main thread to drain the inbound queue, with no payload.
+/// The process filter (`jvm--service-inbound`) ignores the byte and drains
+/// the whole queue, so coalesced wakeups are harmless. Silently drops the
+/// wakeup if the channel hasn't been initialized or the write fails — the
+/// worker thread has no way to recover from a broken channel; the
+/// Elisp-side `-await` wrappers' timeouts are what catch a wakeup that
+/// never arrives.
+pub fn poke() {
     if let Some(writer) = WRITER.lock().unwrap().as_mut() {
-        let _ = writer.write_all(message.as_bytes());
+        let _ = writer.write_all(b"\x01");
     }
 }

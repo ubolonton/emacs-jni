@@ -7,7 +7,6 @@ use jni::JNIVersion;
 
 use crate::commands::Cmd;
 use crate::marshal::marshal_error;
-use crate::protocol;
 use crate::status::{Status, STATUS};
 use crate::{channel, worker};
 
@@ -25,7 +24,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 status: Status::Ready,
                 detail: None,
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
             vm
         }
         Err(e) => {
@@ -34,7 +33,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 status: Status::StartFailed,
                 detail: Some(e),
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
             worker::clear_sender();
             return;
         }
@@ -114,7 +113,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                     status: Status::Crashed,
                     detail: Some(message),
                 });
-                channel::send(&protocol::lisp_request_message());
+                channel::poke();
                 worker::clear_sender();
                 return;
             }
@@ -251,7 +250,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
                 level: "error".to_string(),
                 text: format!("failed to define emacs_jni.core shim classes: {e}"),
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
         }
     }
 
@@ -276,7 +275,7 @@ fn handle_pause(vm: &JavaVM) {
                 status: Status::Paused,
                 detail: None,
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
         }
         Err(e) => {
             // Detach failing is unexpected; stay in `pausing` rather than
@@ -288,7 +287,7 @@ fn handle_pause(vm: &JavaVM) {
                 level: "error".to_string(),
                 text: format!("jvm-pause: detach_current_thread failed: {e}"),
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
         }
     }
 }
@@ -313,7 +312,7 @@ fn handle_stop(vm: JavaVM) {
                 status: Status::Stopped,
                 detail: None,
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
         }
         Err(e) => {
             STATUS.finish(Status::StopFailed);
@@ -321,7 +320,7 @@ fn handle_stop(vm: JavaVM) {
                 status: Status::StopFailed,
                 detail: Some(e.to_string()),
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
         }
     }
     worker::clear_sender();
@@ -339,7 +338,7 @@ fn handle_resume(vm: &JavaVM) {
                 status: Status::Ready,
                 detail: None,
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
         }
         Err(e) => {
             STATUS.finish(Status::StartFailed);
@@ -347,7 +346,7 @@ fn handle_resume(vm: &JavaVM) {
                 status: Status::StartFailed,
                 detail: Some(e.to_string()),
             });
-            channel::send(&protocol::lisp_request_message());
+            channel::poke();
         }
     }
 }
@@ -373,7 +372,7 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
             ok: false,
             err: Some(format!("jar/classpath entry not found: {path}")),
         });
-        channel::send(&protocol::lisp_request_message());
+        channel::poke();
         return;
     }
 
@@ -396,10 +395,7 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
             err: Some(e.to_string()),
         }),
     }
-    // Wakeup: reuse the existing text (lisp-request) message the live filter
-    // already dispatches to jvm--service-inbound. Task 9 swaps this for the
-    // raw-byte channel::poke() together with the #[defun] filter.
-    channel::send(&protocol::lisp_request_message());
+    channel::poke();
 }
 
 /// Synchronous main-thread counterpart of `handle_load_jar`: adds PATH to the
@@ -542,7 +538,7 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::commands::LispOutco
             level: "error".to_string(),
             text: format!("invoke-reply for unknown id {id}"),
         });
-        channel::send(&protocol::lisp_request_message());
+        channel::poke();
         return;
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
@@ -559,7 +555,7 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::commands::LispOutco
             level: "error".to_string(),
             text: format!("invoke-reply for id {id}: failed to complete the pending future: {e}"),
         });
-        channel::send(&protocol::lisp_request_message());
+        channel::poke();
     }
 }
 
@@ -577,7 +573,7 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispOutcome) 
             level: "error".to_string(),
             text: format!("lisp-reply for unknown id {id}"),
         });
-        channel::send(&protocol::lisp_request_message());
+        channel::poke();
         return;
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
@@ -589,7 +585,7 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispOutcome) 
             level: "error".to_string(),
             text: format!("lisp-reply for id {id}: failed to complete the pending future: {e}"),
         });
-        channel::send(&protocol::lisp_request_message());
+        channel::poke();
     }
 }
 
@@ -628,7 +624,10 @@ pub(crate) fn build_lisp_reply_object<'local>(
             env.new_object(&class, jni::jni_sig!((ptr: long) -> void), &[jni::objects::JValue::Long(ptr)])
         }
         crate::commands::LispOutcome::Signal { .. } | crate::commands::LispOutcome::Throw { .. } => {
-            unreachable!("Signal/Throw are handled by handle_lisp_reply before build_lisp_reply_object")
+            unreachable!(
+                "Signal/Throw are handled by complete_future_with_reply/throw_non_local_exit \
+                 before build_lisp_reply_object"
+            )
         }
     }
 }
@@ -759,10 +758,7 @@ fn handle_call(
             });
         }
     }
-    // Wakeup: reuse the existing text (lisp-request) message the live filter
-    // already dispatches to jvm--service-inbound. Task 9 swaps this for the
-    // raw-byte channel::poke() together with the #[defun] filter.
-    channel::send(&protocol::lisp_request_message());
+    channel::poke();
 }
 
 /// Resolves TARGET.MEMBER against the shared classloader and invokes it with

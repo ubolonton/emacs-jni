@@ -224,10 +224,7 @@ fn lisp_function_call<'local>(
 
     let args = jobject_array_to_bridge_values(env, &args)?;
     crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Invoke { id, handle, args });
-    // Wakeup: reuse the existing text (lisp-request) message the live filter
-    // still dispatches to jvm--service-inbound. Task 9 swaps this for the
-    // raw-byte channel::poke() together with the #[defun] filter.
-    crate::channel::send(&crate::protocol::lisp_request_message());
+    crate::channel::poke();
 
     Ok(future)
 }
@@ -262,7 +259,7 @@ fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<(
 /// for the same handle. Runs on a `Cleaner`-managed background thread, not
 /// the worker thread, but that's fine: `get_handle_field` is plain JNI
 /// field access (needs only the `Env` this native call itself provides)
-/// and `lisp_requests::enqueue`/`channel::send` just write to process-
+/// and `lisp_requests::enqueue`/`channel::poke` just write to process-
 /// global state, neither of which cares which thread calls them.
 ///
 /// Registered (not called directly) via `register_release_notifier_native`
@@ -270,10 +267,7 @@ fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<(
 fn release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
     let handle = get_handle_field(env, &this)?;
     crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Release { handle });
-    // Wakeup: reuse the existing text (lisp-request) message the live filter
-    // still dispatches to jvm--service-inbound. Task 9 swaps this for the
-    // raw-byte channel::poke() together with the #[defun] filter.
-    crate::channel::send(&crate::protocol::lisp_request_message());
+    crate::channel::poke();
     Ok(())
 }
 
@@ -408,7 +402,7 @@ fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors:
 /// JVM thread on the future's own `get(timeout, SECONDS)` — see design
 /// spec, "Request/reply flow", step 1's "sync variant: `future.get()`
 /// (blocks the JVM thread, with timeout)". Mirrors `lisp_function_call`'s
-/// future/`pending`/`channel::send` setup, but waits in place instead of
+/// future/`pending`/`channel::poke` setup, but waits in place instead of
 /// handing the future back to the Java caller.
 fn service_lisp_request_sync<'local>(
     env: &mut jni::Env<'local>,
@@ -428,7 +422,7 @@ fn service_lisp_request_sync<'local>(
     crate::pending::register(id, future_global);
 
     crate::lisp_requests::enqueue(build_request(id));
-    crate::channel::send(&crate::protocol::lisp_request_message());
+    crate::channel::poke();
 
     block_on_lisp_reply(env, &future)
 }
@@ -607,7 +601,7 @@ fn lisp_apply_async<'local>(
     crate::pending::register(id, future_global);
 
     crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Apply { id, f, args: request_args });
-    crate::channel::send(&crate::protocol::lisp_request_message());
+    crate::channel::poke();
     Ok(future)
 }
 
@@ -628,7 +622,7 @@ fn lisp_object_prin1_to_string<'local>(
 fn lisp_ref_release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
     let ptr = get_ptr_field(env, &this)?;
     crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::FreeRef { ptr });
-    crate::channel::send(&crate::protocol::lisp_request_message());
+    crate::channel::poke();
     Ok(())
 }
 

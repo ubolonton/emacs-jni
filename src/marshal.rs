@@ -419,113 +419,6 @@ fn object_to_lisp_arg<'local>(
     Ok(BridgeValue::Object(handle))
 }
 
-/// Renders ARG as the S-expression fragment embedded in `invoke`/
-/// `call-done` messages (see `protocol::invoke_message`/`call_done_message`).
-/// A wrapped JVM object handle round-trips as `(jvm-handle N)` — Task 6's
-/// Elisp side reads this tag and turns it back into a real `user-ptr` via
-/// a new primitive that wraps a raw handle integer.
-///
-/// No longer called outside this file's own tests: its only caller
-/// (`shim::jobject_array_to_sexp`) is deleted as of Task 7, which moves
-/// `invoke`'s arguments onto `Vec<BridgeValue>` directly. See
-/// `protocol::load_jar_done_message`'s own note on why this stays until
-/// Task 9. `quote_lisp_string` (below) stays used by this function's own
-/// body.
-#[cfg_attr(not(test), expect(dead_code, reason = "protocol.rs deleted whole in Task 9"))]
-pub fn lisp_arg_to_sexp(arg: &BridgeValue) -> String {
-    match arg {
-        BridgeValue::Nil => "nil".to_string(),
-        BridgeValue::True => "t".to_string(),
-        BridgeValue::Int(n) => n.to_string(),
-        BridgeValue::Float(f) => format!("{f}"),
-        BridgeValue::BigInt(digits) => digits.clone(),
-        BridgeValue::Str(s) => quote_lisp_string(s),
-        BridgeValue::Object(handle) => format!("(jvm-handle {handle})"),
-        BridgeValue::Callback(handle) => format!("(jvm-handle {handle})"),
-        BridgeValue::Symbol { name, keyword } => {
-            format!(
-                "(jvm-symbol {} {})",
-                quote_lisp_string(name),
-                if *keyword { "t" } else { "nil" }
-            )
-        }
-    }
-}
-
-/// Same escaping rules as `protocol::quote` (this module doesn't reuse
-/// that function directly since it's private to `protocol.rs` — if it
-/// turns out both modules need identical logic, consider making
-/// `protocol::quote` `pub(crate)` instead of duplicating; for now this
-/// mirrors it exactly to keep the two modules independently testable).
-fn quote_lisp_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        if c == '"' || c == '\\' {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out.push('"');
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn renders_nil_and_t() {
-        assert_eq!(lisp_arg_to_sexp(&BridgeValue::Nil), "nil");
-        assert_eq!(lisp_arg_to_sexp(&BridgeValue::True), "t");
-    }
-
-    #[test]
-    fn renders_int_and_float() {
-        assert_eq!(lisp_arg_to_sexp(&BridgeValue::Int(42)), "42");
-        assert_eq!(lisp_arg_to_sexp(&BridgeValue::Float(1.5)), "1.5");
-    }
-
-    #[test]
-    fn renders_bigint_as_raw_digits() {
-        assert_eq!(
-            lisp_arg_to_sexp(&BridgeValue::BigInt("123456789012345678901234567890".to_string())),
-            "123456789012345678901234567890"
-        );
-    }
-
-    #[test]
-    fn renders_string_quoted_and_escaped() {
-        assert_eq!(
-            lisp_arg_to_sexp(&BridgeValue::Str("hi \"there\"".to_string())),
-            "\"hi \\\"there\\\"\""
-        );
-    }
-
-    #[test]
-    fn renders_object_handle() {
-        assert_eq!(lisp_arg_to_sexp(&BridgeValue::Object(7)), "(jvm-handle 7)");
-    }
-
-    #[test]
-    fn renders_symbol_and_keyword() {
-        assert_eq!(
-            lisp_arg_to_sexp(&BridgeValue::Symbol {
-                name: "foo".to_string(),
-                keyword: false
-            }),
-            "(jvm-symbol \"foo\" nil)"
-        );
-        assert_eq!(
-            lisp_arg_to_sexp(&BridgeValue::Symbol {
-                name: "foo".to_string(),
-                keyword: true
-            }),
-            "(jvm-symbol \"foo\" t)"
-        );
-    }
-}
-
 #[cfg(test)]
 mod jvm_tests {
     use super::*;
@@ -594,18 +487,15 @@ mod jvm_tests {
                 )?
                 .l()?;
             let result_arg = object_to_lisp_arg(env, result)?;
-            // Checks the actual variant, not just the rendered string:
-            // `lisp_arg_to_sexp`'s `Float` arm renders a whole-number
-            // `f64` without a trailing `.0` (Rust's `Display` for `f64`),
-            // so `BridgeValue::Int(42)` and `BridgeValue::Float(42.0)` render
-            // identically as `"42"` — a string-only assertion here
-            // couldn't have caught a boxed `Long` return being
-            // misrouted into `BridgeValue::Float` instead of `BridgeValue::Int`.
+            // Checks the actual variant, not just a stringified value: a
+            // boxed `Long` return misrouted into `BridgeValue::Float`
+            // instead of `BridgeValue::Int` would still print as `42`, so
+            // asserting the enum variant directly is what actually catches
+            // that misrouting.
             assert!(
                 matches!(result_arg, BridgeValue::Int(42)),
                 "expected BridgeValue::Int(42), got {result_arg:?}"
             );
-            assert_eq!(lisp_arg_to_sexp(&result_arg), "42");
             Ok(())
         })
         .expect("int-to-long marshalling round trip should succeed");

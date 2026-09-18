@@ -7,7 +7,6 @@ mod jvm_thread;
 mod lisp_requests;
 mod marshal;
 mod pending;
-mod protocol;
 mod reentry;
 mod runtime;
 mod shim;
@@ -205,11 +204,11 @@ fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value)
     }
 }
 
-/// Constructs a `JvmHandle` `user-ptr` from a raw handle integer received
-/// over the wire (in a `(jvm-handle N)` tag — see `marshal::lisp_arg_to_sexp`).
-/// The Rust-side handle table entry itself already exists by the time this
-/// runs (it was populated by `marshal::jvm_value_to_lisp_arg` when the
-/// value first crossed from Java to Lisp); this just gives Lisp a
+/// Constructs a `JvmHandle` `user-ptr` from a raw handle integer already
+/// produced by the native inbound drain (`lisp_requests::bridge_value_to_
+/// value`). The Rust-side handle table entry itself already exists by the
+/// time this runs (it was populated by `marshal::jvm_value_to_lisp_arg`
+/// when the value first crossed from Java to Lisp); this just gives Lisp a
 /// `user-ptr` wrapper for the handle number it already received.
 #[defun(mod_in_name = false, name = "jvm--wrap-handle")]
 fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
@@ -218,14 +217,15 @@ fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
 
 /// Drains the inbound queue (`lisp_requests`) and runs each message's `Env`
 /// op on this (the main) thread — the module-primitive half of both the
-/// built-in-Lisp-access design (see design spec, "Request/reply flow") and,
-/// as of the marshalling-consolidation plan, every other JVM→Emacs message
-/// once its producer is migrated (Tasks 6-8). Called from `jvm--dispatch-
-/// message`'s `(lisp-request)` case (`elisp/jvm.el`), itself triggered by a
-/// JVM thread's `channel::send`-based wakeup after enqueuing a message
-/// (`shim.rs`'s `Lisp.*`/`LispRefReleaseNotifier` natives).
+/// built-in-Lisp-access design (see design spec, "Request/reply flow") and
+/// every other JVM→Emacs message (`call-done`/`load-jar-done`/`invoke`/
+/// `release`/`status`/`log`). Set as the pipe process's `:filter`
+/// (`jvm--ensure-pipe-process`, `elisp/jvm.el`), so Emacs calls it directly
+/// as `(process output-string)`; both args are ignored — the raw wakeup
+/// byte (`channel::poke`) carries no payload, since the actual message
+/// rides the Rust-side queue, not the wire.
 #[defun(mod_in_name = false, name = "jvm--service-inbound")]
-fn jvm_service_inbound(env: &Env) -> Result<()> {
+fn jvm_service_inbound(env: &Env, _process: Value, _data: Value) -> Result<()> {
     lisp_requests::service_inbound(env)
 }
 
