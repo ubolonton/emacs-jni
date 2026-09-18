@@ -71,37 +71,15 @@ docs/explanation/architecture.md).")
     (`(log ,level ,msg)
      (jvm--log "[%s] %s" level msg)
      (message "emacs-jni [%s]: %s" level msg))
-    (`(invoke ,id ,handle ,args)
-     ;; A JVM-initiated call into a previously wrapped Lisp function (see
-     ;; `jvm--register-callback'): look it up by HANDLE, funcall it with
-     ;; ARGS, and reply with the result (or a formatted error) via
-     ;; `jvm--invoke-reply', which resolves the `CompletableFuture' on the
-     ;; Rust/Java side.
-     ;;
-     ;; ARGS can contain a `(jvm-handle N)' tag, exactly like a `call-done'
-     ;; RESULT can: any real Java object passed as one of the call's
-     ;; arguments (not just an object that started out as a Lisp value and
-     ;; crossed into Java earlier) renders this way -- see
-     ;; `marshal::jvm_value_to_lisp_arg' and `shim.rs''s
-     ;; `jobject_array_to_sexp'. So each argument must go through
-     ;; `jvm--resolve-sexp-result' first, the same as `call-done' does,
-     ;; to turn any such tag into a real `user-ptr' before FN sees it.
-     (let ((fn (gethash handle jvm--lisp-callbacks)))
-       (if (null fn)
-           (jvm--invoke-reply id nil (format "no such callback handle %s" handle))
-         (condition-case err
-             (jvm--invoke-reply id t (apply fn (mapcar #'jvm--resolve-sexp-result args)))
-           (error
-            (jvm--invoke-reply id nil (format "%S" err)))))))
     (`(lisp-request)
      ;; A JVM thread enqueued one or more inbound messages (a Lisp-access
      ;; `intern'/`apply'/`type-of'/`is-not-nil?'/`eq'/`prin1-to-string', a
-     ;; GC-driven `FreeRef', a `call-done'/`load-jar-done' (migrated in Task
-     ;; 6), or -- once its producer is migrated, see Tasks 7-8 -- an
-     ;; `invoke'/`release'/`log'/`status') on the Rust-side queue and woke us
-     ;; up to service them -- see `jvm--service-inbound' and the design
-     ;; spec's "Request/reply flow". No payload: the message itself rides
-     ;; the Rust queue, not this wire message.
+     ;; GC-driven `FreeRef', a `call-done'/`load-jar-done'/`invoke' (migrated
+     ;; in Tasks 6-7), or -- once its producer is migrated, see Task 8 -- a
+     ;; `release'/`log'/`status') on the Rust-side queue and woke us up to
+     ;; service them -- see `jvm--service-inbound' and the design spec's
+     ;; "Request/reply flow". No payload: the message itself rides the Rust
+     ;; queue, not this wire message.
      (jvm--service-inbound))
     (`(release ,handle)
      ;; The JVM-side LispFunction proxy for HANDLE was garbage collected
@@ -123,15 +101,16 @@ into its final Lisp-visible form."
 
 ;; The helpers below are the native-queue (`jvm--service-inbound')
 ;; counterparts of `jvm--dispatch-message''s former `call-done'/
-;; `load-jar-done' cases and its still-live `status'/`log'/`release' cases
-;; -- same logic, called instead from `lisp_requests.rs''s `service_inbound'
-;; once VALUE/ARGS have already been converted to real Lisp values on the
-;; Rust side (no `jvm--resolve-sexp-result' needed here: that function only
-;; undoes the wire's `(jvm-handle N)'/`(jvm-symbol ...)' tags, which the
-;; native path never produces). `jvm--resolve-call'/`jvm--resolve-load-jar'
-;; are live as of Task 6; the rest stay dormant until Tasks 7-8 move each
-;; remaining message's producer off the text protocol onto
-;; `lisp_requests::Inbound' -- see that module's doc comment.
+;; `load-jar-done'/`invoke' cases and its still-live `status'/`log'/`release'
+;; cases -- same logic, called instead from `lisp_requests.rs''s
+;; `service_inbound' once VALUE/ARGS have already been converted to real
+;; Lisp values on the Rust side (no `jvm--resolve-sexp-result' needed here:
+;; that function only undoes the wire's `(jvm-handle N)'/`(jvm-symbol ...)'
+;; tags, which the native path never produces). `jvm--resolve-call'/
+;; `jvm--resolve-load-jar'/`jvm--resolve-invoke' are live as of Tasks 6-7;
+;; the rest stay dormant until Task 8 moves each remaining message's
+;; producer off the text protocol onto `lisp_requests::Inbound' -- see that
+;; module's doc comment.
 
 (defun jvm--resolve-call (id ok value err)
   "Resolve the pending `jvm-call-async' callback for ID."
@@ -140,10 +119,19 @@ into its final Lisp-visible form."
     (funcall callback ok value err)))
 
 (defun jvm--resolve-invoke (id handle args)
-  "Stub for the native-queue `invoke' path; filled in by Task 7.
-ID, HANDLE, and ARGS mirror the wire `invoke' case's own bindings
-in `jvm--dispatch-message'."
-  (ignore id handle args))
+  "Funcall the callback registered for HANDLE with ARGS (already real Lisp
+values -- no `jvm--resolve-sexp-result' needed, see the comment above), and
+reply to the JVM with the result via `jvm--invoke-reply'. On a Lisp error,
+ERR is the real `(SYMBOL . DATA)' `condition-case' caught -- passed through
+as-is, not flattened into a string, so `jvm--invoke-reply' (`lib.rs') can
+marshal the real symbol/data into a `LispSignal' the JVM caller actually
+sees."
+  (let ((fn (gethash handle jvm--lisp-callbacks)))
+    (if (null fn)
+        (jvm--invoke-reply id nil (cons 'error (list (format "no such callback handle %s" handle))))
+      (condition-case err
+          (jvm--invoke-reply id t (apply fn args))
+        (error (jvm--invoke-reply id nil err))))))
 
 (defun jvm--resolve-load-jar (id ok err)
   "Resolve the pending `jvm-load-jar-async' callback for ID."

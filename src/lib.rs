@@ -229,33 +229,45 @@ fn jvm_service_inbound(env: &Env) -> Result<()> {
     lisp_requests::service_inbound(env)
 }
 
-/// Replies to a pending JVM-initiated `invoke` request: RESULT is either
-/// the Lisp function's return value (OK is `t`) or a formatted error
-/// message (OK is `nil`), per `jvm--dispatch-message`'s `invoke` case in
-/// `elisp/jvm.el`. Sends `Cmd::InvokeReply` to the worker thread,
-/// which resolves (or exceptionally completes) the `CompletableFuture`
-/// `shim::lisp_function_call` handed back to Java — the reverse direction
-/// of `jvm--call`. Silently drops the reply (like every other `worker::
-/// send_command` caller in this file) if there's no running worker thread
-/// to receive it; there is nothing sensible to signal back to Java in that
-/// case, since the Java side is only ever blocked on its own future, not
-/// on this call succeeding.
+/// Replies to a pending JVM-initiated `invoke` request. VALUE is either the
+/// Lisp callback's return value (OK is `t`) or the real `(SYMBOL . DATA)`
+/// error cons `condition-case` caught (OK is `nil`), per `jvm--resolve-
+/// invoke`'s two call sites in `elisp/jvm.el`. Marshals either shape into a
+/// `LispOutcome` — a plain return value the same way an ordinary callback
+/// result always has (`lisp_value_to_arg`), or the real signal symbol/data
+/// via `lisp_requests::value_to_outcome` (the same classifier the Clojure
+/// apply path's `error_to_reply` uses) — and sends `Cmd::InvokeReply` to the
+/// worker thread, which resolves (or exceptionally completes, with a real
+/// `LispSignal`) the `CompletableFuture` `shim::lisp_function_call` handed
+/// back to Java — the reverse direction of `jvm--call`. Silently drops the
+/// reply (like every other `worker::send_command` caller in this file) if
+/// there's no running worker thread to receive it; there is nothing
+/// sensible to signal back to Java in that case, since the Java side is
+/// only ever blocked on its own future, not on this call succeeding.
 #[defun(mod_in_name = false, name = "jvm--invoke-reply")]
-fn jvm_invoke_reply(id: u64, ok: Value, result: Value) -> Result<()> {
+fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
     // The `emacs` crate (0.21.0) has no `FromLisp` impl for `bool` (Emacs
     // Lisp has no dedicated boolean type -- see `lisp_value_to_arg`'s own
     // note on this same point), so OK is received as a raw `Value` and
     // checked for Lisp truthiness directly, matching `jvm--invoke-reply`'s
     // two call sites in `elisp/jvm.el`, which always pass literally
     // `t` or `nil`.
-    let ok = ok.is_not_nil();
-    let arg = if ok {
-        lisp_value_to_arg(result)?
+    let outcome = if ok.is_not_nil() {
+        commands::LispOutcome::Value(lisp_value_to_arg(value)?)
     } else {
-        let message: String = result.into_rust()?;
-        commands::BridgeValue::Str(message)
+        // VALUE is the real `(SYMBOL . DATA)' condition-case caught --
+        // classify each half through the same `value_to_outcome' the
+        // Lisp-access apply path's `error_to_reply' uses, so a callback
+        // signal surfaces to Java as a real `LispSignal' carrying the
+        // actual symbol/data, not a fabricated `error'/stringified message.
+        let symbol = value.car()?;
+        let data = value.cdr()?;
+        commands::LispOutcome::Signal {
+            symbol: Box::new(lisp_requests::value_to_outcome(env, symbol)?),
+            data: Box::new(lisp_requests::value_to_outcome(env, data)?),
+        }
     };
-    let _ = worker::send_command(commands::Cmd::InvokeReply { id, ok, result: arg });
+    let _ = worker::send_command(commands::Cmd::InvokeReply { id, outcome });
     Ok(())
 }
 

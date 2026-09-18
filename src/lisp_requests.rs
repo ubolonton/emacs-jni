@@ -60,9 +60,9 @@ pub enum LispInput {
 /// flow"); `Prin1` alone keeps a raw `ptr`: it is `LispObject.
 /// prin1ToString`, so its receiver is always a real `LispObject`, never a
 /// symbol/scalar. The remaining six variants generalise this queue to every
-/// other JVM→Emacs message; `CallDone`/`LoadJarDone` are now live (Task 6),
-/// `Invoke`/`Release`/`Log`/`Status` are still produced by the older text
-/// protocol (see this module's doc comment).
+/// other JVM→Emacs message; `CallDone`/`LoadJarDone`/`Invoke` are now live
+/// (Tasks 6-7), `Release`/`Log`/`Status` are still produced by the older
+/// text protocol (see this module's doc comment).
 #[derive(Debug)]
 pub enum Inbound {
     Intern { id: u64, name: String },
@@ -77,15 +77,14 @@ pub enum Inbound {
     /// `handle_call` (Task 6).
     CallDone { id: u64, ok: bool, result: BridgeValue, err: Option<String> },
     /// A JVM-initiated call into a previously wrapped Lisp function (see
-    /// `jvm--register-callback`) — mirrors `protocol::invoke_message`. No
-    /// producer yet (Task 7 flips `lisp_function_call`); see `CallDone`'s
-    /// own note on the `expect`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 7"))]
+    /// `jvm--register-callback`) — the typed-queue replacement for the old
+    /// `protocol::invoke_message` text message. Enqueued by
+    /// `shim::lisp_function_call` (Task 7).
     Invoke { id: u64, handle: u64, args: Vec<BridgeValue> },
     /// A JVM-side `LispFunction` proxy was garbage collected — mirrors
-    /// `protocol::release_message`. No producer yet (Task 7 flips
+    /// `protocol::release_message`. No producer yet (Task 8 flips
     /// `release_notifier_run`); see `CallDone`'s own note on the `expect`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 7"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 8"))]
     Release { handle: u64 },
     /// A log line from the worker thread — mirrors `protocol::log_message`.
     /// No producer yet (Task 8 flips every `channel::send(&protocol::
@@ -297,7 +296,13 @@ fn fallback_signal(message: &str) -> LispOutcome {
 /// Clojure `nil` and the symbol `t` becomes `true`, so a Lisp predicate's
 /// result is usable directly in a Clojure conditional. The scalar set and
 /// its Java shapes mirror the `jvm-call` return-marshalling table.
-fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
+///
+/// `pub(crate)` because `lib.rs`'s `jvm--invoke-reply` reuses it too:
+/// `jvm--resolve-invoke` (`elisp/jvm.el`) hands it the real `(SYMBOL . DATA)`
+/// a failed callback's `condition-case` caught, and each half needs exactly
+/// this same "classify a raw Lisp value" treatment before it can go into a
+/// `LispOutcome::Signal`.
+pub(crate) fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
     if !value.is_not_nil() {
         return Ok(LispOutcome::Value(BridgeValue::Nil));
     }
@@ -359,10 +364,11 @@ fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
 ///
 /// The six non-Lisp-access arms below are the real Task 6-8 handlers.
 /// `CallDone`/`LoadJarDone` are reached as of Task 6 (`handle_call`/
-/// `handle_load_jar` now enqueue them); `Invoke`/`Release`/`Log`/`Status`
-/// are still unreached — no producer enqueues them yet (see this module's
-/// doc comment) — so Tasks 7-8 only need to flip their producer, not touch
-/// this drain.
+/// `handle_load_jar` enqueue them) and `Invoke` as of Task 7
+/// (`shim::lisp_function_call` enqueues it); `Release`/`Log`/`Status` are
+/// still unreached — no producer enqueues them yet (see this module's doc
+/// comment) — so Task 8 only needs to flip their producer, not touch this
+/// drain.
 pub fn service_inbound(env: &Env) -> EmacsResult<()> {
     for req in drain() {
         match &req {

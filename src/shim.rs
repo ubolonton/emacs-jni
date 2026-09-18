@@ -196,14 +196,15 @@ fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> 
 
 /// The actual implementation behind `LispFunction.call`: allocates a fresh
 /// correlation id, constructs a (still-incomplete) `CompletableFuture`,
-/// registers it in `pending`, posts `(invoke ID HANDLE ARGS)` on the
-/// channel, and returns the future immediately — the concrete realization
-/// of the design spec's "Java shim" section. Never blocks: everything here
-/// is either process-local bookkeeping or a non-blocking channel write; the
-/// actual Lisp call happens later, off this thread entirely (on Emacs's
-/// own main thread, via `jvm--dispatch-message`'s `invoke` case), and its
-/// result arrives back asynchronously via `Cmd::InvokeReply`
-/// (`jvm_thread::handle_invoke_reply`).
+/// registers it in `pending`, enqueues an `Inbound::Invoke` and wakes the
+/// main thread up, and returns the future immediately — the concrete
+/// realization of the design spec's "Java shim" section. Never blocks:
+/// everything here is either process-local bookkeeping or a non-blocking
+/// channel write; the actual Lisp call happens later, off this thread
+/// entirely (on Emacs's own main thread, via `lisp_requests::
+/// service_inbound`'s `Invoke` arm, which calls the Elisp
+/// `jvm--resolve-invoke`), and its result arrives back asynchronously via
+/// `Cmd::InvokeReply` (`jvm_thread::handle_invoke_reply`).
 ///
 /// Registered (not called directly) via `register_lisp_function_native`
 /// above -- see that function's doc comment for the actual native-method
@@ -221,8 +222,12 @@ fn lisp_function_call<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::pending::register(id, future_global);
 
-    let args_sexp = jobject_array_to_sexp(env, &args)?;
-    crate::channel::send(&crate::protocol::invoke_message(id, handle, &args_sexp));
+    let args = jobject_array_to_bridge_values(env, &args)?;
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Invoke { id, handle, args });
+    // Wakeup: reuse the existing text (lisp-request) message the live filter
+    // still dispatches to jvm--service-inbound. Task 9 swaps this for the
+    // raw-byte channel::poke() together with the #[defun] filter.
+    crate::channel::send(&crate::protocol::lisp_request_message());
 
     Ok(future)
 }
@@ -281,21 +286,22 @@ fn get_handle_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::
     Ok(value as u64)
 }
 
-/// Renders an `Object[]` of `call`'s actual varargs arguments back into the
-/// S-expression list fragment `protocol::invoke_message` embeds — the
-/// reverse direction of what `jvm_thread::handle_call` (Task 5) does for
-/// its own return values, reused here since a JVM-initiated call's
-/// arguments need the exact same Java-object -> `BridgeValue` -> sexp pipeline
-/// as any other value crossing from Java to Lisp.
-fn jobject_array_to_sexp(env: &mut jni::Env<'_>, args: &JObjectArray<'_>) -> jni::errors::Result<String> {
+/// Renders an `Object[]` of `call`'s actual varargs arguments into a
+/// `Vec<BridgeValue>` — the reverse direction of what `jvm_thread::
+/// handle_call` (Task 5) does for its own return values, reused here since
+/// a JVM-initiated call's arguments need the exact same Java-object ->
+/// `BridgeValue` pipeline as any other value crossing from Java to Lisp.
+fn jobject_array_to_bridge_values(
+    env: &mut jni::Env<'_>,
+    args: &JObjectArray<'_>,
+) -> jni::errors::Result<Vec<crate::commands::BridgeValue>> {
     let len = args.len(env)?;
-    let mut parts = Vec::with_capacity(len);
+    let mut out = Vec::with_capacity(len);
     for i in 0..len {
         let obj = args.get_element(env, i)?;
-        let arg = crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(obj))?;
-        parts.push(crate::marshal::lisp_arg_to_sexp(&arg));
+        out.push(crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(obj))?);
     }
-    Ok(format!("({})", parts.join(" ")))
+    Ok(out)
 }
 
 fn define_if_absent(

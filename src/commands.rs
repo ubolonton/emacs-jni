@@ -35,14 +35,16 @@ pub enum BridgeValue {
     Symbol { name: String, keyword: bool },
 }
 
-/// The value a `Cmd::LispReply` completes a pending Lisp-access future
-/// with — built by `lisp_requests::service` (which runs the actual `Env`
-/// op) and consumed by `jvm_thread::handle_lisp_reply` (which turns it
-/// into a real Java value on the worker's own JNI attachment). Mirrors
-/// `handle_invoke_reply`'s `ok`/`BridgeValue` pair, but as a single enum since
-/// a Lisp-access reply's success shape varies by request kind (a
-/// `LispObject` pointer, a `boolean`, or a `String`), unlike `invoke`'s
-/// reply, which is always a `BridgeValue`.
+/// The value a `Cmd::LispReply` or `Cmd::InvokeReply` completes a pending
+/// future with — built by `lisp_requests::service_inbound`/`jvm--invoke-
+/// reply` (which run the actual `Env` op, or marshal `jvm--resolve-invoke`'s
+/// result) and consumed by `jvm_thread::handle_lisp_reply`/
+/// `handle_invoke_reply` (which turn it into a real Java value, or a thrown
+/// `LispSignal`/`LispThrow`, on the worker's own JNI attachment) via the
+/// shared `complete_future_with_reply`. A single enum since a reply's
+/// success shape varies by request kind (a `LispObject` pointer, a
+/// `boolean`, a `String`, ...), and a failure carries the real Lisp signal
+/// symbol/data or throw tag/value, not a flattened message.
 #[derive(Debug)]
 pub enum LispOutcome {
     /// A scalar or symbol result, reusing the generic bridge carrier — the
@@ -72,7 +74,13 @@ pub enum Cmd {
     Stop,
     LoadJar { id: u64, path: String },
     Call { id: u64, target: CallTarget, member: String, args: Vec<BridgeValue> },
-    InvokeReply { id: u64, ok: bool, result: BridgeValue },
+    /// Completes a pending `LispFunction.call` future (`shim::
+    /// lisp_function_call`) with the Lisp callback's outcome — sent by
+    /// `jvm--invoke-reply` once `jvm--resolve-invoke` (`elisp/jvm.el`) has
+    /// funcalled the callback and marshalled its return value or its real
+    /// `condition-case` signal into a `LispOutcome`. See
+    /// `jvm_thread::handle_invoke_reply`.
+    InvokeReply { id: u64, outcome: LispOutcome },
     ReleaseRef { handle: u64 },
     /// Completes a pending Lisp-access native's reply future (`intern`,
     /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by

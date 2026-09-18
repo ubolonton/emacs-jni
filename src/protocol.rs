@@ -37,8 +37,13 @@ pub fn call_done_message(id: u64, ok: bool, result: Option<&str>, err: Option<&s
     format!("(call-done {id} {ok_sym} {result_sexp} {err_sexp})\n")
 }
 
+/// No longer called outside this file's own tests: `shim::lisp_function_call`
+/// enqueues `Inbound::Invoke` instead as of Task 7. See
+/// `load_jar_done_message`'s own note on why this stays until Task 9.
+///
 /// ARGS is a pre-formatted S-expression list fragment, e.g. `"(1 2)"` or
 /// `"nil"` for zero args — produced by Task 4's marshalling code.
+#[cfg_attr(not(test), expect(dead_code, reason = "protocol.rs deleted whole in Task 9"))]
 pub fn invoke_message(id: u64, handle: u64, args: &str) -> String {
     format!("(invoke {id} {handle} {args})\n")
 }

@@ -57,11 +57,11 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 std::thread::spawn(move || handle_call(&vm, loader, id, target, member, args));
                 false
             }
-            Cmd::InvokeReply { id, ok, result } => {
+            Cmd::InvokeReply { id, outcome } => {
                 // Handled inline, unlike `Cmd::Call` — see `handle_invoke_reply`'s
                 // own doc comment for why completing an already-existing
                 // `CompletableFuture` doesn't need its own thread.
-                handle_invoke_reply(&vm, id, ok, result);
+                handle_invoke_reply(&vm, id, outcome);
                 false
             }
             // Handled inline, like `Cmd::InvokeReply` — dropping a
@@ -493,57 +493,23 @@ fn add_jar_url(
 /// completing a future is not itself a slow operation (it's a single JNI
 /// call to `CompletableFuture#complete`/`#completeExceptionally`, not an
 /// arbitrary user method that might block for arbitrary reasons). This is
-/// the other half of the round trip `shim::lisp_function_call` starts:
-/// that function posts `(invoke ID HANDLE ARGS)` and returns immediately;
-/// this function runs once Lisp's `jvm--invoke-reply` sends back
-/// `Cmd::InvokeReply` with the Lisp function's result (or error).
-fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::BridgeValue) {
+/// the other half of the round trip `shim::lisp_function_call` starts: that
+/// function enqueues an `Inbound::Invoke` and returns immediately; this
+/// function runs once Lisp's `jvm--invoke-reply` sends back
+/// `Cmd::InvokeReply` with the Lisp callback's outcome — its real return
+/// value, or the real `condition-case` signal it raised, already marshalled
+/// to a `LispOutcome`. Identical shape to `handle_lisp_reply` below (both
+/// just hand their `LispOutcome` to `complete_future_with_reply`) — the
+/// callback round trip and the Clojure apply round trip complete their
+/// futures exactly the same way.
+fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::commands::LispOutcome) {
     let Some(future) = crate::pending::take(id) else {
         channel::send(&protocol::log_message("error", &format!("invoke-reply for unknown id {id}")));
         return;
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
         let future_local = env.new_local_ref(future.as_obj())?;
-        if ok {
-            // `LispCallable#call` is declared to return `CompletableFuture<Object>`
-            // -- `Object` is the only param type `lisp_arg_to_jvalue` ever
-            // needs to marshal against here, matching how `Method.invoke`'s
-            // own `Object[]` args array (Task 5's `build_invoke_args`) does
-            // the same "unknown declared type, box everything" thing.
-            let param_type = env.find_class(jni::jni_str!("java/lang/Object"))?;
-            let jvalue = crate::marshal::lisp_arg_to_jvalue(env, &result, &param_type)?;
-            let boxed = crate::marshal::box_if_primitive(env, jvalue)?;
-            env.call_method(
-                &future_local,
-                jni::jni_str!("complete"),
-                jni::jni_sig!((v: java.lang.Object) -> boolean),
-                &[jni::objects::JValueOwned::Object(boxed).borrow()],
-            )?;
-        } else {
-            // The Lisp side (`jvm--invoke-reply`) always sends a formatted
-            // error message as a plain string for a failed callback (see
-            // `jvm_invoke_reply` in `lib.rs`) -- any other shape here would
-            // mean a protocol-level bug, not a normal application error, so
-            // there's nothing sensible to complete the future with; just
-            // leave it pending rather than fabricate a result.
-            let crate::commands::BridgeValue::Str(message) = result else {
-                return Ok(());
-            };
-            complete_future_with_reply(
-                env,
-                &future_local,
-                crate::commands::LispOutcome::Signal {
-                    symbol: Box::new(crate::commands::LispOutcome::Value(crate::commands::BridgeValue::Symbol {
-                        name: "error".to_string(),
-                        keyword: false,
-                    })),
-                    data: Box::new(crate::commands::LispOutcome::Value(
-                        crate::commands::BridgeValue::Str(message),
-                    )),
-                },
-            )?;
-        }
-        Ok(())
+        complete_future_with_reply(env, &future_local, outcome)
     });
     if let Err(e) = result {
         // The future is already removed from `pending` by this point (via

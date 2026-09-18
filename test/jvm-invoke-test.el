@@ -18,18 +18,20 @@
   (should (equal (jvm-call-await "Calc" "callWithArg" (list (lambda (n) (* n 2)) 21))
                  42)))
 
-(ert-deftest emacs-jni-jvm-invoke-test/lisp-error-propagates-as-java-exception ()
-  "A failed Lisp callback completes the future exceptionally with
-`emacs_jni.core.LispSignal', so `Calc.callWithArg''s `future.get()'
-raises it. Asserts on the exception TYPE, not message text: unlike the
-old `LispError', `LispSignal' carries no plain-text message of its
-own (its `dataOrValue' field holds \"boom\" instead, not introspectable
-from this coarse exception-chain rendering)."
+(ert-deftest emacs-jni-jvm-invoke-test/lisp-error-propagates-as-lisp-signal ()
+  "A failed Lisp callback completes the future exceptionally with a real
+`emacs_jni.core.LispSignal' carrying the callback's actual `condition-case'
+signal symbol -- not a fabricated `error' symbol with a stringified
+message. `Calc.describeCallbackError' catches the future's exception and
+returns the `LispSignal''s real symbol name, so this asserts on the real
+symbol, not on coarse exception-chain text: before this task, every failed
+callback crossed as a fabricated `(error . \"boom-string\")', so this would
+return \"error\" regardless of what the callback actually signalled."
   (should (eq (jvm-status) 'ready))
-  (let ((err (should-error (jvm-call-await "Calc" "callWithArg"
-                                           (list (lambda (_n) (error "boom")) 1))
-                           :type 'jvm-error)))
-    (should (string-match-p "LispSignal" (cadr err)))))
+  (jvm-load-jar-await jvm-invoke-test--calc-jar)
+  (should (equal (jvm-call-await "Calc" "describeCallbackError"
+                                 (list (lambda (_n) (signal 'wrong-type-argument '(numberp "x"))) 1))
+                 "wrong-type-argument")))
 
 (ert-deftest emacs-jni-jvm-invoke-test/java-calls-lisp-with-a-real-object-argument ()
   "Regression test for Finding 1 of the Phase 2 whole-branch review: a
