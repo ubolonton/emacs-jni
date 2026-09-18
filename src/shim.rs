@@ -8,6 +8,14 @@ const LISP_NON_LOCAL_EXIT_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/LispNonLocalExit.class"
 ));
+const LISP_SIGNAL_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispSignal.class"
+));
+const LISP_THROW_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispThrow.class"
+));
 const RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/ReleaseNotifier.class"
@@ -24,7 +32,8 @@ const LISP_SYMBOL_CLASS: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispSymbol.class"));
 
 /// Defines the `emacs_jni.core.{LispCallable,LispFunction,LispNonLocalExit,
-/// ReleaseNotifier,LispObject,Lisp,LispRefReleaseNotifier}` shim classes
+/// LispSignal,LispThrow,ReleaseNotifier,LispObject,Lisp,
+/// LispRefReleaseNotifier,LispSymbol}` shim classes
 /// into the currently-attached JVM, using the *platform* classloader
 /// (not the system/application classloader, despite this file's original
 /// Task 1 comment saying otherwise — see below) so they're visible both
@@ -100,6 +109,10 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispCallable", LISP_CALLABLE_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispFunction", LISP_FUNCTION_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispNonLocalExit", LISP_NON_LOCAL_EXIT_CLASS)?;
+    // LispSignal/LispThrow extend LispNonLocalExit, so the base must already
+    // be defined -- same ordering reasoning as LispCallable/LispFunction.
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispSignal", LISP_SIGNAL_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispThrow", LISP_THROW_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/ReleaseNotifier", RELEASE_NOTIFIER_CLASS)?;
     // LispRefReleaseNotifier has no class-loading dependency on LispObject
     // (LispObject's constructor only *references* it inside a method body,
@@ -117,6 +130,8 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispSignal"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispThrow"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;

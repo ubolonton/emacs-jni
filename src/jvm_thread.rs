@@ -655,9 +655,11 @@ pub(crate) fn complete_future_with_reply<'local>(
     Ok(())
 }
 
-/// Builds an `emacs_jni.core.LispNonLocalExit(kind, symbolOrTag,
-/// dataOrValue)` from two already-classified reply values. `kind` is 0
-/// (signal) or 1 (throw).
+/// Builds an `emacs_jni.core.LispSignal(a, b)` (`kind == 0`) or
+/// `LispThrow(a, b)` (`kind == 1`) from two already-classified reply
+/// values — both still a `LispNonLocalExit`/`Throwable`, so the existing
+/// catch/rethrow sites (`describe_pending_java_exception`,
+/// `extract_non_local_exit`) keep matching by the shared base.
 fn build_non_local_exit<'local>(
     env: &mut jni::Env<'local>,
     kind: i32,
@@ -666,15 +668,15 @@ fn build_non_local_exit<'local>(
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
     let a_obj = build_lisp_reply_object(env, a)?;
     let b_obj = build_lisp_reply_object(env, b)?;
-    let class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
+    let class = if kind == 0 {
+        env.find_class(jni::jni_str!("emacs_jni/core/LispSignal"))?
+    } else {
+        env.find_class(jni::jni_str!("emacs_jni/core/LispThrow"))?
+    };
     env.new_object(
         &class,
-        jni::jni_sig!((kind: int, a: java.lang.Object, b: java.lang.Object) -> void),
-        &[
-            jni::objects::JValue::Int(kind),
-            jni::objects::JValue::Object(&a_obj),
-            jni::objects::JValue::Object(&b_obj),
-        ],
+        jni::jni_sig!((a: java.lang.Object, b: java.lang.Object) -> void),
+        &[jni::objects::JValue::Object(&a_obj), jni::objects::JValue::Object(&b_obj)],
     )
 }
 

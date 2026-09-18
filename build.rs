@@ -5,6 +5,8 @@ fn main() {
     println!("cargo:rerun-if-changed=java/emacs_jni/core/LispCallable.java");
     println!("cargo:rerun-if-changed=java/emacs_jni/core/LispFunction.java");
     println!("cargo:rerun-if-changed=java/emacs_jni/core/LispNonLocalExit.java");
+    println!("cargo:rerun-if-changed=java/emacs_jni/core/LispSignal.java");
+    println!("cargo:rerun-if-changed=java/emacs_jni/core/LispThrow.java");
     println!("cargo:rerun-if-changed=java/emacs_jni/core/ReleaseNotifier.java");
     println!("cargo:rerun-if-changed=java/emacs_jni/core/LispObject.java");
     println!("cargo:rerun-if-changed=java/emacs_jni/core/Lisp.java");
@@ -21,6 +23,8 @@ fn main() {
         .arg(format!("{manifest_dir}/java/emacs_jni/core/LispCallable.java"))
         .arg(format!("{manifest_dir}/java/emacs_jni/core/LispFunction.java"))
         .arg(format!("{manifest_dir}/java/emacs_jni/core/LispNonLocalExit.java"))
+        .arg(format!("{manifest_dir}/java/emacs_jni/core/LispSignal.java"))
+        .arg(format!("{manifest_dir}/java/emacs_jni/core/LispThrow.java"))
         .arg(format!("{manifest_dir}/java/emacs_jni/core/ReleaseNotifier.java"))
         .arg(format!("{manifest_dir}/java/emacs_jni/core/LispObject.java"))
         .arg(format!("{manifest_dir}/java/emacs_jni/core/Lisp.java"))
