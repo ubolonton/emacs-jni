@@ -79,16 +79,6 @@ impl Drop for JvmHandle {
     }
 }
 
-/// A handle registered against nothing real — no live JVM object needed
-/// for the plumbing-only test in `jvm--test-make-handle`. Task 5 is what
-/// makes handles wrap genuine JNI objects; this deliberately does not
-/// touch `TABLE` (there's no real `Global` to store), just hands out a
-/// fresh handle number so distinct calls produce distinct `JvmHandle`s.
-#[cfg(feature = "test-support")]
-pub fn register_dummy_for_test() -> u64 {
-    NEXT_HANDLE.fetch_add(1, Ordering::SeqCst)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -115,5 +115,19 @@ either way."
         (accept-process-output jvm--pipe-process 0.1)))
     (should (equal result2 30))))
 
+(ert-deftest emacs-jni-jvm-call-test/distinct-objects-are-distinct-user-ptrs ()
+  "Two separately constructed JVM objects wrap as distinct, non-`eq'
+`user-ptr' values, each round-tripping independently. Supersedes the
+plumbing-only `jvm--test-make-handle' check now that real method calls
+produce genuine handles."
+  (jvm-call-test--ensure-ready)
+  (let ((a (jvm-new-await "Calc" '(1)))
+        (b (jvm-new-await "Calc" '(2))))
+    (should (user-ptrp a))
+    (should (user-ptrp b))
+    (should-not (eq a b))
+    (should (equal (jvm-call-await a "addToBase" '(10)) 11))
+    (should (equal (jvm-call-await b "addToBase" '(10)) 12))))
+
 (provide 'jvm-call-test)
 ;;; jvm-call-test.el ends here

@@ -384,22 +384,6 @@ fn jvm_test_panic(env: &Env) -> Result<()> {
     }
 }
 
-/// Throwaway plumbing-only defun: proves a `handles::JvmHandle` round-trips
-/// through Lisp as a genuine `user-ptr` before Task 5 replaces this with the
-/// real `jvm-call`/`jvm-new` machinery that produces `JvmHandle`s from
-/// actual method calls. Returning `Box<handles::JvmHandle>` (rather than a
-/// bare `handles::JvmHandle`) is what the `emacs` crate's blanket
-/// `impl<T: Transfer> IntoLisp for Box<T>` picks up to embed the value as a
-/// `user-ptr` -- see `src/handles.rs`'s `Transfer` impl.
-#[cfg(feature = "test-support")]
-#[defun(mod_in_name = false, name = "jvm--test-make-handle")]
-fn jvm_test_make_handle() -> Result<Box<handles::JvmHandle>> {
-    // A handle registered against nothing real (no live JVM object needed
-    // for this plumbing-only test) — Task 5 is what makes handles wrap
-    // genuine JNI objects.
-    Ok(Box::new(handles::JvmHandle(handles::register_dummy_for_test())))
-}
-
 /// Converts a Lisp list of strings into a `Vec<String>` by walking its cons
 /// cells. `emacs` 0.21 has no `FromLisp` impl for `Vec<T>` (`#[defun]`
 /// parameters must be scalar `FromLisp` types, `&Env`, or `Value`/its
