@@ -29,13 +29,15 @@ impl emacs::Transfer for JvmHandle {}
 impl Drop for JvmHandle {
     fn drop(&mut self) {
         // Lisp's GC may run this on a thread with no JNI attachment, so the
-        // reference is handed to the worker thread to release: dropping the
-        // last `Arc` there runs `Global::Drop`'s `DeleteGlobalRef` on an
-        // attached thread. `jni::Global::Drop` would otherwise auto-attach
-        // the GC thread with a logged perf warning (jni-0.22.4,
-        // `src/refs/global.rs`). Cloning (not moving) the `Arc` keeps a
-        // reference alive past this frame, so the field's own drop below
-        // never triggers `DeleteGlobalRef` on this (GC) thread.
+        // reference is cloned and handed to the worker thread to release:
+        // in the common case, dropping the last `Arc` there runs
+        // `Global::Drop`'s `DeleteGlobalRef` on an attached thread, avoiding
+        // `jni::Global::Drop`'s GC-thread auto-attach and its logged perf
+        // warning (jni-0.22.4, `src/refs/global.rs`). This is best-effort,
+        // not a guarantee: if the worker drops its clone before the field
+        // drop below runs, this (GC) thread ends up holding the last `Arc`
+        // and pays the auto-attach cost itself. Either way the delete runs
+        // exactly once -- never a double-free, never a leak.
         let object = self.0.clone();
         let _ = crate::worker::send_command(crate::commands::Cmd::ReleaseRef { object });
     }

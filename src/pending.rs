@@ -6,13 +6,12 @@ use jni::objects::JObject;
 use jni::refs::Global;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-// Unlike `handles::TABLE`, entries here are bare `Global`s, not `Arc`-wrapped
-// ones: a pending invocation's `CompletableFuture` global ref has exactly one
-// owner at a time (this table, until `take` hands it off to
-// `jvm_thread::handle_invoke_reply`), never a "resolve while still present"
-// access pattern that would need cheap, repeatable cloning the way
-// `handles::resolve` does -- so `Global`'s missing `Clone` impl (jni 0.22.4)
-// is a non-issue here.
+// Entries here are bare `Global`s, not `Arc`-wrapped: a pending invocation's
+// `CompletableFuture` global ref has exactly one owner at a time (this
+// table, until `take` hands it off to `jvm_thread::handle_invoke_reply`),
+// never a "resolve while still present" access pattern that would need
+// cheap, repeatable cloning -- so `Global`'s missing `Clone` impl (jni
+// 0.22.4) is a non-issue here.
 static TABLE: Mutex<Option<HashMap<u64, Global<JObject<'static>>>>> = Mutex::new(None);
 
 fn table() -> std::sync::MutexGuard<'static, Option<HashMap<u64, Global<JObject<'static>>>>> {
