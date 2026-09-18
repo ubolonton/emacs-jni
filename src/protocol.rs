@@ -8,6 +8,12 @@ pub fn status_message(status: Status, message: Option<&str>) -> String {
     format!("(status {} {})\n", status.as_tag(), msg_sexp)
 }
 
+/// No longer called outside this file's own tests: `handle_load_jar`
+/// (`jvm_thread.rs`) enqueues `Inbound::LoadJarDone` instead as of Task 6.
+/// Kept (not deleted) because `protocol.rs` itself is only removed in Task
+/// 9, once every message type has moved off text — see the marshalling-
+/// consolidation plan.
+#[cfg_attr(not(test), expect(dead_code, reason = "protocol.rs deleted whole in Task 9"))]
 pub fn load_jar_done_message(id: u64, ok: bool, err: Option<&str>) -> String {
     let ok_sym = if ok { "t" } else { "nil" };
     let err_sexp = match err {
@@ -17,6 +23,10 @@ pub fn load_jar_done_message(id: u64, ok: bool, err: Option<&str>) -> String {
     format!("(load-jar-done {} {} {})\n", id, ok_sym, err_sexp)
 }
 
+/// No longer called outside this file's own tests: `handle_call`
+/// (`jvm_thread.rs`) enqueues `Inbound::CallDone` instead as of Task 6. See
+/// `load_jar_done_message`'s own note on why this stays until Task 9.
+#[cfg_attr(not(test), expect(dead_code, reason = "protocol.rs deleted whole in Task 9"))]
 pub fn call_done_message(id: u64, ok: bool, result: Option<&str>, err: Option<&str>) -> String {
     let ok_sym = if ok { "t" } else { "nil" };
     let result_sexp = result.unwrap_or("nil");

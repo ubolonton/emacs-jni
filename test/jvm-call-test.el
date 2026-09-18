@@ -55,5 +55,13 @@ given call to actually succeed, whichever it is."
   (should-error (jvm-call-await "Calc" "addLong" (list [1 2 3] 3))
                 :type 'jvm-invalid-argument))
 
+(ert-deftest emacs-jni-jvm-call-test/async-call-returns-keyword ()
+  "The async call-done path carries a keyword result through the typed
+queue (previously only the sexp reify exercised this)."
+  (jvm-call-test--ensure-ready)
+  ;; A Lisp callback returns :ok; Calc.callWithArg returns it; the async
+  ;; call-done delivers it as an interned keyword.
+  (should (eq (jvm-call-await "Calc" "callWithArg" (list (lambda (_n) :ok) 1)) :ok)))
+
 (provide 'jvm-call-test)
 ;;; jvm-call-test.el ends here

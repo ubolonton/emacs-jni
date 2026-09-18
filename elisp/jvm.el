@@ -71,14 +71,6 @@ docs/explanation/architecture.md).")
     (`(log ,level ,msg)
      (jvm--log "[%s] %s" level msg)
      (message "emacs-jni [%s]: %s" level msg))
-    (`(load-jar-done ,id ,ok ,err)
-     (when-let ((callback (alist-get id jvm--pending-load-jar)))
-       (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
-       (funcall callback ok err)))
-    (`(call-done ,id ,ok ,result ,err)
-     (when-let ((callback (alist-get id jvm--pending-call)))
-       (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
-       (funcall callback ok (jvm--resolve-sexp-result result) err)))
     (`(invoke ,id ,handle ,args)
      ;; A JVM-initiated call into a previously wrapped Lisp function (see
      ;; `jvm--register-callback'): look it up by HANDLE, funcall it with
@@ -104,12 +96,12 @@ docs/explanation/architecture.md).")
     (`(lisp-request)
      ;; A JVM thread enqueued one or more inbound messages (a Lisp-access
      ;; `intern'/`apply'/`type-of'/`is-not-nil?'/`eq'/`prin1-to-string', a
-     ;; GC-driven `FreeRef', or -- once its producer is migrated, see Tasks
-     ;; 6-8 -- a `call-done'/`invoke'/`release'/`log'/`status'/
-     ;; `load-jar-done') on the Rust-side queue and woke us up to service
-     ;; them -- see `jvm--service-inbound' and the design spec's "Request/
-     ;; reply flow". No payload: the message itself rides the Rust queue,
-     ;; not this wire message.
+     ;; GC-driven `FreeRef', a `call-done'/`load-jar-done' (migrated in Task
+     ;; 6), or -- once its producer is migrated, see Tasks 7-8 -- an
+     ;; `invoke'/`release'/`log'/`status') on the Rust-side queue and woke us
+     ;; up to service them -- see `jvm--service-inbound' and the design
+     ;; spec's "Request/reply flow". No payload: the message itself rides
+     ;; the Rust queue, not this wire message.
      (jvm--service-inbound))
     (`(release ,handle)
      ;; The JVM-side LispFunction proxy for HANDLE was garbage collected
@@ -129,15 +121,17 @@ into its final Lisp-visible form."
      (intern (if keyword (concat ":" name) name)))
     (_ result)))
 
-;; The five helpers below are the native-queue (`jvm--service-inbound')
-;; counterparts of `jvm--dispatch-message''s `call-done'/`load-jar-done'/
-;; `status'/`log'/`release' cases above -- same logic, called instead from
-;; `lisp_requests.rs''s `service_inbound' once VALUE/ARGS have already been
-;; converted to real Lisp values on the Rust side (no `jvm--resolve-sexp-
-;; result' needed here: that function only undoes the wire's `(jvm-handle
-;; N)'/`(jvm-symbol ...)' tags, which the native path never produces).
-;; Dormant until Tasks 6-8 move each message's producer off the text
-;; protocol onto `lisp_requests::Inbound' -- see that module's doc comment.
+;; The helpers below are the native-queue (`jvm--service-inbound')
+;; counterparts of `jvm--dispatch-message''s former `call-done'/
+;; `load-jar-done' cases and its still-live `status'/`log'/`release' cases
+;; -- same logic, called instead from `lisp_requests.rs''s `service_inbound'
+;; once VALUE/ARGS have already been converted to real Lisp values on the
+;; Rust side (no `jvm--resolve-sexp-result' needed here: that function only
+;; undoes the wire's `(jvm-handle N)'/`(jvm-symbol ...)' tags, which the
+;; native path never produces). `jvm--resolve-call'/`jvm--resolve-load-jar'
+;; are live as of Task 6; the rest stay dormant until Tasks 7-8 move each
+;; remaining message's producer off the text protocol onto
+;; `lisp_requests::Inbound' -- see that module's doc comment.
 
 (defun jvm--resolve-call (id ok value err)
   "Resolve the pending `jvm-call-async' callback for ID."

@@ -20,16 +20,16 @@
 
 (ert-deftest emacs-jni-jvm-invoke-test/lisp-error-propagates-as-java-exception ()
   "A failed Lisp callback completes the future exceptionally with
-`emacs_jni.core.LispNonLocalExit', so `Calc.callWithArg''s `future.get()'
+`emacs_jni.core.LispSignal', so `Calc.callWithArg''s `future.get()'
 raises it. Asserts on the exception TYPE, not message text: unlike the
-old `LispError', `LispNonLocalExit' carries no plain-text message of its
+old `LispError', `LispSignal' carries no plain-text message of its
 own (its `dataOrValue' field holds \"boom\" instead, not introspectable
 from this coarse exception-chain rendering)."
   (should (eq (jvm-status) 'ready))
   (let ((err (should-error (jvm-call-await "Calc" "callWithArg"
                                            (list (lambda (_n) (error "boom")) 1))
                            :type 'jvm-error)))
-    (should (string-match-p "LispNonLocalExit" (cadr err)))))
+    (should (string-match-p "LispSignal" (cadr err)))))
 
 (ert-deftest emacs-jni-jvm-invoke-test/java-calls-lisp-with-a-real-object-argument ()
   "Regression test for Finding 1 of the Phase 2 whole-branch review: a

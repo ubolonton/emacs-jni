@@ -60,8 +60,9 @@ pub enum LispInput {
 /// flow"); `Prin1` alone keeps a raw `ptr`: it is `LispObject.
 /// prin1ToString`, so its receiver is always a real `LispObject`, never a
 /// symbol/scalar. The remaining six variants generalise this queue to every
-/// other JVM→Emacs message (still produced by the older text protocol as of
-/// this task — see this module's doc comment).
+/// other JVM→Emacs message; `CallDone`/`LoadJarDone` are now live (Task 6),
+/// `Invoke`/`Release`/`Log`/`Status` are still produced by the older text
+/// protocol (see this module's doc comment).
 #[derive(Debug)]
 pub enum Inbound {
     Intern { id: u64, name: String },
@@ -72,13 +73,8 @@ pub enum Inbound {
     Prin1 { id: u64, ptr: i64 },
     FreeRef { ptr: i64 },
     /// A `jvm-call-async`/`jvm-new-async` call finished — mirrors
-    /// `protocol::call_done_message`'s shape exactly.
-    ///
-    /// No producer enqueues this yet (Task 6 flips `handle_call`'s
-    /// text-protocol send over to it); the `expect` only applies outside
-    /// `cfg(test)`, since this crate's own unit test constructs it (see
-    /// `new_inbound_variants_drain_in_fifo_order`).
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 6"))]
+    /// `protocol::call_done_message`'s shape exactly. Enqueued by
+    /// `handle_call` (Task 6).
     CallDone { id: u64, ok: bool, result: BridgeValue, err: Option<String> },
     /// A JVM-initiated call into a previously wrapped Lisp function (see
     /// `jvm--register-callback`) — mirrors `protocol::invoke_message`. No
@@ -103,9 +99,8 @@ pub enum Inbound {
     #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 8"))]
     Status { status: Status, detail: Option<String> },
     /// A `jvm-load-jar-async` call finished — mirrors
-    /// `protocol::load_jar_done_message`. No producer yet (Task 6 flips
-    /// `handle_load_jar`); see `CallDone`'s own note on the `expect`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "constructed by a producer in Task 6"))]
+    /// `protocol::load_jar_done_message`. Enqueued by `handle_load_jar`
+    /// (Task 6).
     LoadJarDone { id: u64, ok: bool, err: Option<String> },
 }
 
@@ -362,10 +357,12 @@ fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
 /// themselves, but still run in FIFO order for the same reason `Log`/
 /// `Status` lines must stay in the order they were produced.
 ///
-/// The six non-Lisp-access arms below are unreached this task — no
-/// producer enqueues them yet (see this module's doc comment) — but their
-/// bodies are the real Task 6-8 handlers, so those tasks only need to flip
-/// the producer, not touch this drain.
+/// The six non-Lisp-access arms below are the real Task 6-8 handlers.
+/// `CallDone`/`LoadJarDone` are reached as of Task 6 (`handle_call`/
+/// `handle_load_jar` now enqueue them); `Invoke`/`Release`/`Log`/`Status`
+/// are still unreached — no producer enqueues them yet (see this module's
+/// doc comment) — so Tasks 7-8 only need to flip their producer, not touch
+/// this drain.
 pub fn service_inbound(env: &Env) -> EmacsResult<()> {
     for req in drain() {
         match &req {
@@ -556,11 +553,13 @@ mod tests {
     }
 
     /// The six variants Task 5 adds to generalise this queue (`CallDone`/
-    /// `Invoke`/`Release`/`Log`/`Status`/`LoadJarDone`) — no producer
-    /// enqueues them yet (Tasks 6-8 flip the producers one at a time), so
-    /// this test is what proves they construct and drain FIFO alongside
+    /// `Invoke`/`Release`/`Log`/`Status`/`LoadJarDone`) — `CallDone`/
+    /// `LoadJarDone` now have real producers (Task 6); `Invoke`/`Release`/
+    /// `Log`/`Status` don't yet (Tasks 7-8 flip the rest one at a time), so
+    /// this test is what proves all six construct and drain FIFO alongside
     /// the original seven, and (per this crate's dead-code policy) is what
-    /// keeps the compiler from flagging them as unused this task.
+    /// keeps the compiler from flagging the still-unproduced four as unused
+    /// this task.
     #[test]
     fn new_inbound_variants_drain_in_fifo_order() {
         enqueue(Inbound::CallDone { id: 1, ok: true, result: BridgeValue::Nil, err: None });

@@ -334,11 +334,12 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     // so this primitive doubles as "add a classpath directory", used by
     // `jvm-clj-start` to add `clojure-src/` alongside real jars.
     if !std::path::Path::new(&path).exists() {
-        channel::send(&protocol::load_jar_done_message(
+        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
             id,
-            false,
-            Some(&format!("jar/classpath entry not found: {path}")),
-        ));
+            ok: false,
+            err: Some(format!("jar/classpath entry not found: {path}")),
+        });
+        channel::send(&protocol::lisp_request_message());
         return;
     }
 
@@ -350,17 +351,29 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     });
 
     match result {
-        Ok(()) => channel::send(&protocol::load_jar_done_message(id, true, None)),
-        Err(e) => channel::send(&protocol::load_jar_done_message(id, false, Some(&e.to_string()))),
+        Ok(()) => crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
+            id,
+            ok: true,
+            err: None,
+        }),
+        Err(e) => crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
+            id,
+            ok: false,
+            err: Some(e.to_string()),
+        }),
     }
+    // Wakeup: reuse the existing text (lisp-request) message the live filter
+    // already dispatches to jvm--service-inbound. Task 9 swaps this for the
+    // raw-byte channel::poke() together with the #[defun] filter.
+    channel::send(&protocol::lisp_request_message());
 }
 
 /// Synchronous main-thread counterpart of `handle_load_jar`: adds PATH to the
 /// shared classloader on *this* thread, sharing the one loader with the async
 /// path through `runtime::get_or_create_loader`. Returns an error string (a
-/// missing path, or a JNI failure) instead of sending a `load-jar-done`
-/// message, since the caller (`jvm--load-jar-direct`) returns or signals
-/// directly. See `call_direct` for the main-thread attach model.
+/// missing path, or a JNI failure) instead of enqueueing an
+/// `Inbound::LoadJarDone`, since the caller (`jvm--load-jar-direct`) returns
+/// or signals directly. See `call_direct` for the main-thread attach model.
 pub(crate) fn load_jar_direct(vm: &JavaVM, path: &str) -> Result<(), String> {
     // Same up-front existence check as `handle_load_jar`: `addURL` is lazy and
     // never fails for a nonexistent path on its own.
@@ -702,8 +715,8 @@ pub(crate) fn throw_non_local_exit(
 }
 
 /// Handles a `Cmd::Call`: resolves TARGET.MEMBER reflectively and invokes
-/// it with ARGS, then sends a `call-done` message with the result. Runs on
-/// its own short-lived thread (spawned by `run`'s `Cmd::Call` arm above) —
+/// it with ARGS, then enqueues an `Inbound::CallDone` with the result. Runs
+/// on its own short-lived thread (spawned by `run`'s `Cmd::Call` arm above) —
 /// never inline on the worker's dispatch loop, per spec "Worker thread
 /// role": an arbitrary Java call can take a long time for reasons unrelated
 /// to callbacks, and must not stall other pending commands.
@@ -720,11 +733,26 @@ fn handle_call(
 
     match result {
         Ok(value) => {
-            let sexp = crate::marshal::lisp_arg_to_sexp(&value);
-            channel::send(&protocol::call_done_message(id, true, Some(&sexp), None));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::CallDone {
+                id,
+                ok: true,
+                result: value,
+                err: None,
+            });
         }
-        Err(e) => channel::send(&protocol::call_done_message(id, false, None, Some(&e.to_string()))),
+        Err(e) => {
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::CallDone {
+                id,
+                ok: false,
+                result: crate::commands::BridgeValue::Nil,
+                err: Some(e.to_string()),
+            });
+        }
     }
+    // Wakeup: reuse the existing text (lisp-request) message the live filter
+    // already dispatches to jvm--service-inbound. Task 9 swaps this for the
+    // raw-byte channel::poke() together with the #[defun] filter.
+    channel::send(&protocol::lisp_request_message());
 }
 
 /// Resolves TARGET.MEMBER against the shared classloader and invokes it with
@@ -733,8 +761,8 @@ fn handle_call(
 /// Shared by the async worker (`handle_call`, on a spawned thread) and the
 /// synchronous main-thread path (`call_direct`). Identical behaviour in both:
 /// the only differences are which thread runs it and what the caller does
-/// with the `BridgeValue` afterward (an sexp `call-done` message vs. a direct
-/// `Value`).
+/// with the `BridgeValue` afterward (an `Inbound::CallDone` enqueue vs. a
+/// direct `Value`).
 pub(crate) fn resolve_and_invoke(
     env: &mut jni::Env,
     loader: &Option<crate::runtime::SharedLoader>,
