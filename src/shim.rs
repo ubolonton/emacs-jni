@@ -455,19 +455,19 @@ fn service_lisp_request_direct<'local>(
 
     match reply {
         crate::protocol::LispOutcome::Signal { symbol, data } => {
-            Err(crate::jvm_thread::throw_non_local_exit(env, 0, *symbol, *data))
+            Err(crate::jvm::invoke::throw_non_local_exit(env, 0, *symbol, *data))
         }
         crate::protocol::LispOutcome::Throw { tag, value } => {
-            Err(crate::jvm_thread::throw_non_local_exit(env, 1, *tag, *value))
+            Err(crate::jvm::invoke::throw_non_local_exit(env, 1, *tag, *value))
         }
-        other => crate::jvm_thread::build_lisp_reply_object(env, other),
+        other => crate::jvm::invoke::build_lisp_reply_object(env, other),
     }
 }
 
 /// Blocks on FUTURE's own `get(LISP_REQUEST_TIMEOUT_SECS, SECONDS)`,
 /// reflection-free (a direct `CompletableFuture` instance method call, not
 /// `Method.invoke`) — so unlike `describe_caught_java_exception`'s
-/// `InvocationTargetException` unwrapping in `jvm_thread.rs`, a checked
+/// `InvocationTargetException` unwrapping in `jvm/invoke.rs`, a checked
 /// exception from `get()` (`ExecutionException`/`TimeoutException`/
 /// `InterruptedException`) is itself the JVM's pending exception, not
 /// wrapped a level deeper.
@@ -500,7 +500,7 @@ fn block_on_lisp_reply<'local>(
 /// whatever `jvm::inbox::handle_lisp_reply` completed the future with
 /// exceptionally (a `LispNonLocalExit`) — the useful part is that cause, one
 /// `getCause()` hop down, same reasoning as
-/// `jvm_thread::describe_caught_java_exception`. A `TimeoutException`/
+/// `jvm::invoke::describe_caught_java_exception`. A `TimeoutException`/
 /// `InterruptedException` (from `get`'s own timeout/interruption, not a
 /// completed-exceptionally future) has no cause, so it's rethrown as-is.
 ///
@@ -613,7 +613,7 @@ fn lisp_apply_async<'local>(
         let future_class =
             env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
         let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
-        crate::jvm_thread::complete_future_with_reply(env, &future, reply)?;
+        crate::jvm::invoke::complete_future_with_reply(env, &future, reply)?;
         return Ok(future);
     }
 
@@ -658,7 +658,7 @@ fn lisp_ref_release_notifier_run<'local>(
 }
 
 /// Unboxes a `java.lang.Boolean` OBJ (as returned by a sync Lisp-access
-/// request's reply, built by `jvm_thread::build_lisp_reply_object`) into a
+/// request's reply, built by `jvm::invoke::build_lisp_reply_object`) into a
 /// Rust `bool`.
 fn unbox_boolean(env: &mut jni::Env, obj: &JObject) -> jni::errors::Result<bool> {
     env.call_method(obj, jni::jni_str!("booleanValue"), jni::jni_sig!(() -> boolean), &[])?.z()

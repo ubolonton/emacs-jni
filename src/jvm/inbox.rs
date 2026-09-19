@@ -8,7 +8,7 @@
 //! dispatch loop, JVM creation, pause/stop/resume, jar loading, and
 //! completing pending replies). The reflection call machinery
 //! (`resolve_and_invoke`, `invoke_method`, `invoke_constructor`,
-//! `call_direct`, `handle_call`, ...) stays behind in `jvm_thread.rs`.
+//! `call_direct`, `handle_call`, ...) lives in `jvm::invoke`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -202,7 +202,7 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
                 let vm = vm.clone();
                 let loader = crate::jvm::runtime::loader();
                 std::thread::spawn(move || {
-                    crate::jvm_thread::handle_call(&vm, loader, id, target, member, args)
+                    crate::jvm::invoke::handle_call(&vm, loader, id, target, member, args)
                 });
                 false
             }
@@ -666,7 +666,7 @@ fn add_jar_url(
 /// `Cmd::InvokeReply` with the Lisp callback's outcome — its real return
 /// value, or the real `condition-case` signal it raised, already marshalled
 /// to a `LispOutcome`. Identical shape to `handle_lisp_reply` below (both
-/// just hand their `LispOutcome` to `jvm_thread::complete_future_with_reply`)
+/// just hand their `LispOutcome` to `jvm::invoke::complete_future_with_reply`)
 /// — the callback round trip and the Clojure apply round trip complete their
 /// futures exactly the same way.
 fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutcome) {
@@ -680,7 +680,7 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutco
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
         let future_local = env.new_local_ref(future.as_obj())?;
-        crate::jvm_thread::complete_future_with_reply(env, &future_local, outcome)
+        crate::jvm::invoke::complete_future_with_reply(env, &future_local, outcome)
     });
     if let Err(e) = result {
         // The future is already removed from the pending table by this
@@ -715,7 +715,7 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::protocol::LispOutcome) 
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
         let future_local = env.new_local_ref(future.as_obj())?;
-        crate::jvm_thread::complete_future_with_reply(env, &future_local, value)
+        crate::jvm::invoke::complete_future_with_reply(env, &future_local, value)
     });
     if let Err(e) = result {
         crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {

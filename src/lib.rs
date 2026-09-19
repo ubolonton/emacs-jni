@@ -2,7 +2,6 @@ use emacs::{defun, Env, Result, Value};
 
 mod channel;
 mod jvm;
-mod jvm_thread;
 mod lisp_requests;
 mod protocol;
 mod reentry;
@@ -155,7 +154,7 @@ fn parse_call_target(target: Value) -> Result<protocol::CallTarget> {
 /// TARGET.MEMBER with ARGS on *this* (the Emacs main) thread, and returns the
 /// result value directly instead of a request id. The main thread stays
 /// permanently attached to the running JVM across calls (stable thread
-/// identity + persistent thread-locals); see `jvm_thread::call_direct`. A
+/// identity + persistent thread-locals); see `jvm::invoke::call_direct`. A
 /// failed call signals `jvm-error`.
 ///
 /// Distinct from `jvm-call-sync` (`elisp/jvm.el`), which is the *async*
@@ -186,7 +185,7 @@ fn jvm_call_direct<'e>(
     // on the async queue this blocked main thread cannot drain. Dropped when
     // the call returns or unwinds.
     let _scope = reentry::enter(env);
-    match jvm_thread::call_direct(&vm, &loader, &target, &member, &args) {
+    match jvm::invoke::call_direct(&vm, &loader, &target, &member, &args) {
         Ok(arg) => lisp_requests::bridge_value_to_value(env, &arg),
         // A Lisp signal/throw raised in a reentrant callback, unwound back up
         // through Clojure: rebind its symbol/data (or tag/value) to this
@@ -194,7 +193,7 @@ fn jvm_call_direct<'e>(
         // round trip is transparent to the Lisp caller. `signal`/`throw` always
         // return `Err` (the non-local exit), which the defun trampoline turns
         // back into a real Emacs signal/throw.
-        Err(jvm_thread::DirectError::NonLocalExit { kind, a, b }) => {
+        Err(jvm::invoke::DirectError::NonLocalExit { kind, a, b }) => {
             let a = lisp_requests::arg_to_value(env, &a)?;
             let b = lisp_requests::arg_to_value(env, &b)?;
             if kind == 0 {
@@ -203,7 +202,7 @@ fn jvm_call_direct<'e>(
                 env.call("throw", (a, b))
             }
         }
-        Err(jvm_thread::DirectError::Jni(e)) => env.signal(jvm_error, (e.to_string(),)),
+        Err(jvm::invoke::DirectError::Jni(e)) => env.signal(jvm_error, (e.to_string(),)),
     }
 }
 
