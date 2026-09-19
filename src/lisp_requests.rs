@@ -30,9 +30,9 @@ use std::sync::Mutex;
 
 use emacs::{Env, GlobalRef, IntoLisp, Result as EmacsResult, Value};
 
-use crate::commands::Cmd;
+use crate::jvm::inbox::{self, Cmd};
 use crate::protocol::{BridgeValue, LispInput, LispOutcome, Status};
-use crate::{channel, worker};
+use crate::channel;
 
 /// A single message from a JVM thread to run one `Env` op on the main
 /// thread. The first seven variants are the original Lisp-access requests:
@@ -227,7 +227,7 @@ fn reply(env: &Env, id: u64, result: EmacsResult<LispOutcome>) {
         Ok(v) => v,
         Err(e) => error_to_reply(env, e),
     };
-    let _ = worker::send_command(Cmd::LispReply { id, value });
+    let _ = inbox::submit(Cmd::LispReply { id, value });
 }
 
 /// Converts an `emacs::Error` into a `LispOutcome::{Signal,Throw}`. A

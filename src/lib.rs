@@ -1,15 +1,12 @@
 use emacs::{defun, Env, Result, Value};
 
 mod channel;
-mod commands;
 mod jvm;
 mod jvm_thread;
 mod lisp_requests;
-mod pending;
 mod protocol;
 mod reentry;
 mod shim;
-mod worker;
 
 emacs::plugin_is_GPL_compatible!();
 
@@ -28,6 +25,7 @@ fn jvm_ping() -> Result<bool> {
     Ok(true)
 }
 
+use crate::jvm::inbox;
 use crate::jvm::runtime;
 use crate::jvm::runtime::STATUS;
 use crate::protocol::Status;
@@ -47,7 +45,7 @@ fn jvm_init_channel(env: &Env, process: Value) -> Result<()> {
 fn jvm_start(env: &Env, classpath: Value, options: Value) -> Result<()> {
     match STATUS.begin_start() {
         Ok(()) => {
-            worker::start_or_resume(string_list(classpath)?, string_list(options)?);
+            inbox::start_or_resume(string_list(classpath)?, string_list(options)?);
             Ok(())
         }
         Err(current) => env.signal(jvm_illegal_transition, (current.as_tag(),)),
@@ -57,7 +55,7 @@ fn jvm_start(env: &Env, classpath: Value, options: Value) -> Result<()> {
 #[defun(mod_in_name = false, name = "jvm--pause")]
 fn jvm_pause(env: &Env) -> Result<()> {
     match STATUS.begin_pause() {
-        Ok(()) => match worker::send_command(commands::Cmd::Pause) {
+        Ok(()) => match inbox::submit(inbox::Cmd::Pause) {
             Ok(()) => Ok(()),
             Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
         },
@@ -80,7 +78,7 @@ fn jvm_stop(env: &Env) -> Result<()> {
                 let _ = vm.detach_current_thread();
             }
             runtime::set_main_attached(false);
-            match worker::send_command(commands::Cmd::Stop) {
+            match inbox::submit(inbox::Cmd::Stop) {
                 Ok(()) => Ok(()),
                 Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
             }
@@ -94,8 +92,8 @@ fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
     if STATUS.get() != Status::Ready {
         return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
     }
-    let id = worker::next_request_id();
-    match worker::send_command(commands::Cmd::LoadJar { id, path }) {
+    let id = inbox::next_request_id();
+    match inbox::submit(inbox::Cmd::LoadJar { id, path }) {
         Ok(()) => Ok(id),
         Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
     }
@@ -106,7 +104,7 @@ fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
 /// a request id. Signals `jvm-error` on failure (missing path, or a JNI error).
 /// Shares the one classloader with the async `jvm--load-jar` path through a
 /// single get-or-create in `runtime`, so whichever path loads the first jar
-/// wins and both see every later jar (see `jvm_thread::load_jar_direct`).
+/// wins and both see every later jar (see `jvm::inbox::load_jar_direct`).
 #[defun(mod_in_name = false, name = "jvm--load-jar-direct")]
 fn jvm_load_jar_direct(env: &Env, path: String) -> Result<()> {
     if STATUS.get() != Status::Ready {
@@ -115,7 +113,7 @@ fn jvm_load_jar_direct(env: &Env, path: String) -> Result<()> {
     let Some(vm) = runtime::vm() else {
         return env.signal(jvm_illegal_transition, ("no running JVM",));
     };
-    match jvm_thread::load_jar_direct(&vm, &path) {
+    match inbox::load_jar_direct(&vm, &path) {
         Ok(()) => Ok(()),
         Err(e) => env.signal(jvm_error, (e,)),
     }
@@ -128,8 +126,8 @@ fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64
     }
     let target = parse_call_target(target)?;
     let args = lisp_list_to_args(args)?;
-    let id = worker::next_request_id();
-    match worker::send_command(commands::Cmd::Call { id, target, member, args }) {
+    let id = inbox::next_request_id();
+    match inbox::submit(inbox::Cmd::Call { id, target, member, args }) {
         Ok(()) => Ok(id),
         Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
     }
@@ -234,7 +232,7 @@ fn jvm_service_inbound(env: &Env, _process: Value, _data: Value) -> Result<()> {
 /// worker thread, which resolves (or exceptionally completes, with a real
 /// `LispSignal`) the `CompletableFuture` `shim::lisp_function_call` handed
 /// back to Java — the reverse direction of `jvm--call`. Silently drops the
-/// reply (like every other `worker::send_command` caller in this file) if
+/// reply (like every other `jvm::inbox::submit` caller in this file) if
 /// there's no running worker thread to receive it; there is nothing
 /// sensible to signal back to Java in that case, since the Java side is
 /// only ever blocked on its own future, not on this call succeeding.
@@ -261,7 +259,7 @@ fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
             data: Box::new(lisp_requests::value_to_outcome(env, data)?),
         }
     };
-    let _ = worker::send_command(commands::Cmd::InvokeReply { id, outcome });
+    let _ = inbox::submit(inbox::Cmd::InvokeReply { id, outcome });
     Ok(())
 }
 
@@ -367,7 +365,7 @@ fn lisp_value_to_arg(v: Value) -> Result<protocol::BridgeValue> {
 #[cfg(feature = "test-support")]
 #[defun(mod_in_name = false, name = "jvm--test-panic")]
 fn jvm_test_panic(env: &Env) -> Result<()> {
-    match worker::send_command(commands::Cmd::TestPanic) {
+    match inbox::submit(inbox::Cmd::TestPanic) {
         Ok(()) => Ok(()),
         Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
     }

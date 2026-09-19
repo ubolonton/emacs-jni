@@ -450,7 +450,7 @@ impl Drop for JvmHandle {
         // and pays the auto-attach cost itself. Either way the delete runs
         // exactly once -- never a double-free, never a leak.
         let object = self.0.clone();
-        let _ = crate::worker::send_command(crate::commands::Cmd::ReleaseRef { object });
+        let _ = crate::jvm::inbox::submit(crate::jvm::inbox::Cmd::ReleaseRef { object });
     }
 }
 

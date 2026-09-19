@@ -50,7 +50,7 @@ const LISP_SYMBOL_CLASS: &[u8] = include_bytes!(concat!(
 /// to `find_class` calls made with no Java frames on the stack (which JNI
 /// routes through the system classloader by default -- see `FindClass`'s
 /// documented fallback behavior) and to classes loaded through
-/// `jvm_thread::create_shared_classloader`'s `URLClassLoader` (Task 3),
+/// `jvm::inbox::create_shared_classloader`'s `URLClassLoader` (Task 3),
 /// whose parent is deliberately the platform loader, not the system
 /// loader (see that function's own doc comment). Standard `ClassLoader`
 /// delegation is parent-first (a loader asks its parent before itself),
@@ -65,7 +65,7 @@ const LISP_SYMBOL_CLASS: &[u8] = include_bytes!(concat!(
 /// `InvocationTargetException` at the first `Method.invoke`, since the
 /// jar's own `URLClassLoader` could never resolve the shim classes that
 /// existed only over in the system loader. Called from
-/// `jvm_thread::create_jvm`, right after the JVM is created, before
+/// `jvm::inbox::create_jvm`, right after the JVM is created, before
 /// anything else in this crate references those classes.
 ///
 /// Idempotent: skips a class that's already defined rather than calling
@@ -199,7 +199,7 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
 /// means the round trip never even started, e.g. because posting to the
 /// channel failed, as opposed to a failure that happens after a Lisp
 /// callback runs, which instead completes the future exceptionally via
-/// `LispNonLocalExit`, see `jvm_thread::handle_invoke_reply`).
+/// `LispNonLocalExit`, see `jvm::inbox::handle_invoke_reply`).
 fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
     const CALL_METHOD: jni::NativeMethod = jni::native_method! {
@@ -221,7 +221,7 @@ fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> 
 
 /// The actual implementation behind `LispFunction.call`: allocates a fresh
 /// correlation id, constructs a (still-incomplete) `CompletableFuture`,
-/// registers it in `pending`, enqueues an `Inbound::Invoke` and wakes the
+/// registers it in `jvm::inbox`, enqueues an `Inbound::Invoke` and wakes the
 /// main thread up, and returns the future immediately — the concrete
 /// realization of the design spec's "Java shim" section. Never blocks:
 /// everything here is either process-local bookkeeping or a non-blocking
@@ -229,7 +229,7 @@ fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> 
 /// entirely (on Emacs's own main thread, via `lisp_requests::
 /// service_inbound`'s `Invoke` arm, which calls the Elisp
 /// `jvm--resolve-invoke`), and its result arrives back asynchronously via
-/// `Cmd::InvokeReply` (`jvm_thread::handle_invoke_reply`).
+/// `Cmd::InvokeReply` (`jvm::inbox::handle_invoke_reply`).
 ///
 /// Registered (not called directly) via `register_lisp_function_native`
 /// above -- see that function's doc comment for the actual native-method
@@ -240,12 +240,12 @@ fn lisp_function_call<'local>(
     args: JObjectArray<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
     let handle = get_handle_field(env, &this)?;
-    let id = crate::pending::next_id();
+    let id = crate::jvm::inbox::next_id();
 
     let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
     let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
     let future_global = env.new_global_ref(&future)?;
-    crate::pending::register(id, future_global);
+    crate::jvm::inbox::register(id, future_global);
 
     let args = crate::jvm::convert::jobject_array_to_bridge_values(env, &args)?;
     crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Invoke { id, handle, args });
@@ -275,7 +275,7 @@ fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<(
 }
 
 /// The actual implementation behind `ReleaseNotifier.run`: the opposite
-/// direction from `jvm_thread`'s `Cmd::ReleaseRef` handling (Lisp's
+/// direction from `jvm::inbox`'s `Cmd::ReleaseRef` handling (Lisp's
 /// `user-ptr` GC'd -> tell Rust to drop a `GlobalRef`, over the Lisp-to-
 /// worker `Cmd` channel). Here, the JVM-side `LispFunction` proxy this
 /// notifier was registered against (via `jvm::convert::register_release_on_gc`)
@@ -406,13 +406,13 @@ fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors:
 }
 
 /// Common plumbing for every synchronous Lisp-access native: allocates a
-/// correlation id, registers a fresh `CompletableFuture` in `pending`,
+/// correlation id, registers a fresh `CompletableFuture` in `jvm::inbox`,
 /// hands the request BUILD_REQUEST constructs (given that id) to
 /// `lisp_requests::enqueue`, wakes the main thread up, then blocks this
 /// JVM thread on the future's own `get(timeout, SECONDS)` — see design
 /// spec, "Request/reply flow", step 1's "sync variant: `future.get()`
 /// (blocks the JVM thread, with timeout)". Mirrors `lisp_function_call`'s
-/// future/`pending`/`channel::poke` setup, but waits in place instead of
+/// future/`jvm::inbox`/`channel::poke` setup, but waits in place instead of
 /// handing the future back to the Java caller.
 fn service_lisp_request_sync<'local>(
     env: &mut jni::Env<'local>,
@@ -425,11 +425,11 @@ fn service_lisp_request_sync<'local>(
     if crate::reentry::in_scope() {
         return service_lisp_request_direct(env, build_request(0));
     }
-    let id = crate::pending::next_id();
+    let id = crate::jvm::inbox::next_id();
     let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
     let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
     let future_global = env.new_global_ref(&future)?;
-    crate::pending::register(id, future_global);
+    crate::jvm::inbox::register(id, future_global);
 
     crate::lisp_requests::enqueue(build_request(id));
     crate::channel::poke();
@@ -497,7 +497,7 @@ fn block_on_lisp_reply<'local>(
 
 /// Unwraps and rethrows the pending exception left by a failed
 /// `CompletableFuture#get` call above: an `ExecutionException` wraps
-/// whatever `jvm_thread::handle_lisp_reply` completed the future with
+/// whatever `jvm::inbox::handle_lisp_reply` completed the future with
 /// exceptionally (a `LispNonLocalExit`) — the useful part is that cause, one
 /// `getCause()` hop down, same reasoning as
 /// `jvm_thread::describe_caught_java_exception`. A `TimeoutException`/
@@ -617,11 +617,11 @@ fn lisp_apply_async<'local>(
         return Ok(future);
     }
 
-    let id = crate::pending::next_id();
+    let id = crate::jvm::inbox::next_id();
     let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
     let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
     let future_global = env.new_global_ref(&future)?;
-    crate::pending::register(id, future_global);
+    crate::jvm::inbox::register(id, future_global);
 
     crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Apply {
         id,
@@ -682,8 +682,8 @@ mod tests {
 
     /// Retries against jni-rs 0.22.4's racy check-then-create singleton --
     /// this file now has two tests each creating a JVM, so it needs the
-    /// same retry loop `src/jvm/convert.rs` and `pending.rs` already use
-    /// (see `src/jvm/convert.rs`'s `create_test_jvm` for the full
+    /// same retry loop `src/jvm/convert.rs` and `src/jvm/inbox.rs` already
+    /// use (see `src/jvm/convert.rs`'s `create_test_jvm` for the full
     /// explanation).
     fn create_test_jvm() -> JavaVM {
         let mut last_err = None;
