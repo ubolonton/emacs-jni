@@ -8,7 +8,7 @@
 //! `LoadJarDone`), migrated one at a time off the older text protocol,
 //! which is now gone (see plan Task 9).
 //!
-//! A JVM thread (a `Lisp.*` native method, `src/shim.rs`) never has an
+//! A JVM thread (a `Lisp.*` native method, `src/jvm/entry.rs`) never has an
 //! `emacs::Env` — that only exists on the Emacs main thread, during a
 //! module call. So a native method enqueues an `Inbound` here and wakes
 //! Emacs up with a raw byte (`channel::poke`); `jvm--service-inbound`
@@ -81,14 +81,14 @@ pub enum Inbound {
         err: Option<String>,
     },
     /// A JVM-initiated call into a previously wrapped Lisp function (see
-    /// `jvm--register-callback`). Enqueued by `shim::lisp_function_call`.
+    /// `jvm--register-callback`). Enqueued by `jvm::entry::lisp_function_call`.
     Invoke {
         id: u64,
         handle: u64,
         args: Vec<BridgeValue>,
     },
     /// A JVM-side `LispFunction` proxy was garbage collected. Enqueued by
-    /// `shim::release_notifier_run`.
+    /// `jvm::entry::release_notifier_run`.
     Release {
         handle: u64,
     },
@@ -546,7 +546,7 @@ fn run_request_value(env: &Env, request: &Inbound) -> EmacsResult<LispOutcome> {
 /// The single `LispOutcome` a reentrant direct-path request produces: the
 /// `run_request_value` result, with a Lisp signal/throw folded into a
 /// `Signal`/`Throw` reply exactly as the async `reply` path does via
-/// `error_to_reply`. Called by the `Lisp.*` natives (`shim.rs`) when the
+/// `error_to_reply`. Called by the `Lisp.*` natives (`src/jvm/entry.rs`) when the
 /// request originates on the main thread inside a `jvm--call-direct`, so it
 /// must run directly instead of enqueuing (which would deadlock the blocked
 /// main thread). The native then turns this into a Java object or a thrown

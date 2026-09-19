@@ -9,7 +9,7 @@ use crate::jvm::convert::marshal_error;
 /// factored out of `handle_lisp_reply` since the `LispOutcome::Signal`/
 /// `Throw` cases (handled by that function's caller) never reach here.
 ///
-/// `pub(crate)` because the reentrant direct path (`shim.rs`) builds the same
+/// `pub(crate)` because the reentrant direct path (`jvm::entry`) builds the same
 /// Java object on its own thread, from the `LispOutcome`
 /// `lisp_requests::compute_reply` returns, instead of over the channel.
 pub(crate) fn build_lisp_reply_object<'local>(
@@ -58,7 +58,7 @@ pub(crate) fn build_lisp_reply_object<'local>(
 /// anything else completes it normally with its built object.
 ///
 /// Shared by the async worker (`handle_lisp_reply`, completing a registered
-/// future) and the reentrant direct path (`shim.rs`'s `applyAsync` fast path,
+/// future) and the reentrant direct path (`jvm::entry`'s `applyAsync` fast path,
 /// completing a fresh, immediately-returned future) — Clojure's `apply`
 /// derefs that future either way, so both must produce the identical shape.
 pub(crate) fn complete_future_with_reply<'local>(
@@ -124,7 +124,7 @@ fn build_non_local_exit<'local>(
 }
 
 /// Throws a `LispNonLocalExit` for a Lisp signal/throw raised in a reentrant
-/// direct-path native (`shim.rs`'s synchronous natives), so it propagates up
+/// direct-path native (`jvm::entry`'s synchronous natives), so it propagates up
 /// the Clojure stack exactly like the checked exception `block_on_lisp_reply`
 /// rethrows on the async path. Returns the `Error::JavaException` the caller
 /// hands back so the `native_method!` policy leaves this pending exception in

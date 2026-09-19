@@ -45,7 +45,7 @@ pub(crate) enum Cmd {
         member: String,
         args: Vec<BridgeValue>,
     },
-    /// Completes a pending `LispFunction.call` future (`shim::
+    /// Completes a pending `LispFunction.call` future (`jvm::entry::
     /// lisp_function_call`) with the Lisp callback's outcome — sent by
     /// `jvm--invoke-reply` once `jvm--resolve-invoke` (`elisp/jvm.el`) has
     /// funcalled the callback and marshalled its return value or its real
@@ -130,7 +130,7 @@ fn table() -> std::sync::MutexGuard<'static, Option<HashMap<u64, Global<JObject<
 
 /// Allocates a fresh correlation id for a new `invoke` round trip. Separate
 /// from `register` (rather than folded into it) because
-/// `shim::lisp_function_call` needs the id before it has a `Global` to
+/// `jvm::entry::lisp_function_call` needs the id before it has a `Global` to
 /// register -- the id goes out on the wire as part of `(invoke ID HANDLE
 /// ARGS)` before the `CompletableFuture` object even exists.
 pub(crate) fn next_id() -> u64 {
@@ -277,7 +277,7 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
 // first attempt") and every call after that — a restart following
 // `jvm-stop`/a crash, or a retry of `jvm-start` following an *earlier*,
 // shim-unrelated `create_jvm` failure — sees `true`. Used below to decide
-// whether a `shim::define_classes` failure should be fatal to `create_jvm`
+// whether a `jvm::entry::define_classes` failure should be fatal to `create_jvm`
 // or merely logged; see that call site's doc comment for why the
 // distinction matters.
 //
@@ -327,7 +327,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     let vm = JavaVM::new(init_args).map_err(|e| e.to_string())?;
 
     // Defines the `emacs_jni.core.{LispCallable,LispFunction,LispNonLocalExit}` shim
-    // classes (Task 1) into this JVM, per `shim::define_classes`'s own doc
+    // classes (Task 1) into this JVM, per `jvm::entry::define_classes`'s own doc
     // comment: "must be called once, right after the JVM is created,
     // before anything else in this crate references those classes." No
     // caller actually did this at runtime before Task 6 (only
@@ -370,7 +370,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     //   in that scenario, where before this task it reported `ready`
     //   (with only the *next* real operation failing instead) — a
     //   behavior change with no upside, since the VM is equally unusable
-    //   either way, and (per `shim::define_classes`'s own idempotency
+    //   either way, and (per `jvm::entry::define_classes`'s own idempotency
     //   doc comment) the shim classes are typically already loaded from
     //   the first successful boot regardless. Logging and returning the
     //   VM as usual keeps `jvm-start`'s success/failure semantics exactly
@@ -381,7 +381,8 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     // init args, etc.) doesn't consume the "first attempt" slot — see
     // `JVM_CREATE_ATTEMPTED`'s doc comment.
     let is_first_attempt = is_first_attempt(&JVM_CREATE_ATTEMPTED);
-    let result: jni::errors::Result<()> = vm.attach_current_thread(crate::shim::define_classes);
+    let result: jni::errors::Result<()> =
+        vm.attach_current_thread(crate::jvm::entry::define_classes);
     match result {
         Ok(()) => {}
         Err(e) if is_first_attempt => return Err(e.to_string()),
@@ -660,7 +661,7 @@ fn add_jar_url(
 /// completing a future is not itself a slow operation (it's a single JNI
 /// call to `CompletableFuture#complete`/`#completeExceptionally`, not an
 /// arbitrary user method that might block for arbitrary reasons). This is
-/// the other half of the round trip `shim::lisp_function_call` starts: that
+/// the other half of the round trip `jvm::entry::lisp_function_call` starts: that
 /// function enqueues an `Inbound::Invoke` and returns immediately; this
 /// function runs once Lisp's `jvm--invoke-reply` sends back
 /// `Cmd::InvokeReply` with the Lisp callback's outcome — its real return
@@ -698,7 +699,7 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutco
 
 /// Resolves the pending `CompletableFuture` for ID with VALUE — the
 /// Lisp-access counterpart of `handle_invoke_reply` above, completing (or
-/// exceptionally completing) whatever future `shim.rs`'s `Lisp.*` natives
+/// exceptionally completing) whatever future `jvm::entry`'s `Lisp.*` natives
 /// registered in the pending table (see design spec, "Request/reply flow",
 /// step 3: "Completion must route through the worker because only it is
 /// attached to the JVM"). Runs inline, like `handle_invoke_reply`, for the
@@ -733,7 +734,7 @@ mod tests {
     use std::process::Command;
 
     /// Covers the exact swap semantics `create_jvm` relies on to decide
-    /// whether a `shim::define_classes` failure is fatal (first attempt)
+    /// whether a `jvm::entry::define_classes` failure is fatal (first attempt)
     /// or merely logged (a restart) — see `JVM_CREATE_ATTEMPTED`'s and
     /// `is_first_attempt`'s doc comments. Uses its own local flag rather
     /// than the module's shared `JVM_CREATE_ATTEMPTED` static, since that
@@ -832,7 +833,7 @@ mod tests {
     /// Retries against jni-rs 0.22.4's racy check-then-create singleton --
     /// see `src/jvm/convert.rs`'s `create_test_jvm` for the full
     /// explanation. This test used to create its JVM directly; with more
-    /// JVM-creating tests now running in this same binary (`shim.rs`), the
+    /// JVM-creating tests now running in this same binary (`src/jvm/entry.rs`), the
     /// race became reliably hit rather than a rare fluke.
     fn create_test_jvm() -> JavaVM {
         let mut last_err = None;

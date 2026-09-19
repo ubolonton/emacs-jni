@@ -5,7 +5,6 @@ mod jvm;
 mod lisp_requests;
 mod protocol;
 mod reentry;
-mod shim;
 
 emacs::plugin_is_GPL_compatible!();
 
@@ -181,7 +180,7 @@ fn jvm_call_direct<'e>(
     let args = lisp_list_to_args(args)?;
     let loader = runtime::loader();
     // Record this frame's `Env` so any Clojure -> Lisp callback made *during*
-    // the call runs directly on it (`reentry`/`shim`), rather than deadlocking
+    // the call runs directly on it (`reentry`/`jvm::entry`), rather than deadlocking
     // on the async queue this blocked main thread cannot drain. Dropped when
     // the call returns or unwinds.
     let _scope = reentry::enter(env);
@@ -229,7 +228,7 @@ fn jvm_service_inbound(env: &Env, _process: Value, _data: Value) -> Result<()> {
 /// via `lisp_requests::value_to_outcome` (the same classifier the Clojure
 /// apply path's `error_to_reply` uses) — and sends `Cmd::InvokeReply` to the
 /// worker thread, which resolves (or exceptionally completes, with a real
-/// `LispSignal`) the `CompletableFuture` `shim::lisp_function_call` handed
+/// `LispSignal`) the `CompletableFuture` `jvm::entry::lisp_function_call` handed
 /// back to Java — the reverse direction of `jvm--call`. Silently drops the
 /// reply (like every other `jvm::inbox::submit` caller in this file) if
 /// there's no running worker thread to receive it; there is nothing

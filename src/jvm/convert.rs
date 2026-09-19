@@ -130,7 +130,7 @@ pub fn from_bridge<'local>(
 /// registering a *second* native method just for that (on top of `call`)
 /// would be pure duplication of `register_lisp_function_native`'s dance —
 /// simpler to reuse a small dedicated shim class (`ReleaseNotifier`,
-/// registered by `shim::define_classes` alongside the other three) and
+/// registered by `jvm::entry::define_classes` alongside the other three) and
 /// drive its construction/registration from here instead.
 fn register_release_on_gc<'local>(
     env: &mut jni::Env<'local>,
@@ -476,7 +476,7 @@ pub(crate) fn to_input<'local>(
     }
     let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
     if env.is_instance_of(&elem, &lisp_object_class)? {
-        return Ok(LispInput::Obj(crate::shim::get_ptr_field(env, &elem)?));
+        return Ok(LispInput::Obj(crate::jvm::entry::get_ptr_field(env, &elem)?));
     }
     let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
     if env.is_instance_of(&elem, &lisp_symbol_class)? {
