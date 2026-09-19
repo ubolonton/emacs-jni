@@ -28,9 +28,10 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use emacs::{Env, GlobalRef, IntoLisp, Result as EmacsResult, Value};
+use emacs::{Env, GlobalRef, Result as EmacsResult, Value};
 
 use crate::jvm::inbox::{self, Cmd};
+use crate::lisp::convert::{from_bridge, from_input, to_outcome};
 use crate::protocol::{BridgeValue, LispInput, LispOutcome, Status};
 use crate::channel;
 
@@ -135,7 +136,12 @@ fn drain() -> Vec<Inbound> {
 /// Boxes VALUE's `GlobalRef`, handing ownership to the eventual Java
 /// `LispObject` — freed exactly once, later, by a `FreeRef` request (see
 /// `service_inbound`'s own `Inbound::FreeRef` arm).
-fn box_value(value: Value) -> i64 {
+///
+/// `pub(crate)` because `lisp::convert::to_outcome`'s own `Ptr` arm reuses
+/// it too — every Lisp value that becomes an opaque `LispObject` (whether
+/// classified from an `apply` result here or from a Clojure-bound `Env` op
+/// there) goes through this one boxing point.
+pub(crate) fn box_value(value: Value) -> i64 {
     Box::into_raw(Box::new(value.make_global_ref())) as i64
 }
 
@@ -152,76 +158,17 @@ fn box_value(value: Value) -> i64 {
 /// (`drain`) guarantees any `FreeRef` for the same ptr that *is* already
 /// queued was enqueued after this request, not before. See spec "Ordering
 /// invariant".
-fn borrow<'e>(env: &'e Env, ptr: i64) -> Value<'e> {
+///
+/// `pub(crate)` because `lisp::convert::from_input`'s own `Obj` arm reuses
+/// it too.
+pub(crate) fn borrow<'e>(env: &'e Env, ptr: i64) -> Value<'e> {
     let gref: &'e GlobalRef = unsafe { &*(ptr as *const GlobalRef) };
     gref.bind(env)
 }
 
-/// Converts one already-classified apply argument to a real `Value`,
-/// mirroring spec "Argument conversion" for the main-thread side.
-pub(crate) fn arg_to_value<'e>(env: &'e Env, arg: &LispInput) -> EmacsResult<Value<'e>> {
-    match arg {
-        LispInput::Obj(ptr) => Ok(borrow(env, *ptr)),
-        // A keyword interns with its leading `:`; a plain symbol by name.
-        // `env.intern` uses the global obarray, so the result round-trips
-        // `eq`-stably back to a Clojure symbol via `value_to_outcome`.
-        LispInput::Symbol { name, keyword } => {
-            if *keyword {
-                env.intern(&format!(":{name}"))
-            } else {
-                env.intern(name)
-            }
-        }
-        LispInput::Scalar(scalar) => bridge_value_to_value(env, scalar),
-    }
-}
-
-/// Converts a marshalled `BridgeValue` to a real Lisp `Value` on the main thread.
-///
-/// Shared by the Lisp-access apply path (`arg_to_value`'s `Scalar` arm), the
-/// synchronous `jvm--call-direct` return path (`lib.rs`, which turns the
-/// `BridgeValue` `jvm_thread::call_direct` produced into the value the defun
-/// returns), and the async `CallDone`/`Invoke` inbound arms (`service_
-/// inbound`, below) — every JVM-to-Lisp value crossing goes through this one
-/// converter now, on the main thread, instead of a wire round trip.
-pub fn bridge_value_to_value<'e>(env: &'e Env, arg: &BridgeValue) -> EmacsResult<Value<'e>> {
-    match arg {
-        BridgeValue::Nil => ().into_lisp(env),
-        BridgeValue::True => true.into_lisp(env),
-        BridgeValue::Int(n) => n.into_lisp(env),
-        BridgeValue::Float(f) => f.into_lisp(env),
-        // Emacs's own reader parses an arbitrary-precision decimal
-        // string into a bignum when it doesn't fit a fixnum — reusing
-        // it here avoids reimplementing bignum construction.
-        BridgeValue::BigInt(digits) => env.call("string-to-number", (digits.as_str(),)),
-        BridgeValue::Str(s) => s.as_str().into_lisp(env),
-        // Build the `JvmHandle` `user-ptr` directly from the shared
-        // reference — no wire, no table, no `jvm--wrap-handle` round trip.
-        BridgeValue::Object(object) => {
-            Box::new(crate::jvm::convert::JvmHandle(object.clone())).into_lisp(env)
-        }
-        // Intern on the main thread, mirroring the `Intern` request
-        // (`arg_to_value`): a keyword takes its leading `:`, a plain symbol
-        // its bare name. `env.intern` uses the global obarray, so the result
-        // is `eq`-stable.
-        BridgeValue::Symbol { name, keyword } => {
-            if *keyword {
-                env.intern(&format!(":{name}"))
-            } else {
-                env.intern(name)
-            }
-        }
-        BridgeValue::Callback(_) => unreachable!(
-            "neither a Lisp-access apply argument nor a JVM-call return value is ever \
-             classified as BridgeValue::Callback -- Callback is only produced on the \
-             Lisp-to-Java argument direction (see lib.rs's lisp_value_to_arg)"
-        ),
-    }
-}
-
 /// Sends a `Cmd::LispReply` for ID. An `Err` is converted to a `Signal`
 /// or `Throw` reply via `error_to_reply` (marshaling the signal symbol/
-/// data or throw tag/value through `value_to_outcome`).
+/// data or throw tag/value through `lisp::convert::to_outcome`).
 fn reply(env: &Env, id: u64, result: EmacsResult<LispOutcome>) {
     let value = match result {
         Ok(v) => v,
@@ -242,8 +189,8 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispOutcome {
     let boxed = |r: EmacsResult<LispOutcome>| r.ok().map(Box::new);
     match e.downcast_ref::<ErrorKind>() {
         Some(ErrorKind::Signal { symbol, data }) => {
-            let s = boxed(value_to_outcome(env, unsafe { symbol.value(env) }));
-            let d = boxed(value_to_outcome(env, unsafe { data.value(env) }));
+            let s = boxed(to_outcome(env, unsafe { symbol.value(env) }));
+            let d = boxed(to_outcome(env, unsafe { data.value(env) }));
             match (s, d) {
                 (Some(symbol), Some(data)) => LispOutcome::Signal { symbol, data },
                 // One side may have marshaled to a `Ptr` (already `box_value`d
@@ -257,8 +204,8 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispOutcome {
             }
         }
         Some(ErrorKind::Throw { tag, value }) => {
-            let t = boxed(value_to_outcome(env, unsafe { tag.value(env) }));
-            let v = boxed(value_to_outcome(env, unsafe { value.value(env) }));
+            let t = boxed(to_outcome(env, unsafe { tag.value(env) }));
+            let v = boxed(to_outcome(env, unsafe { value.value(env) }));
             match (t, v) {
                 (Some(tag), Some(value)) => LispOutcome::Throw { tag, value },
                 (t, v) => {
@@ -299,66 +246,6 @@ fn fallback_signal(message: &str) -> LispOutcome {
         })),
         data: Box::new(LispOutcome::Value(BridgeValue::Str(message.to_string()))),
     }
-}
-
-/// Classifies an `apply` result: a scalar or string converts to the
-/// matching Clojure value directly; everything else (symbols, conses,
-/// vectors, hash tables, ...) stays an opaque `LispObject`. `nil` becomes
-/// Clojure `nil` and the symbol `t` becomes `true`, so a Lisp predicate's
-/// result is usable directly in a Clojure conditional. The scalar set and
-/// its Java shapes mirror the `jvm-call` return-marshalling table.
-///
-/// `pub(crate)` because `lib.rs`'s `jvm--invoke-reply` reuses it too:
-/// `jvm--resolve-invoke` (`elisp/jvm.el`) hands it the real `(SYMBOL . DATA)`
-/// a failed callback's `condition-case` caught, and each half needs exactly
-/// this same "classify a raw Lisp value" treatment before it can go into a
-/// `LispOutcome::Signal`.
-pub(crate) fn value_to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
-    if !value.is_not_nil() {
-        return Ok(LispOutcome::Value(BridgeValue::Nil));
-    }
-    if env.call("eq", (value, env.intern("t")?))?.is_not_nil() {
-        return Ok(LispOutcome::Bool(true));
-    }
-    if env.call("stringp", (value,))?.is_not_nil() {
-        return Ok(LispOutcome::Value(BridgeValue::Str(value.into_rust::<String>()?)));
-    }
-    if env.call("floatp", (value,))?.is_not_nil() {
-        return Ok(LispOutcome::Value(BridgeValue::Float(value.into_rust::<f64>()?)));
-    }
-    if env.call("integerp", (value,))?.is_not_nil() {
-        // A fixnum fits an i64; a bignum does not, so render it to its
-        // decimal string and rebuild it as a BigInteger on the JVM side.
-        if env.call("fixnump", (value,))?.is_not_nil() {
-            return Ok(LispOutcome::Value(BridgeValue::Int(value.into_rust::<i64>()?)));
-        }
-        let digits = env.call("number-to-string", (value,))?.into_rust::<String>()?;
-        return Ok(LispOutcome::Value(BridgeValue::BigInt(digits)));
-    }
-    // A keyword's `symbol-name` includes the leading `:`; carry the bare
-    // name. `keywordp` in Emacs already implies interned, so every keyword
-    // converts.
-    if env.call("keywordp", (value,))?.is_not_nil() {
-        let full = env.call("symbol-name", (value,))?.into_rust::<String>()?;
-        let name = full.strip_prefix(':').unwrap_or(&full).to_string();
-        return Ok(LispOutcome::Value(BridgeValue::Symbol { name, keyword: true }));
-    }
-    if env.call("symbolp", (value,))?.is_not_nil() {
-        // Only an interned symbol (one `eq` to `intern-soft` of its own
-        // name, i.e. present in the global obarray) converts to a Clojure
-        // symbol. An uninterned symbol (`make-symbol`/`gensym`) stays an
-        // opaque `LispObject`, preserving its identity across the round
-        // trip — see spec "Result conversion".
-        let name = env.call("symbol-name", (value,))?;
-        let interned = env.call("intern-soft", (name,))?;
-        if env.call("eq", (value, interned))?.is_not_nil() {
-            return Ok(LispOutcome::Value(BridgeValue::Symbol {
-                name: name.into_rust::<String>()?,
-                keyword: false,
-            }));
-        }
-    }
-    Ok(LispOutcome::Ptr(box_value(value)))
 }
 
 /// Drains the inbound queue and runs each message's `Env` op, in the order
@@ -449,13 +336,13 @@ pub fn service_inbound(env: &Env) -> EmacsResult<()> {
 fn handle_message(env: &Env, request: &Inbound) -> EmacsResult<()> {
     match request {
         Inbound::CallDone { id, ok, result, err } => {
-            let value = bridge_value_to_value(env, result)?;
+            let value = from_bridge(env, result)?;
             env.call("jvm--resolve-call", (*id as i64, *ok, value, err.as_deref()))?;
         }
         Inbound::Invoke { id, handle, args } => {
             let mut arg_values = Vec::with_capacity(args.len());
             for arg in args {
-                arg_values.push(bridge_value_to_value(env, arg)?);
+                arg_values.push(from_bridge(env, arg)?);
             }
             let args_list = env.list(&arg_values)?;
             env.call("jvm--resolve-invoke", (*id as i64, *handle as i64, args_list))?;
@@ -495,27 +382,27 @@ fn handle_message(env: &Env, request: &Inbound) -> EmacsResult<()> {
 /// reply over the channel) and `compute_reply` (the reentrant direct path).
 fn run_request_value(env: &Env, request: &Inbound) -> EmacsResult<LispOutcome> {
     match request {
-        // Routed through `value_to_outcome` like every other result: an
+        // Routed through `to_outcome` like every other result: an
         // interned symbol becomes a Clojure symbol, a keyword a keyword, and
         // `intern "nil"`/`"t"` stay `nil`/`true`.
-        Inbound::Intern { name, .. } => env.intern(name).and_then(|v| value_to_outcome(env, v)),
+        Inbound::Intern { name, .. } => env.intern(name).and_then(|v| to_outcome(env, v)),
         Inbound::Apply { f, args, .. } => {
-            let f_value = arg_to_value(env, f)?;
+            let f_value = from_input(env, f)?;
             let mut arg_values = Vec::with_capacity(args.len());
             for arg in args {
-                arg_values.push(arg_to_value(env, arg)?);
+                arg_values.push(from_input(env, arg)?);
             }
-            value_to_outcome(env, f_value.call(&arg_values)?)
+            to_outcome(env, f_value.call(&arg_values)?)
         }
-        Inbound::TypeOf { arg, .. } => arg_to_value(env, arg)
-            .and_then(|v| env.type_of(v))
-            .and_then(|v| value_to_outcome(env, v)),
+        Inbound::TypeOf { arg, .. } => {
+            from_input(env, arg).and_then(|v| env.type_of(v)).and_then(|v| to_outcome(env, v))
+        }
         Inbound::IsNotNil { arg, .. } => {
-            arg_to_value(env, arg).map(|v| LispOutcome::Bool(v.is_not_nil()))
+            from_input(env, arg).map(|v| LispOutcome::Bool(v.is_not_nil()))
         }
         Inbound::Eq { a, b, .. } => {
-            let av = arg_to_value(env, a)?;
-            let bv = arg_to_value(env, b)?;
+            let av = from_input(env, a)?;
+            let bv = from_input(env, b)?;
             Ok(LispOutcome::Bool(env.call("eq", (av, bv))?.is_not_nil()))
         }
         Inbound::Prin1 { ptr, .. } => env

@@ -2,6 +2,7 @@ use emacs::{defun, Env, Result, Value};
 
 mod channel;
 mod jvm;
+mod lisp;
 mod lisp_requests;
 mod protocol;
 mod reentry;
@@ -185,7 +186,7 @@ fn jvm_call_direct<'e>(
     // the call returns or unwinds.
     let _scope = reentry::enter(env);
     match jvm::invoke::call_direct(&vm, &loader, &target, &member, &args) {
-        Ok(arg) => lisp_requests::bridge_value_to_value(env, &arg),
+        Ok(arg) => lisp::convert::from_bridge(env, &arg),
         // A Lisp signal/throw raised in a reentrant callback, unwound back up
         // through Clojure: rebind its symbol/data (or tag/value) to this
         // frame's `Env` and re-raise the *original* non-local exit, so the
@@ -193,8 +194,8 @@ fn jvm_call_direct<'e>(
         // return `Err` (the non-local exit), which the defun trampoline turns
         // back into a real Emacs signal/throw.
         Err(jvm::invoke::DirectError::NonLocalExit { kind, a, b }) => {
-            let a = lisp_requests::arg_to_value(env, &a)?;
-            let b = lisp_requests::arg_to_value(env, &b)?;
+            let a = lisp::convert::from_input(env, &a)?;
+            let b = lisp::convert::from_input(env, &b)?;
             if kind == 0 {
                 env.call("signal", (a, b))
             } else {
@@ -224,8 +225,8 @@ fn jvm_service_inbound(env: &Env, _process: Value, _data: Value) -> Result<()> {
 /// error cons `condition-case` caught (OK is `nil`), per `jvm--resolve-
 /// invoke`'s two call sites in `elisp/jvm.el`. Marshals either shape into a
 /// `LispOutcome` — a plain return value the same way an ordinary callback
-/// result always has (`lisp_value_to_arg`), or the real signal symbol/data
-/// via `lisp_requests::value_to_outcome` (the same classifier the Clojure
+/// result always has (`lisp::convert::to_bridge`), or the real signal symbol/data
+/// via `lisp::convert::to_outcome` (the same classifier the Clojure
 /// apply path's `error_to_reply` uses) — and sends `Cmd::InvokeReply` to the
 /// worker thread, which resolves (or exceptionally completes, with a real
 /// `LispSignal`) the `CompletableFuture` `jvm::entry::lisp_function_call` handed
@@ -237,24 +238,24 @@ fn jvm_service_inbound(env: &Env, _process: Value, _data: Value) -> Result<()> {
 #[defun(mod_in_name = false, name = "jvm--invoke-reply")]
 fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
     // The `emacs` crate (0.21.0) has no `FromLisp` impl for `bool` (Emacs
-    // Lisp has no dedicated boolean type -- see `lisp_value_to_arg`'s own
-    // note on this same point), so OK is received as a raw `Value` and
+    // Lisp has no dedicated boolean type -- see `lisp::convert::to_bridge`'s
+    // own note on this same point), so OK is received as a raw `Value` and
     // checked for Lisp truthiness directly, matching `jvm--invoke-reply`'s
     // two call sites in `elisp/jvm.el`, which always pass literally
     // `t` or `nil`.
     let outcome = if ok.is_not_nil() {
-        protocol::LispOutcome::Value(lisp_value_to_arg(value)?)
+        protocol::LispOutcome::Value(lisp::convert::to_bridge(value)?)
     } else {
         // VALUE is the real `(SYMBOL . DATA)' condition-case caught --
-        // classify each half through the same `value_to_outcome' the
+        // classify each half through the same `to_outcome' the
         // Lisp-access apply path's `error_to_reply' uses, so a callback
         // signal surfaces to Java as a real `LispSignal' carrying the
         // actual symbol/data, not a fabricated `error'/stringified message.
         let symbol = value.car()?;
         let data = value.cdr()?;
         protocol::LispOutcome::Signal {
-            symbol: Box::new(lisp_requests::value_to_outcome(env, symbol)?),
-            data: Box::new(lisp_requests::value_to_outcome(env, data)?),
+            symbol: Box::new(lisp::convert::to_outcome(env, symbol)?),
+            data: Box::new(lisp::convert::to_outcome(env, data)?),
         }
     };
     let _ = inbox::submit(inbox::Cmd::InvokeReply { id, outcome });
@@ -263,101 +264,17 @@ fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
 
 /// Walks a Lisp list of arguments (as raw `Value`s, same pattern as the
 /// existing `string_list` helper) converting each to a `BridgeValue` by
-/// runtime type — see `lisp_value_to_arg`'s doc comment for what each
+/// runtime type — see `lisp::convert::to_bridge`'s doc comment for what each
 /// Lisp type maps to, and what happens to a value this bridge doesn't
 /// recognize.
 fn lisp_list_to_args(mut list: Value) -> Result<Vec<protocol::BridgeValue>> {
     let mut out = Vec::new();
     while list.is_not_nil() {
         let item: Value = list.car()?;
-        out.push(lisp_value_to_arg(item)?);
+        out.push(lisp::convert::to_bridge(item)?);
         list = list.cdr()?;
     }
     Ok(out)
-}
-
-/// Converts a single Lisp value to a `BridgeValue` by runtime type, trying
-/// each marshallable Lisp type in turn.
-fn lisp_value_to_arg(v: Value) -> Result<protocol::BridgeValue> {
-    if !v.is_not_nil() {
-        return Ok(protocol::BridgeValue::Nil);
-    }
-    if v.env.call("keywordp", (v,))?.is_not_nil() {
-        let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
-        // `symbol-name` of a keyword includes its leading `:`; strip it so
-        // `name` is the bare name the marker carries.
-        let name = name.strip_prefix(':').unwrap_or(&name).to_string();
-        return Ok(protocol::BridgeValue::Symbol { name, keyword: true });
-    }
-    if let Ok(n) = v.into_rust::<i64>() {
-        return Ok(protocol::BridgeValue::Int(n));
-    }
-    // A Lisp integer (fixnum or bignum) that didn't fit in i64 above is a
-    // bignum too large for a 64-bit register — this must be routed
-    // through `BridgeValue::BigInt` via its exact decimal string, not the
-    // `f64` attempt below. `extract_float` (which backs `into_rust::<f64>`)
-    // coerces any Lisp number, including bignums, so skipping this check
-    // would silently accept a bignum as a lossy `BridgeValue::Float` instead of
-    // erroring or round-tripping exactly — the same "don't silently
-    // misrepresent" concern `jvm::convert::to_bridge` (Task 4)
-    // already applies on the Java-to-Lisp direction for boxed Long/Integer.
-    if v.env.call("integerp", (v,))?.is_not_nil() {
-        let digits: String = v.env.call("number-to-string", (v,))?.into_rust()?;
-        return Ok(protocol::BridgeValue::BigInt(digits));
-    }
-    if let Ok(f) = v.into_rust::<f64>() {
-        return Ok(protocol::BridgeValue::Float(f));
-    }
-    if let Ok(s) = v.into_rust::<String>() {
-        return Ok(protocol::BridgeValue::Str(s));
-    }
-    if let Ok(h) = v.into_rust::<&jvm::convert::JvmHandle>() {
-        return Ok(protocol::BridgeValue::Object(h.0.clone()));
-    }
-    // `t` has no useful into_rust::<T>() scalar conversion (there's no
-    // `FromLisp` impl for `bool` — Emacs Lisp has no dedicated boolean
-    // type), so it's checked explicitly here via `eq` against the
-    // interned `t` symbol, matching Lisp's own notion of "is this
-    // literally `t`" rather than "is this any non-nil symbol".
-    if v == v.env.intern("t")? {
-        return Ok(protocol::BridgeValue::True);
-    }
-    // A symbol is data: it crosses as a marker, not a callback. Checked
-    // before `functionp` so a symbol holding a function cell (`car`) is a
-    // marker too; only a non-symbol function object (lambda, closure,
-    // byte-code, subr) reaches the `functionp` arm below. Matches the
-    // Clojure `->lisp` model, where every symbol is a `LispSymbol` marker
-    // and callability is opt-in via `require-symbol`.
-    if v.env.call("symbolp", (v,))?.is_not_nil() {
-        let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
-        return Ok(protocol::BridgeValue::Symbol { name, keyword: false });
-    }
-    // A Lisp function (symbol with a function cell, lambda, closure,
-    // subr, or byte-compiled object) is registered Lisp-side in
-    // `jvm--lisp-callbacks' rather than tracked here — this module never
-    // holds a reference to the function itself, only its handle. See
-    // spec "Identity and lifetime": Lisp owns that table, since Rust has
-    // no stable way to hold onto an arbitrary Lisp function value across
-    // calls. `jvm::convert::from_bridge` later turns this handle into
-    // a real `LispFunction' proxy object when the argument actually
-    // crosses into Java.
-    //
-    // The `emacs` crate (0.21.0, checked against its vendored source —
-    // `env.rs`/`value.rs`/`call.rs`) has no `Value::is_function` or
-    // similar native predicate, so this calls Lisp's own `functionp'
-    // via `env.call`, the same "call back into Lisp for a predicate the
-    // crate doesn't expose" pattern already used above for `integerp'.
-    if v.env.call("functionp", (v,))?.is_not_nil() {
-        let handle: u64 = v.env.call("jvm--register-callback", (v,))?.into_rust()?;
-        return Ok(protocol::BridgeValue::Callback(handle));
-    }
-    // Anything else reaching this point (a vector, hash-table, or other
-    // unsupported value) is not a value this bridge knows how to marshal.
-    // Earlier code silently treated it as `BridgeValue::True`, which could mask
-    // real caller bugs (e.g. accidentally passing a vector where a number
-    // was intended would silently become Java `true`) -- signal a clear
-    // error instead.
-    v.env.signal(jvm_invalid_argument, (v,))
 }
 
 #[cfg(feature = "test-support")]
