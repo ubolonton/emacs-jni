@@ -14,7 +14,7 @@
 | Path | Produced by | Contents |
 |---|---|---|
 | `target/debug/libemacs_jni.so` | `cargo build` | The dynamic module `elisp/jvm.el` loads. |
-| `target/emacs-jni-shim-classes/` | `cargo build`, through `build.rs` | Compiled Java shim classes, under `emacs_jni.core` — `LispCallable`, `LispFunction`, `LispNonLocalExit`, `ReleaseNotifier`, and (for Clojure Lisp access) `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Java code needs these on its classpath to reference the types directly, as `test/fixtures/Calc.java` does. |
+| `target/emacs-jni-shim-classes/` | `cargo build`, through `build.rs` | Compiled Java shim classes, under `emacs_jni.core` — `LispCallable`, `LispFunction`, `LispNonLocalExit` and its `LispSignal`/`LispThrow` subclasses, `ReleaseNotifier`, and (for Clojure Lisp access) `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Java code needs these on its classpath to reference the types directly, as `test/fixtures/Calc.java` does. |
 | `target/clojure-jars/` | `test/fetch-clojure-jars.sh` | The four jars listed under [Prerequisites for Clojure](#prerequisites-for-clojure) below. Gitignored, never bundled or committed. |
 
 ## Configuration variables

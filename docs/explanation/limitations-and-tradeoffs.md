@@ -62,23 +62,27 @@ flaky, when two test modules race to be the first to call
 ## Overload resolution only partly considers argument types
 
 When two Java methods share a name and an argument count, `jvm-call`
-picks the first one reflection returns that accepts the given
-arguments, and falls through to the next same-arity candidate only if
-marshalling the first one's parameters fails. This is not the same
-algorithm the Java compiler uses to resolve overloads at compile time,
+picks the first same-arity candidate reflection returns that both
+marshals and invokes without an argument mismatch. It falls through to
+the next candidate on either failure: marshalling the parameters fails,
+*or* `Method.invoke`/`Constructor.newInstance` throws a bare
+`IllegalArgumentException` — the JDK's own signal that the marshalled
+arguments did not fit the declared parameter types (for example a
+string that marshalled fine as `Object` but the candidate wanted
+`long`). A real exception from the method body always arrives wrapped
+in `InvocationTargetException`, so genuine user-code errors are not
+mistaken for a mismatch and do not trigger fall-through.
+
+This is still not the algorithm the Java compiler uses at compile time,
 which considers assignability and specificity across the whole
-candidate set at once. Implementing that fully, against a set of
-methods only known at call time through reflection, is a
-substantially bigger piece of work than this module currently does.
-The gap that remains: `lisp_arg_to_jvalue`'s non-numeric argument
-handling (strings, `nil`, `t`, wrapped objects) accepts any declared
-target type without checking it, unlike the numeric arms, which do
-check range. A wrong-typed non-numeric argument can pass marshalling
-and only fail later, inside the actual method call, in a way the
-fall-through does not retry on. See
+candidate set at once. When more than one same-arity overload would
+accept the arguments, `jvm-call` takes whichever `getMethods()` returns
+first, not the most specific one. Implementing full resolution against
+a method set known only at call time through reflection is a
+substantially bigger piece of work than this module currently does. See
 [Interop design](interop-design.md#why-marshalling-is-type-directed-not-value-directed)
-for why the numeric and non-numeric cases are not symmetric to begin
-with.
+for why the numeric and non-numeric marshalling cases are not
+symmetric to begin with.
 
 ## A panic inside a call's spawned thread vanishes silently
 

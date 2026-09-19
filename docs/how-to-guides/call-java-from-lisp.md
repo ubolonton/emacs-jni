@@ -114,11 +114,12 @@ the JVM worker thread finishes the call.
 ## Choose between two overloaded methods
 
 Overload resolution picks the first same-arity candidate that accepts
-your argument types, and falls through to the next one only if
-marshalling that candidate's parameters fails. If two overloads share
-the same arity and both could accept your argument (for example, one
-takes `long` and the other takes `String`, and you are passing a
-number), the resolution is not guaranteed to pick the one you expect.
+your argument types, falling through to the next one if marshalling that
+candidate's parameters fails or the call itself reports an argument-type
+mismatch. If two overloads share the same arity and both could accept
+your argument (for example, one takes `long` and the other takes
+`String`, and you are passing a number), the resolution is not
+guaranteed to pick the one you expect.
 If this matters, give the two overloads different arities, or route
 through a differently named method. See
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).

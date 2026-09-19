@@ -92,8 +92,6 @@ until Emacs services it on its main thread.
 | `type-of` | `[v]` | a Clojure symbol (the Lisp type) |
 | `is-not-nil?` | `[v]` | a boolean |
 | `eq` | `[a b]` | a boolean |
-| `lisp-signal?` | `[e]` | true if E is a `::lisp-signal` ex-info (the exception `apply` throws; for `apply-async`, unwrap the `ExecutionException` first — see below) |
-| `lisp-throw?` | `[e]` | true if E is a `::lisp-throw` ex-info (the exception `apply` throws; for `apply-async`, unwrap the `ExecutionException` first — see below) |
 
 `f` and each of `args` may be a Clojure symbol or keyword (→ a Lisp
 symbol/keyword), a plain scalar (string, number, boolean, `nil` → the
@@ -111,21 +109,22 @@ Clojure values. `LispObject.prin1ToString` returns the value's
 otherwise opaque `LispObject`.
 
 A Lisp non-local exit (`error`/`signal`, or `throw`) during `apply`
-surfaces directly as a `clojure.lang.ExceptionInfo` (`ex-info`), not a
-plain exception. `apply-async` completes its `CompletableFuture`
-exceptionally with the same `ex-info`, but `deref`/`.get()` wraps it in
-a `java.util.concurrent.ExecutionException` — read `(.getCause e)` for
-the `ex-info`.
+surfaces as a typed exception you `catch` by class. `apply-async`
+completes its `CompletableFuture` exceptionally with the same
+exception, but `deref`/`.get()` wraps it in a
+`java.util.concurrent.ExecutionException` — read `(.getCause e)` for
+the typed exception.
 
-| Exit | `(ex-data e)` |
-|---|---|
-| `signal` | `{:type :emacs-jni.clj/lisp-signal :symbol <sym> :data <data>}` |
-| `throw` | `{:type :emacs-jni.clj/lisp-throw :tag <tag> :value <value>}` |
+| Exit | Class | Fields |
+|---|---|---|
+| `signal` | `emacs_jni.core.LispSignal` | `.symbol`, `.data` |
+| `throw` | `emacs_jni.core.LispThrow` | `.tag`, `.value` |
 
-`:symbol`/`:tag` and `:data`/`:value` are converted the same way as any
-other result — a Lisp symbol or keyword to its Clojure counterpart,
-anything else to an opaque `LispObject`. `lisp-signal?`/`lisp-throw?`
-test which case an exception is. See
+Both extend `emacs_jni.core.LispNonLocalExit` (fields `symbolOrTag`,
+`dataOrValue`), so one `catch` on the base type covers either. Every
+field is converted the same way as any other result — a Lisp symbol or
+keyword to its Clojure counterpart, anything else to an opaque
+`LispObject`. See
 [How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md#handle-a-lisp-error)
 for a full example.
 

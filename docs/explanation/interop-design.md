@@ -118,8 +118,10 @@ something Java code can catch as a real exception, not a string it has
 to pattern-match. It is a plain `RuntimeException` carrying the
 signal/throw's symbol-or-tag and data-or-value, marshaled to Java the
 same way any other returned value is — a `LispSymbol` marker, a
-`LispObject`, or a boxed scalar. Plain Java code catches it directly.
-`emacs-jni.clj` rethrows it as a Clojure `ex-info`; see
+`LispObject`, or a boxed scalar. Its `LispSignal`/`LispThrow` subclasses
+add the typed `symbol`/`data` and `tag`/`value` fields. Plain Java (and
+`emacs-jni.clj`) code catches the subclass by type, or the base
+`LispNonLocalExit` for either; see
 [How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md#handle-a-lisp-error).
 
 ## Why a Lisp value becomes an opaque Java object

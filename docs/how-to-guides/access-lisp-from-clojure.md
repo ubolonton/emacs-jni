@@ -155,51 +155,54 @@ output, as a Java `String` — the way to read a value that stays opaque
 ## Handle a Lisp error
 
 A Lisp non-local exit during `apply`/`apply-async` — `error`/`signal`,
-or `throw` — surfaces as a `clojure.lang.ExceptionInfo` (`ex-info`),
-not a plain exception:
+or `throw` — surfaces as a typed exception you `catch` by class:
+`emacs_jni.core.LispSignal` for a signal, `emacs_jni.core.LispThrow`
+for a throw. Both extend `emacs_jni.core.LispNonLocalExit`, so one
+`catch` on the base type covers either:
 
 ```clojure
+(import '[emacs_jni.core LispSignal LispThrow])
+
 (try
   (l/apply (l/intern "error") "boom")
-  (catch clojure.lang.ExceptionInfo e
-    (ex-data e)))
-;; => {:type :emacs-jni.clj/lisp-signal, :symbol error, :data #object[...]}
+  (catch LispSignal e
+    (.-symbol e)))
+;; => error   (a Clojure symbol)
 ```
 
-`:symbol` converts to a Clojure symbol (interned), same as any other
-result. `:data` here is the Lisp error-data list `("boom")` — a list,
-not a scalar, so it stays an opaque `LispObject` (read it with
-`(.prin1ToString (:data (ex-data e)))` → `"(\"boom\")"`; see
+The payload fields are already converted the same way as any other
+result:
+
+| Exit | Class | Fields |
+|---|---|---|
+| `signal` (`error`, `signal`) | `LispSignal` | `.symbol`, `.data` |
+| `throw` | `LispThrow` | `.tag`, `.value` |
+
+`.symbol` reads the signaled condition's symbol (for example `error`,
+or a custom condition from `define-error`), converted to a Clojure
+symbol (interned), same as any other result. `.data` here is the Lisp
+error-data list `("boom")` — a list, not a scalar, so it stays an
+opaque `LispObject` (read it with `(.prin1ToString (.-data e))` →
+`"(\"boom\")"`; see
 [Read an opaque value's printed form](#read-an-opaque-values-printed-form)
 above).
 
-`ex-data` carries which case it is, and the exit's payload, already
-converted the same way as any other result:
-
-| Exit | `(ex-data e)` |
-|---|---|
-| `signal` (`error`, `signal`) | `{:type :emacs-jni.clj/lisp-signal :symbol <sym> :data <data>}` |
-| `throw` | `{:type :emacs-jni.clj/lisp-throw :tag <tag> :value <value>}` |
-
-`(:symbol (ex-data e))` reads the signaled condition's symbol (for
-example `error`, or a custom condition from `define-error`); `:data`
-is its data list. `lisp-signal?`/`lisp-throw?` test which case an
-exception is, without pulling `ex-data` apart yourself:
+Catch the base `LispNonLocalExit` to handle either case, then branch on
+class or read its `symbolOrTag`/`dataOrValue` fields:
 
 ```clojure
+(import '[emacs_jni.core LispNonLocalExit])
+
 (try
   (l/apply (l/intern "error") "boom")
-  (catch clojure.lang.ExceptionInfo e
-    (if (l/lisp-signal? e)
-      (println "Lisp signaled:" (:symbol (ex-data e)))
-      (throw e))))
+  (catch LispNonLocalExit e
+    (println "Lisp exited:" (.-symbolOrTag e))))
 ```
 
 `apply-async`'s `CompletableFuture` completes exceptionally with the
-same `ex-info` as its completion exception, but `deref` (`.get()`)
-wraps it in a `java.util.concurrent.ExecutionException` — read
-`(.getCause e)` for the `ex-info`, or use `apply` to get the `ex-info`
-directly. See
+same `LispSignal`/`LispThrow`, but `deref` (`.get()`) wraps it in a
+`java.util.concurrent.ExecutionException` — read `(.getCause e)` for
+the typed exception, or use `apply` to get it directly. See
 [How to pass a Lisp function to Java](pass-a-lisp-function-to-java.md)
 for the mirror-image case, a Lisp error raised inside a callback Java
 calls.
