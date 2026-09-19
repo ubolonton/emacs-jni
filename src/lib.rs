@@ -8,9 +8,7 @@ mod lisp_requests;
 mod pending;
 mod protocol;
 mod reentry;
-mod runtime;
 mod shim;
-mod status;
 mod worker;
 
 emacs::plugin_is_GPL_compatible!();
@@ -30,8 +28,9 @@ fn jvm_ping() -> Result<bool> {
     Ok(true)
 }
 
+use crate::jvm::runtime;
+use crate::jvm::runtime::STATUS;
 use crate::protocol::Status;
-use crate::status::STATUS;
 
 emacs::define_errors! {
     jvm_illegal_transition "JVM operation not allowed in the current state"

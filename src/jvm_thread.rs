@@ -8,7 +8,7 @@ use jni::JNIVersion;
 use crate::commands::Cmd;
 use crate::jvm::convert::marshal_error;
 use crate::protocol::Status;
-use crate::status::STATUS;
+use crate::jvm::runtime::STATUS;
 use crate::{channel, worker};
 
 /// Entry point for the JVM worker thread. Runs for the JVM's entire
@@ -19,7 +19,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
         Ok(vm) => {
             // Publish the VM so the Emacs main thread can attach for a
             // synchronous `jvm--call-direct` (see `runtime` and `call_direct`).
-            crate::runtime::set_vm(vm.clone());
+            crate::jvm::runtime::set_vm(vm.clone());
             STATUS.finish(Status::Ready);
             crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
                 status: Status::Ready,
@@ -61,7 +61,7 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 // reasons unrelated to callbacks, and must not stall other
                 // pending commands on this dispatch loop.
                 let vm = vm.clone();
-                let loader = crate::runtime::loader();
+                let loader = crate::jvm::runtime::loader();
                 std::thread::spawn(move || handle_call(&vm, loader, id, target, member, args));
                 false
             }
@@ -301,7 +301,7 @@ fn handle_stop(vm: JavaVM) {
     // defun (before this `Cmd::Stop` was sent), so no main-thread attachment
     // was left to block this `destroy`. `clear` also resets the
     // main-attached flag so a restart re-attaches on the next direct call.
-    crate::runtime::clear();
+    crate::jvm::runtime::clear();
     match result {
         Ok(()) => {
             STATUS.finish(Status::Stopped);
@@ -374,8 +374,9 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     }
 
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
-        let loader =
-            crate::runtime::get_or_create_loader(|| create_shared_classloader(env).map(Arc::new))?;
+        let loader = crate::jvm::runtime::get_or_create_loader(|| {
+            create_shared_classloader(env).map(Arc::new)
+        })?;
         let loader_local = env.new_local_ref(loader.as_obj())?;
         add_jar_url(env, &loader_local, &path)
     });
@@ -397,7 +398,7 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
 
 /// Synchronous main-thread counterpart of `handle_load_jar`: adds PATH to the
 /// shared classloader on *this* thread, sharing the one loader with the async
-/// path through `runtime::get_or_create_loader`. Returns an error string (a
+/// path through `jvm::runtime::get_or_create_loader`. Returns an error string (a
 /// missing path, or a JNI failure) instead of enqueueing an
 /// `Inbound::LoadJarDone`, since the caller (`jvm--load-jar-direct`) returns
 /// or signals directly. See `call_direct` for the main-thread attach model.
@@ -412,8 +413,9 @@ pub(crate) fn load_jar_direct(vm: &JavaVM, path: &str) -> Result<(), String> {
     // never takes the permanent attach -- `addURL` needs no stable thread
     // identity, so there is no reason to touch the main-attachment state.
     let result: jni::errors::Result<()> = vm.attach_current_thread_for_scope(|env| {
-        let loader =
-            crate::runtime::get_or_create_loader(|| create_shared_classloader(env).map(Arc::new))?;
+        let loader = crate::jvm::runtime::get_or_create_loader(|| {
+            create_shared_classloader(env).map(Arc::new)
+        })?;
         let loader_local = env.new_local_ref(loader.as_obj())?;
         add_jar_url(env, &loader_local, path)
     });
@@ -770,7 +772,7 @@ fn handle_call(
 /// direct `Value`).
 pub(crate) fn resolve_and_invoke(
     env: &mut jni::Env,
-    loader: &Option<crate::runtime::SharedLoader>,
+    loader: &Option<crate::jvm::runtime::SharedLoader>,
     target: &crate::protocol::CallTarget,
     member: &str,
     args: &[crate::protocol::BridgeValue],
@@ -891,7 +893,7 @@ pub(crate) enum DirectError {
 /// real `Value` on the same thread's live `Env`.
 pub(crate) fn call_direct(
     vm: &JavaVM,
-    loader: &Option<crate::runtime::SharedLoader>,
+    loader: &Option<crate::jvm::runtime::SharedLoader>,
     target: &crate::protocol::CallTarget,
     member: &str,
     args: &[crate::protocol::BridgeValue],
@@ -912,11 +914,11 @@ pub(crate) fn call_direct(
     // `make-thread` Lisp thread) is never recorded as main, so its scoped
     // attach owns the attachment and detaches on return — transient, no leaked
     // attachment to block a later `destroy`.
-    if crate::runtime::on_main_thread()
-        && !crate::runtime::main_attached()
+    if crate::jvm::runtime::on_main_thread()
+        && !crate::jvm::runtime::main_attached()
         && vm.attach_current_thread(|_env| Ok::<(), jni::errors::Error>(())).is_ok()
     {
-        crate::runtime::set_main_attached(true);
+        crate::jvm::runtime::set_main_attached(true);
     }
 
     // The actual invoke always goes through a *scoped* attach: a no-op on the
