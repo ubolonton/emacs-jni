@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use jni::objects::{JClass, JObject, JValueOwned};
 
-use crate::commands::BridgeValue;
 use crate::handles::JvmObject;
+use crate::protocol::BridgeValue;
 
 /// Converts ARG to a JNI value matching PARAM_TYPE's actual declared type
 /// — see spec "Value marshalling": this is deliberately type-directed,

@@ -1,52 +1,6 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Status {
-    NotStarted = 0,
-    Starting = 1,
-    Ready = 2,
-    Pausing = 3,
-    Paused = 4,
-    Stopping = 5,
-    Stopped = 6,
-    StartFailed = 7,
-    StopFailed = 8,
-    Crashed = 9,
-}
-
-impl Status {
-    fn from_u8(v: u8) -> Status {
-        match v {
-            0 => Status::NotStarted,
-            1 => Status::Starting,
-            2 => Status::Ready,
-            3 => Status::Pausing,
-            4 => Status::Paused,
-            5 => Status::Stopping,
-            6 => Status::Stopped,
-            7 => Status::StartFailed,
-            8 => Status::StopFailed,
-            9 => Status::Crashed,
-            _ => unreachable!("invalid Status discriminant"),
-        }
-    }
-
-    pub fn as_tag(self) -> &'static str {
-        match self {
-            Status::NotStarted => "not-started",
-            Status::Starting => "starting",
-            Status::Ready => "ready",
-            Status::Pausing => "pausing",
-            Status::Paused => "paused",
-            Status::Stopping => "stopping",
-            Status::Stopped => "stopped",
-            Status::StartFailed => "start-failed",
-            Status::StopFailed => "stop-failed",
-            Status::Crashed => "crashed",
-        }
-    }
-}
+use crate::protocol::Status;
 
 pub struct StatusCell(AtomicU8);
 

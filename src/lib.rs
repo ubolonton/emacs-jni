@@ -7,6 +7,7 @@ mod jvm_thread;
 mod lisp_requests;
 mod marshal;
 mod pending;
+mod protocol;
 mod reentry;
 mod runtime;
 mod shim;
@@ -30,7 +31,8 @@ fn jvm_ping() -> Result<bool> {
     Ok(true)
 }
 
-use crate::status::{Status, STATUS};
+use crate::protocol::Status;
+use crate::status::STATUS;
 
 emacs::define_errors! {
     jvm_illegal_transition "JVM operation not allowed in the current state"
@@ -144,12 +146,12 @@ fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64
 /// &'e T`, not for a bare `T` — verified against the vendored emacs-0.21.0
 /// source, `src/types/user_ptr.rs`), so this asks for a reference, not an
 /// owned value.
-fn parse_call_target(target: Value) -> Result<commands::CallTarget> {
+fn parse_call_target(target: Value) -> Result<protocol::CallTarget> {
     if let Ok(class_name) = target.into_rust::<String>() {
-        Ok(commands::CallTarget::ClassName(class_name))
+        Ok(protocol::CallTarget::ClassName(class_name))
     } else {
         let h: &handles::JvmHandle = target.into_rust()?;
-        Ok(commands::CallTarget::Object(h.0.clone()))
+        Ok(protocol::CallTarget::Object(h.0.clone()))
     }
 }
 
@@ -247,7 +249,7 @@ fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
     // two call sites in `elisp/jvm.el`, which always pass literally
     // `t` or `nil`.
     let outcome = if ok.is_not_nil() {
-        commands::LispOutcome::Value(lisp_value_to_arg(value)?)
+        protocol::LispOutcome::Value(lisp_value_to_arg(value)?)
     } else {
         // VALUE is the real `(SYMBOL . DATA)' condition-case caught --
         // classify each half through the same `value_to_outcome' the
@@ -256,7 +258,7 @@ fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
         // actual symbol/data, not a fabricated `error'/stringified message.
         let symbol = value.car()?;
         let data = value.cdr()?;
-        commands::LispOutcome::Signal {
+        protocol::LispOutcome::Signal {
             symbol: Box::new(lisp_requests::value_to_outcome(env, symbol)?),
             data: Box::new(lisp_requests::value_to_outcome(env, data)?),
         }
@@ -270,7 +272,7 @@ fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
 /// runtime type — see `lisp_value_to_arg`'s doc comment for what each
 /// Lisp type maps to, and what happens to a value this bridge doesn't
 /// recognize.
-fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::BridgeValue>> {
+fn lisp_list_to_args(mut list: Value) -> Result<Vec<protocol::BridgeValue>> {
     let mut out = Vec::new();
     while list.is_not_nil() {
         let item: Value = list.car()?;
@@ -282,19 +284,19 @@ fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::BridgeValue>> {
 
 /// Converts a single Lisp value to a `BridgeValue` by runtime type, trying
 /// each marshallable Lisp type in turn.
-fn lisp_value_to_arg(v: Value) -> Result<commands::BridgeValue> {
+fn lisp_value_to_arg(v: Value) -> Result<protocol::BridgeValue> {
     if !v.is_not_nil() {
-        return Ok(commands::BridgeValue::Nil);
+        return Ok(protocol::BridgeValue::Nil);
     }
     if v.env.call("keywordp", (v,))?.is_not_nil() {
         let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
         // `symbol-name` of a keyword includes its leading `:`; strip it so
         // `name` is the bare name the marker carries.
         let name = name.strip_prefix(':').unwrap_or(&name).to_string();
-        return Ok(commands::BridgeValue::Symbol { name, keyword: true });
+        return Ok(protocol::BridgeValue::Symbol { name, keyword: true });
     }
     if let Ok(n) = v.into_rust::<i64>() {
-        return Ok(commands::BridgeValue::Int(n));
+        return Ok(protocol::BridgeValue::Int(n));
     }
     // A Lisp integer (fixnum or bignum) that didn't fit in i64 above is a
     // bignum too large for a 64-bit register — this must be routed
@@ -307,16 +309,16 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::BridgeValue> {
     // already applies on the Java-to-Lisp direction for boxed Long/Integer.
     if v.env.call("integerp", (v,))?.is_not_nil() {
         let digits: String = v.env.call("number-to-string", (v,))?.into_rust()?;
-        return Ok(commands::BridgeValue::BigInt(digits));
+        return Ok(protocol::BridgeValue::BigInt(digits));
     }
     if let Ok(f) = v.into_rust::<f64>() {
-        return Ok(commands::BridgeValue::Float(f));
+        return Ok(protocol::BridgeValue::Float(f));
     }
     if let Ok(s) = v.into_rust::<String>() {
-        return Ok(commands::BridgeValue::Str(s));
+        return Ok(protocol::BridgeValue::Str(s));
     }
     if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
-        return Ok(commands::BridgeValue::Object(h.0.clone()));
+        return Ok(protocol::BridgeValue::Object(h.0.clone()));
     }
     // `t` has no useful into_rust::<T>() scalar conversion (there's no
     // `FromLisp` impl for `bool` — Emacs Lisp has no dedicated boolean
@@ -324,7 +326,7 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::BridgeValue> {
     // interned `t` symbol, matching Lisp's own notion of "is this
     // literally `t`" rather than "is this any non-nil symbol".
     if v == v.env.intern("t")? {
-        return Ok(commands::BridgeValue::True);
+        return Ok(protocol::BridgeValue::True);
     }
     // A symbol is data: it crosses as a marker, not a callback. Checked
     // before `functionp` so a symbol holding a function cell (`car`) is a
@@ -334,7 +336,7 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::BridgeValue> {
     // and callability is opt-in via `require-symbol`.
     if v.env.call("symbolp", (v,))?.is_not_nil() {
         let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
-        return Ok(commands::BridgeValue::Symbol { name, keyword: false });
+        return Ok(protocol::BridgeValue::Symbol { name, keyword: false });
     }
     // A Lisp function (symbol with a function cell, lambda, closure,
     // subr, or byte-compiled object) is registered Lisp-side in
@@ -353,7 +355,7 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::BridgeValue> {
     // crate doesn't expose" pattern already used above for `integerp'.
     if v.env.call("functionp", (v,))?.is_not_nil() {
         let handle: u64 = v.env.call("jvm--register-callback", (v,))?.into_rust()?;
-        return Ok(commands::BridgeValue::Callback(handle));
+        return Ok(protocol::BridgeValue::Callback(handle));
     }
     // Anything else reaching this point (a vector, hash-table, or other
     // unsupported value) is not a value this bridge knows how to marshal.

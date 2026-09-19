@@ -322,7 +322,7 @@ fn get_handle_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::
 fn jobject_array_to_bridge_values(
     env: &mut jni::Env<'_>,
     args: &JObjectArray<'_>,
-) -> jni::errors::Result<Vec<crate::commands::BridgeValue>> {
+) -> jni::errors::Result<Vec<crate::protocol::BridgeValue>> {
     let len = args.len(env)?;
     let mut out = Vec::with_capacity(len);
     for i in 0..len {
@@ -474,10 +474,10 @@ fn service_lisp_request_direct<'local>(
     .ok_or_else(|| crate::marshal::marshal_error("reentrant Lisp call lost its Env scope"))?;
 
     match reply {
-        crate::commands::LispOutcome::Signal { symbol, data } => {
+        crate::protocol::LispOutcome::Signal { symbol, data } => {
             Err(crate::jvm_thread::throw_non_local_exit(env, 0, *symbol, *data))
         }
-        crate::commands::LispOutcome::Throw { tag, value } => {
+        crate::protocol::LispOutcome::Throw { tag, value } => {
             Err(crate::jvm_thread::throw_non_local_exit(env, 1, *tag, *value))
         }
         other => crate::jvm_thread::build_lisp_reply_object(env, other),
@@ -701,14 +701,14 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
 pub(crate) fn object_to_lisp_request_arg<'local>(
     env: &mut jni::Env<'local>,
     elem: JObject<'local>,
-) -> jni::errors::Result<crate::lisp_requests::LispInput> {
-    use crate::lisp_requests::LispInput;
+) -> jni::errors::Result<crate::protocol::LispInput> {
+    use crate::protocol::LispInput;
     // `IsInstanceOf` (what `is_instance_of` calls) reports `true` for a
     // null reference against ANY class per the JNI spec, so null must be
     // checked before the class checks below -- otherwise a null value
     // would be misread as `Obj(0)`.
     if elem.is_null() {
-        return Ok(LispInput::Scalar(crate::commands::BridgeValue::Nil));
+        return Ok(LispInput::Scalar(crate::protocol::BridgeValue::Nil));
     }
     let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
     if env.is_instance_of(&elem, &lisp_object_class)? {
@@ -733,7 +733,7 @@ pub(crate) fn object_to_lisp_request_arg<'local>(
 fn jobject_array_to_lisp_request_args<'local>(
     env: &mut jni::Env<'local>,
     args: &JObjectArray<'local>,
-) -> jni::errors::Result<Vec<crate::lisp_requests::LispInput>> {
+) -> jni::errors::Result<Vec<crate::protocol::LispInput>> {
     let len = args.len(env)?;
     let mut out = Vec::with_capacity(len);
     for i in 0..len {

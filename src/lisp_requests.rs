@@ -30,30 +30,9 @@ use std::sync::Mutex;
 
 use emacs::{Env, GlobalRef, IntoLisp, Result as EmacsResult, Value};
 
-use crate::commands::{Cmd, BridgeValue, LispOutcome};
-use crate::status::Status;
+use crate::commands::Cmd;
+use crate::protocol::{BridgeValue, LispInput, LispOutcome, Status};
 use crate::{channel, worker};
-
-/// One value crossing Clojure → Lisp — an `apply` receiver or argument, or
-/// the operand of `typeOf`/`isNotNil`/`eq` — already classified on the JVM
-/// thread (`shim::object_to_lisp_request_arg`). See spec "Argument
-/// conversion".
-#[derive(Debug)]
-pub enum LispInput {
-    /// A `LispObject`, carried by its `ptr` — bound to a `Value` on the
-    /// main thread, never freed here (see `borrow`).
-    Obj(i64),
-    /// A Clojure symbol or keyword (an `emacs_jni.core.LispSymbol` marker) —
-    /// interned on the main thread. `name` is the bare name; a keyword is
-    /// interned with a leading `:`.
-    Symbol { name: String, keyword: bool },
-    /// A scalar or other-JVM-object argument, already reduced to a
-    /// `BridgeValue` the same way an ordinary `jvm-call` argument would be
-    /// (reuses `marshal::jvm_value_to_lisp_arg`) — `BridgeValue::Callback`
-    /// never appears here (that variant is only ever produced from the
-    /// Lisp-to-Java direction in `lib.rs`'s `lisp_value_to_arg`).
-    Scalar(BridgeValue),
-}
 
 /// A single message from a JVM thread to run one `Env` op on the main
 /// thread. The first seven variants are the original Lisp-access requests:
