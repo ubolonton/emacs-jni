@@ -1,3 +1,8 @@
+//! The reflection call machinery shared by the async worker call path and
+//! the synchronous `jvm--call-direct` reentrant path: resolving and
+//! invoking a method or constructor, and turning the outcome into a Java
+//! value or a thrown `LispSignal`/`LispThrow`.
+
 use std::sync::Arc;
 
 use jni::vm::JavaVM;

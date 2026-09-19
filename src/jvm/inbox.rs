@@ -156,7 +156,7 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
     let vm = match create_jvm(&classpath, &options) {
         Ok(vm) => {
             // Publish the VM so the Emacs main thread can attach for a
-            // synchronous `jvm--call-direct` (see `runtime` and `call_direct`).
+            // synchronous `jvm--call-direct` (see `jvm::runtime` and `call_direct`).
             crate::jvm::runtime::set_vm(vm.clone());
             STATUS.finish(Status::Ready);
             crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {

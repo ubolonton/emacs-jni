@@ -1,3 +1,7 @@
+//! `BridgeValue`/`LispInput` ↔ JVM value conversion: marshalling a call
+//! argument or return value across the JNI boundary in both directions,
+//! type-directed by the actual declared Java parameter or return type.
+
 use std::sync::Arc;
 
 use jni::objects::{JClass, JObject, JObjectArray, JString, JValueOwned};
@@ -76,7 +80,7 @@ pub fn from_bridge<'local>(
             Ok(JValueOwned::Object(local))
         }
         // The handle here already denotes a live entry in Lisp's own
-        // `jvm--lisp-callbacks' table (`lisp_value_to_arg` in `lib.rs`
+        // `jvm--lisp-callbacks' table (`lisp::convert::to_bridge`
         // registered it there before this `BridgeValue` was ever built —
         // this module has no access to that table itself, only the
         // handle number). Wrapping it as a `LispFunction' here is what
@@ -98,7 +102,7 @@ pub fn from_bridge<'local>(
         }
         // A Lisp symbol/keyword crosses into Java as the platform-loader
         // `LispSymbol` marker (identical construction to
-        // `jvm_thread::build_lisp_reply_object`'s `Symbol` arm), so the
+        // `jvm::invoke::build_lisp_reply_object`'s `Symbol` arm), so the
         // Clojure layer's `<-lisp` and any other consumer read it the same
         // way regardless of which direction produced it.
         (BridgeValue::Symbol { name, keyword }, _) => {
@@ -508,7 +512,7 @@ pub(crate) fn jobject_array_to_lisp_request_args<'local>(
 }
 
 /// Renders an `Object[]` of `call`'s actual varargs arguments into a
-/// `Vec<BridgeValue>` — the reverse direction of what `jvm_thread::
+/// `Vec<BridgeValue>` — the reverse direction of what `jvm::invoke::
 /// handle_call` (Task 5) does for its own return values, reused here since
 /// a JVM-initiated call's arguments need the exact same Java-object ->
 /// `BridgeValue` pipeline as any other value crossing from Java to Lisp.

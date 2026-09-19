@@ -12,7 +12,7 @@
 //! `emacs::Env` — that only exists on the Emacs main thread, during a
 //! module call. So a native method calls `submit` to enqueue an `Inbound`
 //! here and wake Emacs up with a raw byte down the channel `init` opens;
-//! `jvm--service-inbound` (`lib.rs`), set as the pipe process's `:filter`,
+//! `jvm--service-inbound` (`lisp::entry`), set as the pipe process's `:filter`,
 //! drains this queue on the main thread, via `service_inbound` below. The
 //! reply-bearing Lisp-access variants
 //! (`Intern`/`Apply`/`TypeOf`/`IsNotNil`/`Eq`/`Prin1`) reply over the
@@ -137,7 +137,7 @@ static WRITER: Mutex<Option<Box<dyn Write + Send>>> = Mutex::new(None);
 
 /// Opens the channel against the given pipe-process Lisp value and stores
 /// the writer globally, replacing any previous one. Called once, from
-/// `jvm--init-channel` (`lib.rs`), before any JVM thread can reach `submit`.
+/// `jvm--init-channel` (`lisp::entry`), before any JVM thread can reach `submit`.
 pub fn init(env: &Env, process: Value) -> EmacsResult<()> {
     let writer = env.open_channel(process)?;
     *WRITER.lock().unwrap() = Some(Box::new(writer));
@@ -283,7 +283,7 @@ fn fallback_signal(message: &str) -> LispOutcome {
 
 /// Drains the inbound queue and runs each message's `Env` op, in the order
 /// `drain` returned them. Registered as `#[defun] jvm--service-inbound`
-/// (`lib.rs`), set as the pipe process's `:filter` (`jvm--ensure-pipe-
+/// (`lisp::entry`), set as the pipe process's `:filter` (`jvm--ensure-pipe-
 /// process`, `elisp/jvm.el`) — Emacs calls it directly on every wakeup
 /// byte.
 ///
@@ -468,7 +468,7 @@ fn run_request_value(env: &Env, request: &Inbound) -> EmacsResult<LispOutcome> {
 /// request originates on the main thread inside a `jvm--call-direct`, so it
 /// must run directly instead of enqueuing (which would deadlock the blocked
 /// main thread). The native then turns this into a Java object or a thrown
-/// `LispNonLocalExit` (`jvm_thread::build_lisp_reply_object` /
+/// `LispNonLocalExit` (`jvm::invoke::build_lisp_reply_object` /
 /// `throw_non_local_exit`).
 pub fn compute_reply(env: &Env, request: &Inbound) -> LispOutcome {
     match run_request_value(env, request) {

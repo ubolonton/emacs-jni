@@ -90,8 +90,8 @@ pub fn to_bridge(v: Value) -> EmacsResult<BridgeValue> {
 /// Converts a marshalled `BridgeValue` to a real Lisp `Value` on the main thread.
 ///
 /// Shared by the Lisp-access apply path (`from_input`'s `Scalar` arm), the
-/// synchronous `jvm--call-direct` return path (`lib.rs`, which turns the
-/// `BridgeValue` `jvm_thread::call_direct` produced into the value the defun
+/// synchronous `jvm--call-direct` return path (`lisp::entry`, which turns the
+/// `BridgeValue` `jvm::invoke::call_direct` produced into the value the defun
 /// returns), and the async `CallDone`/`Invoke` inbound arms
 /// (`lisp::inbox::service_inbound`'s `handle_message`) — every JVM-to-Lisp
 /// value crossing goes through this one converter now, on the main thread,
@@ -155,7 +155,7 @@ pub(crate) fn from_input<'e>(env: &'e Env, arg: &LispInput) -> EmacsResult<Value
 /// result is usable directly in a Clojure conditional. The scalar set and
 /// its Java shapes mirror the `jvm-call` return-marshalling table.
 ///
-/// `pub(crate)` because `lib.rs`'s `jvm--invoke-reply` reuses it too:
+/// `pub(crate)` because `lisp::entry`'s `jvm--invoke-reply` reuses it too:
 /// `jvm--resolve-invoke` (`elisp/jvm.el`) hands it the real `(SYMBOL . DATA)`
 /// a failed callback's `condition-case` caught, and each half needs exactly
 /// this same "classify a raw Lisp value" treatment before it can go into a

@@ -1,3 +1,8 @@
+//! The payload types that cross the Lisp/JVM boundary — `CallTarget`,
+//! `BridgeValue`, `LispOutcome`, `LispInput`, and `Status` — shared by both
+//! the `lisp::` and `jvm::` sides instead of each side inventing its own
+//! shape for the same value.
+
 use crate::jvm::convert::JvmObject;
 
 #[derive(Debug, Clone)]
@@ -41,9 +46,9 @@ pub enum BridgeValue {
 }
 
 /// The value a `Cmd::LispReply` or `Cmd::InvokeReply` completes a pending
-/// future with — built by `lisp_requests::service_inbound`/`jvm--invoke-
+/// future with — built by `lisp::inbox::service_inbound`/`jvm--invoke-
 /// reply` (which run the actual `Env` op, or marshal `jvm--resolve-invoke`'s
-/// result) and consumed by `jvm_thread::handle_lisp_reply`/
+/// result) and consumed by `jvm::inbox::handle_lisp_reply`/
 /// `handle_invoke_reply` (which turn it into a real Java value, or a thrown
 /// `LispSignal`/`LispThrow`, on the worker's own JNI attachment) via the
 /// shared `complete_future_with_reply`. A single enum since a reply's
@@ -85,7 +90,7 @@ pub enum LispInput {
     /// `BridgeValue` the same way an ordinary `jvm-call` argument would be
     /// (reuses `jvm::convert::to_bridge`) — `BridgeValue::Callback`
     /// never appears here (that variant is only ever produced from the
-    /// Lisp-to-Java direction in `lib.rs`'s `lisp_value_to_arg`).
+    /// Lisp-to-Java direction in `lisp::convert::to_bridge`).
     Scalar(BridgeValue),
 }
 

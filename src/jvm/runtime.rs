@@ -1,5 +1,5 @@
 //! Process-global handles to the running JVM, shared between the worker
-//! thread that creates them (`jvm_thread::run`) and the Emacs main thread
+//! thread that creates them (`jvm::inbox::run`) and the Emacs main thread
 //! that needs them for the synchronous `jvm--call-direct` path (see plan
 //! `docs/superpowers/plans/2026-09-13-sync-lisp-clojure-plan.md`).
 //!
