@@ -6,7 +6,7 @@ use jni::vm::{InitArgsBuilder, JavaVM};
 use jni::JNIVersion;
 
 use crate::commands::Cmd;
-use crate::marshal::marshal_error;
+use crate::jvm::convert::marshal_error;
 use crate::protocol::Status;
 use crate::status::STATUS;
 use crate::{channel, worker};
@@ -192,7 +192,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     // caller actually did this at runtime before Task 6 (only
     // `shim.rs`'s own unit test, against its own throwaway JVM) — Task 6
     // is the first thing that references a shim class outside that test
-    // (`marshal::lisp_arg_to_jvalue`'s `BridgeValue::Callback` arm calls
+    // (`jvm::convert::from_bridge`'s `BridgeValue::Callback` arm calls
     // `find_class(emacs_jni/core/LispFunction)` on every `jvm-call` argument
     // that turns out to be a Lisp function), so without this, that
     // `find_class` would throw `ClassNotFoundException` against a real
@@ -600,8 +600,8 @@ pub(crate) fn build_lisp_reply_object<'local>(
             // then box any primitive — identical to how handle_invoke_reply
             // completes a callback's return value.
             let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
-            let jvalue = crate::marshal::lisp_arg_to_jvalue(env, &bridge, &object_class)?;
-            crate::marshal::box_if_primitive(env, jvalue)
+            let jvalue = crate::jvm::convert::from_bridge(env, &bridge, &object_class)?;
+            crate::jvm::convert::box_if_primitive(env, jvalue)
         }
         crate::protocol::LispOutcome::Bool(b) => {
             let class = env.find_class(jni::jni_str!("java/lang/Boolean"))?;
@@ -1065,7 +1065,7 @@ fn is_overload_arg_mismatch(caught: &jni::errors::Error) -> bool {
 /// Walks THROWABLE's `getCause()` chain for an `emacs_jni.core.LispNonLocalExit`
 /// and, if found, classifies its `kind`/`symbolOrTag`/`dataOrValue` back into a
 /// `DirectError::NonLocalExit`. The two fields run through the same
-/// `shim::object_to_lisp_request_arg` classifier the inbound direction built
+/// `jvm::convert::to_input` classifier the inbound direction built
 /// them with (`build_lisp_reply_object`), so the round trip is symmetric.
 /// `None` if no `LispNonLocalExit` is in the chain (a genuine Java/Clojure
 /// exception).
@@ -1089,8 +1089,8 @@ fn extract_non_local_exit<'local>(
             let b_obj = env
                 .get_field(&current, jni::jni_str!("dataOrValue"), jni::jni_sig!(java.lang.Object))?
                 .l()?;
-            let a = crate::shim::object_to_lisp_request_arg(env, a_obj)?;
-            let b = crate::shim::object_to_lisp_request_arg(env, b_obj)?;
+            let a = crate::jvm::convert::to_input(env, a_obj)?;
+            let b = crate::jvm::convert::to_input(env, b_obj)?;
             return Ok(Some(DirectError::NonLocalExit { kind, a, b }));
         }
         current = current.get_cause(env)?;
@@ -1205,10 +1205,7 @@ fn invoke_method(
             },
             Err(e) => return Err(e),
         };
-        return crate::marshal::jvm_value_to_lisp_arg(
-            env,
-            jni::objects::JValueOwned::Object(result),
-        );
+        return crate::jvm::convert::to_bridge(env, jni::objects::JValueOwned::Object(result));
     }
 
     Err(last_arg_mismatch.map_or_else(
@@ -1286,10 +1283,7 @@ fn invoke_constructor(
             },
             Err(e) => return Err(e),
         };
-        return crate::marshal::jvm_value_to_lisp_arg(
-            env,
-            jni::objects::JValueOwned::Object(instance),
-        );
+        return crate::jvm::convert::to_bridge(env, jni::objects::JValueOwned::Object(instance));
     }
 
     Err(last_arg_mismatch.map_or_else(
@@ -1299,7 +1293,7 @@ fn invoke_constructor(
 }
 
 /// Shared by `invoke_method`/`invoke_constructor`: marshals ARGS against
-/// PARAM_TYPES's declared types (in that order — `lisp_arg_to_jvalue` is
+/// PARAM_TYPES's declared types (in that order — `from_bridge` is
 /// type-directed) and boxes any primitive result, since `Method.invoke`/
 /// `Constructor.newInstance` both take a plain `Object[]`.
 fn build_invoke_args<'local>(
@@ -1313,8 +1307,8 @@ fn build_invoke_args<'local>(
     for (i, arg) in args.iter().enumerate() {
         let param_type_obj = param_types.get_element(env, i)?;
         let param_type = env.cast_local::<jni::objects::JClass>(param_type_obj)?;
-        let jvalue = crate::marshal::lisp_arg_to_jvalue(env, arg, &param_type)?;
-        let boxed = crate::marshal::box_if_primitive(env, jvalue)?;
+        let jvalue = crate::jvm::convert::from_bridge(env, arg, &param_type)?;
+        let boxed = crate::jvm::convert::box_if_primitive(env, jvalue)?;
         invoke_args.set_element(env, i, boxed)?;
     }
     Ok(invoke_args)

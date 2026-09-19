@@ -2,10 +2,9 @@ use emacs::{defun, Env, Result, Value};
 
 mod channel;
 mod commands;
-mod handles;
+mod jvm;
 mod jvm_thread;
 mod lisp_requests;
-mod marshal;
 mod pending;
 mod protocol;
 mod reentry;
@@ -150,7 +149,7 @@ fn parse_call_target(target: Value) -> Result<protocol::CallTarget> {
     if let Ok(class_name) = target.into_rust::<String>() {
         Ok(protocol::CallTarget::ClassName(class_name))
     } else {
-        let h: &handles::JvmHandle = target.into_rust()?;
+        let h: &jvm::convert::JvmHandle = target.into_rust()?;
         Ok(protocol::CallTarget::Object(h.0.clone()))
     }
 }
@@ -305,7 +304,7 @@ fn lisp_value_to_arg(v: Value) -> Result<protocol::BridgeValue> {
     // coerces any Lisp number, including bignums, so skipping this check
     // would silently accept a bignum as a lossy `BridgeValue::Float` instead of
     // erroring or round-tripping exactly — the same "don't silently
-    // misrepresent" concern `marshal::jvm_value_to_lisp_arg` (Task 4)
+    // misrepresent" concern `jvm::convert::to_bridge` (Task 4)
     // already applies on the Java-to-Lisp direction for boxed Long/Integer.
     if v.env.call("integerp", (v,))?.is_not_nil() {
         let digits: String = v.env.call("number-to-string", (v,))?.into_rust()?;
@@ -317,7 +316,7 @@ fn lisp_value_to_arg(v: Value) -> Result<protocol::BridgeValue> {
     if let Ok(s) = v.into_rust::<String>() {
         return Ok(protocol::BridgeValue::Str(s));
     }
-    if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
+    if let Ok(h) = v.into_rust::<&jvm::convert::JvmHandle>() {
         return Ok(protocol::BridgeValue::Object(h.0.clone()));
     }
     // `t` has no useful into_rust::<T>() scalar conversion (there's no
@@ -344,7 +343,7 @@ fn lisp_value_to_arg(v: Value) -> Result<protocol::BridgeValue> {
     // holds a reference to the function itself, only its handle. See
     // spec "Identity and lifetime": Lisp owns that table, since Rust has
     // no stable way to hold onto an arbitrary Lisp function value across
-    // calls. `marshal::lisp_arg_to_jvalue` later turns this handle into
+    // calls. `jvm::convert::from_bridge` later turns this handle into
     // a real `LispFunction' proxy object when the argument actually
     // crosses into Java.
     //

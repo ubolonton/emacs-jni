@@ -1,4 +1,4 @@
-use crate::handles::JvmObject;
+use crate::jvm::convert::JvmObject;
 
 #[derive(Debug, Clone)]
 pub enum CallTarget {
@@ -70,7 +70,7 @@ pub enum LispOutcome {
 
 /// One value crossing Clojure → Lisp — an `apply` receiver or argument, or
 /// the operand of `typeOf`/`isNotNil`/`eq` — already classified on the JVM
-/// thread (`shim::object_to_lisp_request_arg`). See spec "Argument
+/// thread (`jvm::convert::to_input`). See spec "Argument
 /// conversion".
 #[derive(Debug)]
 pub enum LispInput {
@@ -83,7 +83,7 @@ pub enum LispInput {
     Symbol { name: String, keyword: bool },
     /// A scalar or other-JVM-object argument, already reduced to a
     /// `BridgeValue` the same way an ordinary `jvm-call` argument would be
-    /// (reuses `marshal::jvm_value_to_lisp_arg`) — `BridgeValue::Callback`
+    /// (reuses `jvm::convert::to_bridge`) — `BridgeValue::Callback`
     /// never appears here (that variant is only ever produced from the
     /// Lisp-to-Java direction in `lib.rs`'s `lisp_value_to_arg`).
     Scalar(BridgeValue),

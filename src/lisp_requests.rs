@@ -198,7 +198,7 @@ pub fn bridge_value_to_value<'e>(env: &'e Env, arg: &BridgeValue) -> EmacsResult
         // Build the `JvmHandle` `user-ptr` directly from the shared
         // reference — no wire, no table, no `jvm--wrap-handle` round trip.
         BridgeValue::Object(object) => {
-            Box::new(crate::handles::JvmHandle(object.clone())).into_lisp(env)
+            Box::new(crate::jvm::convert::JvmHandle(object.clone())).into_lisp(env)
         }
         // Intern on the main thread, mirroring the `Intern` request
         // (`arg_to_value`): a keyword takes its leading `:`, a plain symbol

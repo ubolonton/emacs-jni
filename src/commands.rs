@@ -1,4 +1,4 @@
-use crate::handles::JvmObject;
+use crate::jvm::convert::JvmObject;
 use crate::protocol::{BridgeValue, CallTarget, LispOutcome};
 
 #[derive(Debug)]
@@ -31,7 +31,7 @@ pub enum Cmd {
         outcome: LispOutcome,
     },
     /// A Lisp `user-ptr` wrapping a JVM object was GC'd; drop its reference
-    /// on the attached worker thread (see `handles::JvmHandle::Drop`).
+    /// on the attached worker thread (see `jvm::convert::JvmHandle::Drop`).
     ReleaseRef {
         object: JvmObject,
     },
