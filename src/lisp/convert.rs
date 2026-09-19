@@ -84,7 +84,7 @@ pub fn to_bridge(v: Value) -> EmacsResult<BridgeValue> {
     // real caller bugs (e.g. accidentally passing a vector where a number
     // was intended would silently become Java `true`) -- signal a clear
     // error instead.
-    v.env.signal(crate::jvm_invalid_argument, (v,))
+    v.env.signal(crate::lisp::entry::jvm_invalid_argument, (v,))
 }
 
 /// Converts a marshalled `BridgeValue` to a real Lisp `Value` on the main thread.
