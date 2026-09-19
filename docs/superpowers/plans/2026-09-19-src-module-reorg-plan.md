@@ -18,6 +18,8 @@
 - AVOID `panic!`/`unreachable!`/`.unwrap()`/`unsafe`/clippy `allow` — none of the moved code should need new instances of these; if `cargo clippy` flags one that wasn't there before, that's a sign something was mis-moved, not something to suppress.
 - No test file (`test/*.el`, `src/**/#[cfg(test)]` modules) changes except updating a `use`/module path inside an existing `#[cfg(test)] mod tests` block that moves along with its parent file.
 - Commit messages: conventional commits, type `refactor`, scope `rust` (e.g. `refactor(rust): Move BridgeValue/CallTarget/LispOutcome into protocol.rs`). One commit per task.
+- The working tree has pre-existing untracked files unrelated to this plan (editor/tooling directories, a scratch file). Stage with `git add src/` (as every task below does), never `git add -A` — check `git status --short` before committing and confirm the only staged paths are under `src/`.
+- **Line numbers in this plan were measured against the pristine pre-reorg tree and go stale the moment an earlier task edits the same file.** (Concretely: Task 1 removes `LispInput` from `lisp_requests.rs`, shifting everything after it before Tasks 7 and 9 run; Task 7 removes `lisp_value_to_arg` from `lib.rs`, shifting everything after it before Task 10 runs.) Before cutting anything, `grep -n 'fn <name>\|enum <name>\|struct <name>'` the target file and use the line range you find, not the one printed here — treat this plan's numbers as "roughly here," not ground truth.
 - **The fix-up procedure, used in every task below:** after moving/renaming the named items, run `cargo build`. It will report every remaining reference to the old path — update each to the new path per that task's rename table, and re-run until it succeeds with zero errors and zero new warnings. Do not hand-search for stragglers; the compiler enumerates them exhaustively. A task is not done until `cargo build` is clean.
 - Known trap: several old files are emptied across *multiple* tasks (e.g. `lisp_requests.rs` across Tasks 1, 7, 9). Only touch the items a given task's mapping row assigns to it — leave every other reference in that file pointing at wherever its target *currently* lives (old path or new), even if that's not its final home yet. The task that moves that target is the one that updates references to it.
 
@@ -86,7 +88,7 @@ Known call sites (from `grep -rn 'commands::\|status::Status'`): `src/lisp_reque
 Run: `cargo test --lib` (expect 22 passed, same as baseline) and `cargo clippy --all-targets && cargo fmt --check`.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Extract protocol.rs for boundary-crossing payload types"
 ```
 
@@ -133,7 +135,7 @@ Known call sites for the old names (from `grep -rn 'marshal::\|handles::'`): `sr
 Run: `cargo test --lib` and `cargo clippy --all-targets && cargo fmt --check`.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Merge marshal.rs and handles.rs into jvm/convert.rs"
 ```
 
@@ -161,7 +163,7 @@ Known call sites (from `grep -rn 'runtime::\|status::STATUS'`): `src/jvm_thread.
 Run: `cargo test --lib` and `cargo clippy --all-targets && cargo fmt --check`.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Merge runtime.rs and status.rs into jvm/runtime.rs"
 ```
 
@@ -204,7 +206,7 @@ Known call sites for `worker::`, `pending::`, `commands::Cmd` (from the earlier 
 Run: `cargo test --lib` and `cargo clippy --all-targets && cargo fmt --check`.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Merge worker.rs, pending.rs, commands::Cmd, and the worker loop into jvm/inbox.rs"
 ```
 
@@ -239,7 +241,7 @@ Known call sites for `jvm_thread::` (from the earlier grep, excluding ones alrea
 Run: `cargo test --lib` and `cargo clippy --all-targets && cargo fmt --check`.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Move jvm_thread.rs's reflection machinery into jvm/invoke.rs"
 ```
 
@@ -275,7 +277,7 @@ EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh
 Expected: 16 test files run, 83 tests, 0 unexpected — the verified pre-reorg baseline (confirmed during this plan's authoring: `EMACS_JNI_CLOJURE_JARS_DIR=.../target/clojure-jars EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh`, no arguments, ran all 16 files). This is the first ERT run of the plan (end of the whole `jvm/` side) — cheaper to batch here than after every single Rust-only task.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Move shim.rs into jvm/entry.rs, complete the jvm/ side"
 ```
 
@@ -309,7 +311,7 @@ Known call sites (from the earlier grep of `lisp_value_to_arg`/`bridge_value_to_
 Run: `cargo test --lib` and `cargo clippy --all-targets && cargo fmt --check`.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Extract lisp/convert.rs from lib.rs and lisp_requests.rs"
 ```
 
@@ -337,7 +339,7 @@ Known call sites for `reentry::` (from the earlier grep): `src/lib.rs` (`reentry
 Run: `cargo test --lib` and `cargo clippy --all-targets && cargo fmt --check`.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Move reentry.rs into lisp/runtime.rs"
 ```
 
@@ -383,7 +385,7 @@ Known call sites (from the earlier greps of `lisp_requests::`/`channel::`): `src
 Run: `cargo test --lib` and `cargo clippy --all-targets && cargo fmt --check`.
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Merge lisp_requests.rs and channel.rs into lisp/inbox.rs, fuse enqueue+poke into submit"
 ```
 
@@ -435,7 +437,7 @@ Expected: `cargo test --lib` 22 passed (same as the pre-reorg baseline, confirme
 - [ ] **Step 6: Commit**
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Move lib.rs's defuns into lisp/entry.rs, shrink lib.rs to a manifest"
 ```
 
@@ -492,7 +494,7 @@ EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh
 - [ ] **Step 4: Commit if Step 2 required any fixes**
 
 ```bash
-git add -A
+git add src/
 git commit -m "refactor(rust): Clean up remaining old-module references"
 ```
 
