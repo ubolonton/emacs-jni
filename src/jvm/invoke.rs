@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use jni::vm::JavaVM;
 
-use crate::channel;
 use crate::jvm::convert::marshal_error;
 
 /// Builds the actual Java value a successful `LispOutcome` becomes —
@@ -11,7 +10,7 @@ use crate::jvm::convert::marshal_error;
 ///
 /// `pub(crate)` because the reentrant direct path (`jvm::entry`) builds the same
 /// Java object on its own thread, from the `LispOutcome`
-/// `lisp_requests::compute_reply` returns, instead of over the channel.
+/// `lisp::inbox::compute_reply` returns, instead of over the channel.
 pub(crate) fn build_lisp_reply_object<'local>(
     env: &mut jni::Env<'local>,
     value: crate::protocol::LispOutcome,
@@ -163,7 +162,7 @@ pub(crate) fn handle_call(
 
     match result {
         Ok(value) => {
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::CallDone {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::CallDone {
                 id,
                 ok: true,
                 result: value,
@@ -171,7 +170,7 @@ pub(crate) fn handle_call(
             });
         }
         Err(e) => {
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::CallDone {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::CallDone {
                 id,
                 ok: false,
                 result: crate::protocol::BridgeValue::Nil,
@@ -179,7 +178,6 @@ pub(crate) fn handle_call(
             });
         }
     }
-    channel::poke();
 }
 
 /// Resolves TARGET.MEMBER against the shared classloader and invokes it with

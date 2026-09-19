@@ -10,11 +10,11 @@
 //!
 //! A JVM thread (a `Lisp.*` native method, `src/jvm/entry.rs`) never has an
 //! `emacs::Env` — that only exists on the Emacs main thread, during a
-//! module call. So a native method enqueues an `Inbound` here and wakes
-//! Emacs up with a raw byte (`channel::poke`); `jvm--service-inbound`
-//! (`lib.rs`), set as the pipe process's `:filter`, drains this queue on
-//! the main thread, via `service_inbound` below. The reply-bearing
-//! Lisp-access variants
+//! module call. So a native method calls `submit` to enqueue an `Inbound`
+//! here and wake Emacs up with a raw byte down the channel `init` opens;
+//! `jvm--service-inbound` (`lib.rs`), set as the pipe process's `:filter`,
+//! drains this queue on the main thread, via `service_inbound` below. The
+//! reply-bearing Lisp-access variants
 //! (`Intern`/`Apply`/`TypeOf`/`IsNotNil`/`Eq`/`Prin1`) reply over the
 //! worker's `Cmd::LispReply`; the other variants instead call an Elisp
 //! helper directly (`jvm--resolve-call`, `jvm--resolve-invoke`,
@@ -26,6 +26,7 @@
 //! `FreeRef`, reclaims and frees it exactly once.
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::sync::Mutex;
 
 use emacs::{Env, GlobalRef, Result as EmacsResult, Value};
@@ -33,7 +34,6 @@ use emacs::{Env, GlobalRef, Result as EmacsResult, Value};
 use crate::jvm::inbox::{self, Cmd};
 use crate::lisp::convert::{from_bridge, from_input, to_outcome};
 use crate::protocol::{BridgeValue, LispInput, LispOutcome, Status};
-use crate::channel;
 
 /// A single message from a JVM thread to run one `Env` op on the main
 /// thread. The first seven variants are the original Lisp-access requests:
@@ -115,10 +115,10 @@ pub enum Inbound {
 
 static QUEUE: Mutex<VecDeque<Inbound>> = Mutex::new(VecDeque::new());
 
-/// Adds REQ to the tail of the queue. Called from a JVM thread (inside a
-/// `Lisp.*`/`LispRefReleaseNotifier` native), before waking the main
-/// thread with `channel::poke`.
-pub fn enqueue(req: Inbound) {
+/// Adds REQ to the tail of the queue. Private -- every caller also needs the
+/// main thread woken, so real callers use `submit` (below) instead of this
+/// directly; see `submit`'s own doc comment for why the two are fused.
+fn enqueue(req: Inbound) {
     QUEUE.lock().unwrap().push_back(req);
 }
 
@@ -131,6 +131,39 @@ pub fn enqueue(req: Inbound) {
 /// included in the same batch).
 fn drain() -> Vec<Inbound> {
     QUEUE.lock().unwrap().drain(..).collect()
+}
+
+static WRITER: Mutex<Option<Box<dyn Write + Send>>> = Mutex::new(None);
+
+/// Opens the channel against the given pipe-process Lisp value and stores
+/// the writer globally, replacing any previous one. Called once, from
+/// `jvm--init-channel` (`lib.rs`), before any JVM thread can reach `submit`.
+pub fn init(env: &Env, process: Value) -> EmacsResult<()> {
+    let writer = env.open_channel(process)?;
+    *WRITER.lock().unwrap() = Some(Box::new(writer));
+    Ok(())
+}
+
+/// Wakes the Emacs main thread to drain the inbound queue, with no payload.
+/// The process filter (`jvm--service-inbound`) ignores the byte and drains
+/// the whole queue, so coalesced wakeups are harmless. Silently drops the
+/// wakeup if the channel hasn't been initialized or the write fails — a JVM
+/// thread has no way to recover from a broken channel; the Elisp-side
+/// `-await` wrappers' timeouts are what catch a wakeup that never arrives.
+/// Private -- always called through `submit`, never on its own.
+fn poke() {
+    if let Some(writer) = WRITER.lock().unwrap().as_mut() {
+        let _ = writer.write_all(b"\x01");
+    }
+}
+
+/// Adds REQ to the queue and wakes the main thread to drain it — the two
+/// were always meant to be called together (a message enqueued without a
+/// poke sits undrained until the next unrelated wakeup); fusing them removes
+/// the possibility of forgetting the second call.
+pub fn submit(req: Inbound) {
+    enqueue(req);
+    poke();
 }
 
 /// Boxes VALUE's `GlobalRef`, handing ownership to the eventual Java
@@ -287,11 +320,10 @@ pub fn service_inbound(env: &Env) -> EmacsResult<()> {
                 // and spec "Object model".
                 let gref = unsafe { Box::from_raw(*ptr as *mut GlobalRef) };
                 if let Err(e) = gref.free(env) {
-                    enqueue(Inbound::Log {
+                    submit(Inbound::Log {
                         level: "error".to_string(),
                         text: format!("jvm--service-inbound: failed to free a LispObject ref: {e}"),
                     });
-                    channel::poke();
                 }
             }
             // Every reply-bearing request runs the same `Env` op as the
@@ -316,11 +348,10 @@ pub fn service_inbound(env: &Env) -> EmacsResult<()> {
             | Inbound::Status { .. }
             | Inbound::LoadJarDone { .. } => {
                 if let Err(e) = handle_message(env, &req) {
-                    enqueue(Inbound::Log {
+                    submit(Inbound::Log {
                         level: "error".to_string(),
                         text: format!("jvm--service-inbound: failed to handle {req:?}: {e}"),
                     });
-                    channel::poke();
                 }
             }
         }

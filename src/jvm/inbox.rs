@@ -21,7 +21,6 @@ use jni::refs::Global;
 use jni::vm::{InitArgsBuilder, JavaVM};
 use jni::JNIVersion;
 
-use crate::channel;
 use crate::jvm::convert::JvmObject;
 use crate::jvm::runtime::STATUS;
 use crate::protocol::{BridgeValue, CallTarget, LispOutcome, Status};
@@ -62,7 +61,7 @@ pub(crate) enum Cmd {
     },
     /// Completes a pending Lisp-access native's reply future (`intern`,
     /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by
-    /// `jvm--service-inbound` (`lisp_requests::service_inbound`) after
+    /// `jvm--service-inbound` (`lisp::inbox::service_inbound`) after
     /// running the corresponding `Env` op on the main thread. See
     /// `handle_lisp_reply`.
     LispReply {
@@ -160,20 +159,18 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
             // synchronous `jvm--call-direct` (see `runtime` and `call_direct`).
             crate::jvm::runtime::set_vm(vm.clone());
             STATUS.finish(Status::Ready);
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                 status: Status::Ready,
                 detail: None,
             });
-            channel::poke();
             vm
         }
         Err(e) => {
             STATUS.finish(Status::StartFailed);
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                 status: Status::StartFailed,
                 detail: Some(e),
             });
-            channel::poke();
             clear_sender();
             return;
         }
@@ -249,11 +246,10 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
             Err(payload) => {
                 let message = panic_message(&payload);
                 STATUS.finish(Status::Crashed);
-                crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                     status: Status::Crashed,
                     detail: Some(message),
                 });
-                channel::poke();
                 clear_sender();
                 return;
             }
@@ -387,11 +383,10 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
         Ok(()) => {}
         Err(e) if is_first_attempt => return Err(e.to_string()),
         Err(e) => {
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
                 level: "error".to_string(),
                 text: format!("failed to define emacs_jni.core shim classes: {e}"),
             });
-            channel::poke();
         }
     }
 
@@ -412,11 +407,10 @@ fn handle_pause(vm: &JavaVM) {
     match vm.detach_current_thread() {
         Ok(()) => {
             STATUS.finish(Status::Paused);
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                 status: Status::Paused,
                 detail: None,
             });
-            channel::poke();
         }
         Err(e) => {
             // Detach failing is unexpected; stay in `pausing` rather than
@@ -424,11 +418,10 @@ fn handle_pause(vm: &JavaVM) {
             // line rather than a status (there's no `pause-failed` state
             // in the spec's state machine, so pausing simply never
             // completes — the caller's `-sync` wrapper times out).
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
                 level: "error".to_string(),
                 text: format!("jvm-pause: detach_current_thread failed: {e}"),
             });
-            channel::poke();
         }
     }
 }
@@ -447,19 +440,17 @@ fn handle_stop(vm: JavaVM) {
     match result {
         Ok(()) => {
             STATUS.finish(Status::Stopped);
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                 status: Status::Stopped,
                 detail: None,
             });
-            channel::poke();
         }
         Err(e) => {
             STATUS.finish(Status::StopFailed);
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                 status: Status::StopFailed,
                 detail: Some(e.to_string()),
             });
-            channel::poke();
         }
     }
     clear_sender();
@@ -473,19 +464,17 @@ fn handle_resume(vm: &JavaVM) {
     match result {
         Ok(()) => {
             STATUS.finish(Status::Ready);
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                 status: Status::Ready,
                 detail: None,
             });
-            channel::poke();
         }
         Err(e) => {
             STATUS.finish(Status::StartFailed);
-            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+            crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                 status: Status::StartFailed,
                 detail: Some(e.to_string()),
             });
-            channel::poke();
         }
     }
 }
@@ -506,12 +495,11 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     // so this primitive doubles as "add a classpath directory", used by
     // `jvm-clj-start` to add `clojure-src/` alongside real jars.
     if !std::path::Path::new(&path).exists() {
-        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
+        crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::LoadJarDone {
             id,
             ok: false,
             err: Some(format!("jar/classpath entry not found: {path}")),
         });
-        channel::poke();
         return;
     }
 
@@ -524,18 +512,17 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     });
 
     match result {
-        Ok(()) => crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
+        Ok(()) => crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::LoadJarDone {
             id,
             ok: true,
             err: None,
         }),
-        Err(e) => crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
+        Err(e) => crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::LoadJarDone {
             id,
             ok: false,
             err: Some(e.to_string()),
         }),
     }
-    channel::poke();
 }
 
 /// Synchronous main-thread counterpart of `handle_load_jar`: adds PATH to the
@@ -672,11 +659,10 @@ fn add_jar_url(
 /// futures exactly the same way.
 fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutcome) {
     let Some(future) = take(id) else {
-        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+        crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
             level: "error".to_string(),
             text: format!("invoke-reply for unknown id {id}"),
         });
-        channel::poke();
         return;
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
@@ -689,11 +675,10 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutco
         // this through -- the Java side just sees its future hang until
         // its own wait times out. Logging here at least makes the failure
         // visible in `*jvm-log*` rather than disappearing silently.
-        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+        crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
             level: "error".to_string(),
             text: format!("invoke-reply for id {id}: failed to complete the pending future: {e}"),
         });
-        channel::poke();
     }
 }
 
@@ -707,11 +692,10 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutco
 /// arbitrary user method.
 fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::protocol::LispOutcome) {
     let Some(future) = take(id) else {
-        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+        crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
             level: "error".to_string(),
             text: format!("lisp-reply for unknown id {id}"),
         });
-        channel::poke();
         return;
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
@@ -719,11 +703,10 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::protocol::LispOutcome) 
         crate::jvm::invoke::complete_future_with_reply(env, &future_local, value)
     });
     if let Err(e) = result {
-        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+        crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
             level: "error".to_string(),
             text: format!("lisp-reply for id {id}: failed to complete the pending future: {e}"),
         });
-        channel::poke();
     }
 }
 

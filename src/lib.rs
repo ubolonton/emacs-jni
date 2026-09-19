@@ -1,9 +1,7 @@
 use emacs::{defun, Env, Result, Value};
 
-mod channel;
 mod jvm;
 mod lisp;
-mod lisp_requests;
 mod protocol;
 
 emacs::plugin_is_GPL_compatible!();
@@ -36,7 +34,7 @@ emacs::define_errors! {
 
 #[defun(mod_in_name = false, name = "jvm--init-channel")]
 fn jvm_init_channel(env: &Env, process: Value) -> Result<()> {
-    channel::init(env, process)
+    lisp::inbox::init(env, process)
 }
 
 #[defun(mod_in_name = false, name = "jvm--start")]
@@ -205,18 +203,18 @@ fn jvm_call_direct<'e>(
     }
 }
 
-/// Drains the inbound queue (`lisp_requests`) and runs each message's `Env`
+/// Drains the inbound queue (`lisp::inbox`) and runs each message's `Env`
 /// op on this (the main) thread — the module-primitive half of both the
 /// built-in-Lisp-access design (see design spec, "Request/reply flow") and
 /// every other JVM→Emacs message (`call-done`/`load-jar-done`/`invoke`/
 /// `release`/`status`/`log`). Set as the pipe process's `:filter`
 /// (`jvm--ensure-pipe-process`, `elisp/jvm.el`), so Emacs calls it directly
 /// as `(process output-string)`; both args are ignored — the raw wakeup
-/// byte (`channel::poke`) carries no payload, since the actual message
-/// rides the Rust-side queue, not the wire.
+/// byte (`lisp::inbox::submit`'s poke) carries no payload, since the actual
+/// message rides the Rust-side queue, not the wire.
 #[defun(mod_in_name = false, name = "jvm--service-inbound")]
 fn jvm_service_inbound(env: &Env, _process: Value, _data: Value) -> Result<()> {
-    lisp_requests::service_inbound(env)
+    lisp::inbox::service_inbound(env)
 }
 
 /// Replies to a pending JVM-initiated `invoke` request. VALUE is either the

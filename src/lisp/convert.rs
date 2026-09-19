@@ -93,7 +93,7 @@ pub fn to_bridge(v: Value) -> EmacsResult<BridgeValue> {
 /// synchronous `jvm--call-direct` return path (`lib.rs`, which turns the
 /// `BridgeValue` `jvm_thread::call_direct` produced into the value the defun
 /// returns), and the async `CallDone`/`Invoke` inbound arms
-/// (`lisp_requests::service_inbound`'s `handle_message`) — every JVM-to-Lisp
+/// (`lisp::inbox::service_inbound`'s `handle_message`) — every JVM-to-Lisp
 /// value crossing goes through this one converter now, on the main thread,
 /// instead of a wire round trip.
 pub fn from_bridge<'e>(env: &'e Env, arg: &BridgeValue) -> EmacsResult<Value<'e>> {
@@ -133,7 +133,7 @@ pub fn from_bridge<'e>(env: &'e Env, arg: &BridgeValue) -> EmacsResult<Value<'e>
 /// mirroring spec "Argument conversion" for the main-thread side.
 pub(crate) fn from_input<'e>(env: &'e Env, arg: &LispInput) -> EmacsResult<Value<'e>> {
     match arg {
-        LispInput::Obj(ptr) => Ok(crate::lisp_requests::borrow(env, *ptr)),
+        LispInput::Obj(ptr) => Ok(crate::lisp::inbox::borrow(env, *ptr)),
         // A keyword interns with its leading `:`; a plain symbol by name.
         // `env.intern` uses the global obarray, so the result round-trips
         // `eq`-stably back to a Clojure symbol via `to_outcome`.
@@ -205,5 +205,5 @@ pub(crate) fn to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
             }));
         }
     }
-    Ok(LispOutcome::Ptr(crate::lisp_requests::box_value(value)))
+    Ok(LispOutcome::Ptr(crate::lisp::inbox::box_value(value)))
 }

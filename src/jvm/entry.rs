@@ -226,7 +226,7 @@ fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> 
 /// realization of the design spec's "Java shim" section. Never blocks:
 /// everything here is either process-local bookkeeping or a non-blocking
 /// channel write; the actual Lisp call happens later, off this thread
-/// entirely (on Emacs's own main thread, via `lisp_requests::
+/// entirely (on Emacs's own main thread, via `lisp::inbox::
 /// service_inbound`'s `Invoke` arm, which calls the Elisp
 /// `jvm--resolve-invoke`), and its result arrives back asynchronously via
 /// `Cmd::InvokeReply` (`jvm::inbox::handle_invoke_reply`).
@@ -248,8 +248,7 @@ fn lisp_function_call<'local>(
     crate::jvm::inbox::register(id, future_global);
 
     let args = crate::jvm::convert::jobject_array_to_bridge_values(env, &args)?;
-    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Invoke { id, handle, args });
-    crate::channel::poke();
+    crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Invoke { id, handle, args });
 
     Ok(future)
 }
@@ -284,8 +283,8 @@ fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<(
 /// for the same handle. Runs on a `Cleaner`-managed background thread, not
 /// the worker thread, but that's fine: `get_handle_field` is plain JNI
 /// field access (needs only the `Env` this native call itself provides)
-/// and `lisp_requests::enqueue`/`channel::poke` just write to process-
-/// global state, neither of which cares which thread calls them.
+/// and `lisp::inbox::submit` just writes to process-global state, which
+/// doesn't care which thread calls it.
 ///
 /// Registered (not called directly) via `register_release_notifier_native`
 /// above.
@@ -294,8 +293,7 @@ fn release_notifier_run<'local>(
     this: JObject<'local>,
 ) -> jni::errors::Result<()> {
     let handle = get_handle_field(env, &this)?;
-    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Release { handle });
-    crate::channel::poke();
+    crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Release { handle });
     Ok(())
 }
 
@@ -408,15 +406,15 @@ fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors:
 /// Common plumbing for every synchronous Lisp-access native: allocates a
 /// correlation id, registers a fresh `CompletableFuture` in `jvm::inbox`,
 /// hands the request BUILD_REQUEST constructs (given that id) to
-/// `lisp_requests::enqueue`, wakes the main thread up, then blocks this
-/// JVM thread on the future's own `get(timeout, SECONDS)` — see design
-/// spec, "Request/reply flow", step 1's "sync variant: `future.get()`
-/// (blocks the JVM thread, with timeout)". Mirrors `lisp_function_call`'s
-/// future/`jvm::inbox`/`channel::poke` setup, but waits in place instead of
-/// handing the future back to the Java caller.
+/// `lisp::inbox::submit`, which enqueues it and wakes the main thread up,
+/// then blocks this JVM thread on the future's own `get(timeout, SECONDS)`
+/// — see design spec, "Request/reply flow", step 1's "sync variant:
+/// `future.get()` (blocks the JVM thread, with timeout)". Mirrors
+/// `lisp_function_call`'s future/`jvm::inbox`/`submit` setup, but waits in
+/// place instead of handing the future back to the Java caller.
 fn service_lisp_request_sync<'local>(
     env: &mut jni::Env<'local>,
-    build_request: impl FnOnce(u64) -> crate::lisp_requests::Inbound,
+    build_request: impl FnOnce(u64) -> crate::lisp::inbox::Inbound,
 ) -> jni::errors::Result<JObject<'local>> {
     // Reentrant case: this native runs on the Emacs main thread, inside a
     // `jvm--call-direct`. That thread is blocked in the JVM right now, so the
@@ -431,8 +429,7 @@ fn service_lisp_request_sync<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::jvm::inbox::register(id, future_global);
 
-    crate::lisp_requests::enqueue(build_request(id));
-    crate::channel::poke();
+    crate::lisp::inbox::submit(build_request(id));
 
     block_on_lisp_reply(env, &future)
 }
@@ -444,10 +441,10 @@ fn service_lisp_request_sync<'local>(
 /// equivalent of `block_on_lisp_reply`'s checked-exception rethrow.
 fn service_lisp_request_direct<'local>(
     env: &mut jni::Env<'local>,
-    request: crate::lisp_requests::Inbound,
+    request: crate::lisp::inbox::Inbound,
 ) -> jni::errors::Result<JObject<'local>> {
     let reply = crate::lisp::runtime::with_current_env(|lisp_env| {
-        crate::lisp_requests::compute_reply(lisp_env, &request)
+        crate::lisp::inbox::compute_reply(lisp_env, &request)
     })
     // `in_scope()` was true and this is the same thread, so the scope cannot
     // have been popped between that check and here.
@@ -549,7 +546,7 @@ fn lisp_intern<'local>(
     name: JString<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
     let name = name.try_to_string(env)?;
-    service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Intern { id, name })
+    service_lisp_request_sync(env, |id| crate::lisp::inbox::Inbound::Intern { id, name })
 }
 
 /// `Lisp.typeOf`'s native implementation.
@@ -559,7 +556,7 @@ fn lisp_type_of<'local>(
     v: JObject<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
     let arg = crate::jvm::convert::to_input(env, v)?;
-    service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::TypeOf { id, arg })
+    service_lisp_request_sync(env, |id| crate::lisp::inbox::Inbound::TypeOf { id, arg })
 }
 
 /// `Lisp.isNotNil`'s native implementation.
@@ -570,7 +567,7 @@ fn lisp_is_not_nil<'local>(
 ) -> jni::errors::Result<bool> {
     let arg = crate::jvm::convert::to_input(env, v)?;
     let result =
-        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::IsNotNil { id, arg })?;
+        service_lisp_request_sync(env, |id| crate::lisp::inbox::Inbound::IsNotNil { id, arg })?;
     unbox_boolean(env, &result)
 }
 
@@ -583,8 +580,7 @@ fn lisp_eq<'local>(
 ) -> jni::errors::Result<bool> {
     let a = crate::jvm::convert::to_input(env, a)?;
     let b = crate::jvm::convert::to_input(env, b)?;
-    let result =
-        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Eq { id, a, b })?;
+    let result = service_lisp_request_sync(env, |id| crate::lisp::inbox::Inbound::Eq { id, a, b })?;
     unbox_boolean(env, &result)
 }
 
@@ -605,9 +601,9 @@ fn lisp_apply_async<'local>(
     // `(deref (applyAsync ...))` returns at once without needing the blocked
     // main thread to drain the queue.
     if crate::lisp::runtime::in_scope() {
-        let request = crate::lisp_requests::Inbound::Apply { id: 0, f, args: request_args };
+        let request = crate::lisp::inbox::Inbound::Apply { id: 0, f, args: request_args };
         let reply = crate::lisp::runtime::with_current_env(|lisp_env| {
-            crate::lisp_requests::compute_reply(lisp_env, &request)
+            crate::lisp::inbox::compute_reply(lisp_env, &request)
         })
         .ok_or_else(|| crate::jvm::convert::marshal_error("reentrant apply lost its Env scope"))?;
         let future_class =
@@ -623,12 +619,7 @@ fn lisp_apply_async<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::jvm::inbox::register(id, future_global);
 
-    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Apply {
-        id,
-        f,
-        args: request_args,
-    });
-    crate::channel::poke();
+    crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Apply { id, f, args: request_args });
     Ok(future)
 }
 
@@ -639,21 +630,20 @@ fn lisp_object_prin1_to_string<'local>(
 ) -> jni::errors::Result<JString<'local>> {
     let ptr = get_ptr_field(env, &this)?;
     let result =
-        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Prin1 { id, ptr })?;
+        service_lisp_request_sync(env, |id| crate::lisp::inbox::Inbound::Prin1 { id, ptr })?;
     env.cast_local::<JString>(result)
 }
 
 /// `LispRefReleaseNotifier.run`'s native implementation: enqueues a
 /// `FreeRef` for this notifier's own `ptr` and wakes the main thread up.
-/// No reply -- see `lisp_requests::Inbound::FreeRef`'s own doc
+/// No reply -- see `lisp::inbox::Inbound::FreeRef`'s own doc
 /// comment ("carries no `id` and produces no reply").
 fn lisp_ref_release_notifier_run<'local>(
     env: &mut jni::Env<'local>,
     this: JObject<'local>,
 ) -> jni::errors::Result<()> {
     let ptr = get_ptr_field(env, &this)?;
-    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::FreeRef { ptr });
-    crate::channel::poke();
+    crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::FreeRef { ptr });
     Ok(())
 }
 
@@ -743,14 +733,14 @@ mod tests {
     /// End-to-end proof that `intern`/`isNotNil`/`eq`/`typeOf`/`applyAsync`/
     /// `prin1ToString` actually work against a *real* Lisp-like `Env` --
     /// but this crate's unit tests have no real Emacs process to service
-    /// `(lisp-request)`, so this test instead drives `lisp_requests::service_inbound`
+    /// `(lisp-request)`, so this test instead drives `lisp::inbox::service_inbound`
     /// directly against a throwaway in-process "Env" substitute... which
     /// this crate cannot construct outside of a real Emacs module call
     /// (`emacs::Env` has no public constructor). The Lisp-access round
     /// trip is instead covered end-to-end by `test/jvm-clj-test.el`
     /// (a real `emacs --batch` process), and the pointer-discipline/
     /// FIFO-ordering pieces are covered in isolation by
-    /// `lisp_requests`'s own unit tests. This comment documents that
+    /// `lisp::inbox`'s own unit tests. This comment documents that
     /// omission rather than fake an assertion.
     #[test]
     fn get_ptr_field_reads_back_what_was_stored() {
