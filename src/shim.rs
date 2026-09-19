@@ -682,8 +682,9 @@ mod tests {
 
     /// Retries against jni-rs 0.22.4's racy check-then-create singleton --
     /// this file now has two tests each creating a JVM, so it needs the
-    /// same retry loop `marshal.rs` and `pending.rs` already use (see
-    /// `marshal.rs`'s `create_test_jvm` for the full explanation).
+    /// same retry loop `src/jvm/convert.rs` and `pending.rs` already use
+    /// (see `src/jvm/convert.rs`'s `create_test_jvm` for the full
+    /// explanation).
     fn create_test_jvm() -> JavaVM {
         let mut last_err = None;
         for _ in 0..20 {
