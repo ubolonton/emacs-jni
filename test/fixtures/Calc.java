@@ -13,6 +13,15 @@ public class Calc {
         this.base = base;
     }
 
+    // Overloaded constructor for the constructor-overload fall-through test:
+    // `Calc(long)` and `Calc(String)` share arity, so `invoke_constructor`
+    // must skip a candidate whose declared parameter type the actual argument
+    // doesn't fit (a string against `Calc(long)' fails at `newInstance' with
+    // an `IllegalArgumentException', not at marshalling).
+    public Calc(String label) {
+        this.base = label.length();
+    }
+
     public long addToBase(long n) {
         return base + n;
     }

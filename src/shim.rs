@@ -486,7 +486,7 @@ fn service_lisp_request_direct<'local>(
 
 /// Blocks on FUTURE's own `get(LISP_REQUEST_TIMEOUT_SECS, SECONDS)`,
 /// reflection-free (a direct `CompletableFuture` instance method call, not
-/// `Method.invoke`) — so unlike `describe_pending_java_exception`'s
+/// `Method.invoke`) — so unlike `describe_caught_java_exception`'s
 /// `InvocationTargetException` unwrapping in `jvm_thread.rs`, a checked
 /// exception from `get()` (`ExecutionException`/`TimeoutException`/
 /// `InterruptedException`) is itself the JVM's pending exception, not
@@ -520,7 +520,7 @@ fn block_on_lisp_reply<'local>(
 /// whatever `jvm_thread::handle_lisp_reply` completed the future with
 /// exceptionally (a `LispNonLocalExit`) — the useful part is that cause, one
 /// `getCause()` hop down, same reasoning as
-/// `jvm_thread::describe_pending_java_exception`. A `TimeoutException`/
+/// `jvm_thread::describe_caught_java_exception`. A `TimeoutException`/
 /// `InterruptedException` (from `get`'s own timeout/interruption, not a
 /// completed-exceptionally future) has no cause, so it's rethrown as-is.
 ///

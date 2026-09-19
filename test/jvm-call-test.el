@@ -48,6 +48,19 @@ given call to actually succeed, whichever it is."
   (should (equal (jvm-call-await "Calc" "pick" '("hello")) "string"))
   (should (equal (jvm-call-await "Calc" "pick" '(42)) "long")))
 
+(ert-deftest emacs-jni-jvm-call-test/constructor-overload-falls-through-to-the-matching-candidate ()
+  "`Calc' declares two same-arity constructors -- `Calc(long)' and
+`Calc(String)' -- so `invoke_constructor' must fall through past a
+candidate whose parameter type the argument doesn't fit. A string against
+`Calc(long)' marshals to a Java String but fails at `newInstance' with an
+`IllegalArgumentException' (not at marshalling), so the fall-through must
+handle the invoke-time mismatch, not just the marshalling one."
+  (jvm-call-test--ensure-ready)
+  (let ((obj (jvm-new-await "Calc" '("hi"))))
+    (should (user-ptrp obj))
+    ;; Calc(String) sets base = label length (2); addToBase(3) = 5.
+    (should (equal (jvm-call-await obj "addToBase" '(3)) 5))))
+
 (ert-deftest emacs-jni-jvm-call-test/unsupported-argument-value-signals-instead-of-silently-becoming-t ()
   "A Lisp value with no marshalling rule (e.g. a vector) must signal
 `jvm-invalid-argument' rather than silently being sent to Java as `true'."

@@ -678,7 +678,7 @@ pub(crate) fn complete_future_with_reply<'local>(
 /// Builds an `emacs_jni.core.LispSignal(a, b)` (`kind == 0`) or
 /// `LispThrow(a, b)` (`kind == 1`) from two already-classified reply
 /// values — both still a `LispNonLocalExit`/`Throwable`, so the existing
-/// catch/rethrow sites (`describe_pending_java_exception`,
+/// catch/rethrow sites (`describe_caught_java_exception`,
 /// `extract_non_local_exit`) keep matching by the shared base.
 fn build_non_local_exit<'local>(
     env: &mut jni::Env<'local>,
@@ -848,14 +848,14 @@ pub(crate) fn resolve_and_invoke(
 thread_local! {
     /// Nesting depth of in-flight `call_direct` frames on this thread. Used
     /// only to gate the reentrant-boundary outbound path
-    /// (`describe_pending_java_exception` classifies a `LispNonLocalExit` into
+    /// (`describe_caught_java_exception` classifies a `LispNonLocalExit` into
     /// `PENDING_NLE` only when `> 0`, i.e. inside a direct call — never on the
     /// async worker thread). It no longer drives detaching: the main thread
     /// stays permanently attached, and non-main callers rely on the scoped
     /// attach in `call_direct` to detach on return.
     static ATTACH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 
-    /// Side channel from `describe_pending_java_exception` back to
+    /// Side channel from `describe_caught_java_exception` back to
     /// `call_direct`, for the outbound half of the reentrant boundary: a Lisp
     /// signal/throw raised in a callback unwinds up through Clojure as a
     /// `LispNonLocalExit`; when it reaches the top of a direct call
@@ -932,7 +932,7 @@ pub(crate) fn call_direct(
     ATTACH_DEPTH.with(|d| d.set(d.get() - 1));
     match result {
         Ok(arg) => Ok(arg),
-        // A `LispNonLocalExit` reconstructed by `describe_pending_java_exception`
+        // A `LispNonLocalExit` reconstructed by `describe_caught_java_exception`
         // takes precedence over its flattened message: re-raise the original
         // signal/throw. Otherwise it's a genuine JVM failure → `jvm-error`.
         Err(e) => Err(PENDING_NLE.with(|s| s.borrow_mut().take()).unwrap_or(DirectError::Jni(e))),
@@ -960,10 +960,9 @@ fn resolve_class_via_loader<'local>(
     env.cast_local::<jni::objects::JClass>(class_obj)
 }
 
-/// Renders a pending Java exception (after a reflective `Method.invoke`/
-/// `Constructor.newInstance` call reports `Error::JavaException`) as a
-/// readable message that includes the whole `getCause()` chain, not just
-/// the outermost exception.
+/// Renders an already-caught Java exception (the caller must `exception_catch()`
+/// it first — see below) as a readable message that includes the whole
+/// `getCause()` chain, not just the outermost exception.
 ///
 /// This matters specifically for `Method.invoke`/`Constructor.newInstance`:
 /// both always wrap whatever the *target* code actually threw in an
@@ -981,18 +980,19 @@ fn resolve_class_via_loader<'local>(
 /// \nStack trace:\n0: ...DirectMethodHandleAccessor.invoke...\n1: ...
 /// Method.invoke...\n"` — true, but useless for diagnosing what actually
 /// went wrong (found empirically running this task's own ERT test: see
-/// task-7-report.md). Catching and describing the exception here instead,
-/// immediately after the failing reflective call and before it can escape
-/// this function, lets the message include the real cause.
-fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
-    let caught = match env.exception_catch() {
-        Err(e) => e,
-        Ok(()) => {
-            return marshal_error(
-                "expected a pending Java exception (Error::JavaException) but found none",
-            )
-        }
-    };
+/// task-7-report.md). Describing the exception here, immediately after the
+/// failing reflective call and before it can escape this function, lets the
+/// message include the real cause.
+///
+/// Takes an already-caught exception rather than catching it itself: callers
+/// at the invoke sites (`invoke_method`/`invoke_constructor`) need to inspect
+/// the caught exception first (`is_overload_arg_mismatch`) to decide whether
+/// to fall through to the next overload candidate or describe-and-return, so
+/// the catch has to happen before this is called.
+fn describe_caught_java_exception(
+    env: &mut jni::Env,
+    caught: jni::errors::Error,
+) -> jni::errors::Error {
     let jni::errors::Error::CaughtJavaException { name, msg, exception, .. } = caught else {
         // `exception_catch` itself failed in some unexpected way (e.g.
         // couldn't query the throwable's class/message) -- surface that
@@ -1049,6 +1049,22 @@ fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
     marshal_error(&lines.join("\n"))
 }
 
+/// True when CAUGHT is a bare `IllegalArgumentException` straight off
+/// `Method.invoke`/`Constructor.newInstance` — the JDK's own signal that ARGS
+/// didn't fit the candidate's declared parameter types (e.g. a `Str` argument
+/// marshalled fine as a `String` but the candidate actually wanted a `long`).
+/// A real exception thrown by the invoked method/constructor body always
+/// arrives wrapped in `InvocationTargetException` instead, so this can't
+/// mistake a genuine `IllegalArgumentException` thrown *by user code* for an
+/// overload mismatch — that one comes through with a different `name`.
+fn is_overload_arg_mismatch(caught: &jni::errors::Error) -> bool {
+    matches!(
+        caught,
+        jni::errors::Error::CaughtJavaException { name, .. }
+            if name == "java.lang.IllegalArgumentException"
+    )
+}
+
 /// Walks THROWABLE's `getCause()` chain for an `emacs_jni.core.LispNonLocalExit`
 /// and, if found, classifies its `kind`/`symbolOrTag`/`dataOrValue` back into a
 /// `DirectError::NonLocalExit`. The two fields run through the same
@@ -1062,7 +1078,7 @@ fn extract_non_local_exit<'local>(
 ) -> jni::errors::Result<Option<DirectError>> {
     let nle_class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
     let mut current = throwable;
-    // Bounded like `describe_pending_java_exception`'s own walk: a normal cause
+    // Bounded like `describe_caught_java_exception`'s own walk: a normal cause
     // chain can't cycle, but this is recovery code, not worth an unbounded loop.
     for _ in 0..10 {
         if current.is_null() {
@@ -1118,6 +1134,12 @@ fn invoke_method(
     let null_receiver = jni::objects::JObject::null();
     let receiver = instance.unwrap_or(&null_receiver);
 
+    // Remembers the most recent invoke-time argument mismatch (a bare
+    // `IllegalArgumentException`, per `is_overload_arg_mismatch`) so the
+    // final "no method found" error can describe *why* the closest same-
+    // name/arity candidate didn't work, instead of a bare "not found".
+    let mut last_arg_mismatch: Option<jni::errors::Error> = None;
+
     for i in 0..count {
         let candidate = methods.get_element(env, i)?;
         let name = env
@@ -1163,12 +1185,27 @@ fn invoke_method(
             &[jni::objects::JValue::Object(receiver), jni::objects::JValue::Object(&invoke_args)],
         ) {
             Ok(v) => v.l()?,
-            // See `describe_pending_java_exception`'s doc comment: without
-            // this, the caller only ever learns "a Java exception was
-            // thrown", not what it actually said.
-            Err(jni::errors::Error::JavaException) => {
-                return Err(describe_pending_java_exception(env))
-            }
+            // A bare `IllegalArgumentException` here means ARGS didn't fit
+            // THIS candidate's declared parameter types (marshalling alone
+            // can't catch every mismatch, e.g. `Str` fits any reference
+            // parameter type) — fall through to the next same-name/arity
+            // candidate instead of giving up. Anything else is a real
+            // failure (or the invoked method's own exception, always
+            // wrapped in `InvocationTargetException` — see
+            // `describe_caught_java_exception`'s doc comment): describe and
+            // return it.
+            Err(jni::errors::Error::JavaException) => match env.exception_catch() {
+                Ok(()) => {
+                    return Err(marshal_error(
+                        "expected a pending Java exception after Method.invoke but found none",
+                    ))
+                }
+                Err(caught) if is_overload_arg_mismatch(&caught) => {
+                    last_arg_mismatch = Some(caught);
+                    continue;
+                }
+                Err(caught) => return Err(describe_caught_java_exception(env, caught)),
+            },
             Err(e) => return Err(e),
         };
         return crate::marshal::jvm_value_to_lisp_arg(
@@ -1177,7 +1214,10 @@ fn invoke_method(
         );
     }
 
-    Err(marshal_error(&format!("no method {method_name} with {} argument(s) found", args.len())))
+    Err(last_arg_mismatch.map_or_else(
+        || marshal_error(&format!("no method {method_name} with {} argument(s) found", args.len())),
+        |caught| describe_caught_java_exception(env, caught),
+    ))
 }
 
 fn invoke_constructor(
@@ -1195,6 +1235,11 @@ fn invoke_constructor(
         .l()?;
     let constructors = env.cast_local::<jni::objects::JObjectArray>(constructors)?;
     let count = constructors.len(env)?;
+
+    // See `invoke_method`'s matching field: remembers the most recent
+    // invoke-time argument mismatch so the final "no constructor found"
+    // error can describe why, instead of a bare "not found".
+    let mut last_arg_mismatch: Option<jni::errors::Error> = None;
 
     for i in 0..count {
         let candidate = constructors.get_element(env, i)?;
@@ -1226,9 +1271,22 @@ fn invoke_constructor(
             &[jni::objects::JValue::Object(&invoke_args)],
         ) {
             Ok(v) => v.l()?,
-            Err(jni::errors::Error::JavaException) => {
-                return Err(describe_pending_java_exception(env))
-            }
+            // See `invoke_method`'s matching arm: a bare
+            // `IllegalArgumentException` here means ARGS didn't fit THIS
+            // candidate's declared parameter types, so fall through to the
+            // next same-arity constructor instead of giving up.
+            Err(jni::errors::Error::JavaException) => match env.exception_catch() {
+                Ok(()) => {
+                    return Err(marshal_error(
+                        "expected a pending Java exception after Constructor.newInstance but found none",
+                    ))
+                }
+                Err(caught) if is_overload_arg_mismatch(&caught) => {
+                    last_arg_mismatch = Some(caught);
+                    continue;
+                }
+                Err(caught) => return Err(describe_caught_java_exception(env, caught)),
+            },
             Err(e) => return Err(e),
         };
         return crate::marshal::jvm_value_to_lisp_arg(
@@ -1237,7 +1295,10 @@ fn invoke_constructor(
         );
     }
 
-    Err(marshal_error(&format!("no constructor with {} argument(s) found", args.len())))
+    Err(last_arg_mismatch.map_or_else(
+        || marshal_error(&format!("no constructor with {} argument(s) found", args.len())),
+        |caught| describe_caught_java_exception(env, caught),
+    ))
 }
 
 /// Shared by `invoke_method`/`invoke_constructor`: marshals ARGS against
