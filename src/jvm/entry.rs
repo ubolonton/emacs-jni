@@ -421,8 +421,8 @@ fn service_lisp_request_sync<'local>(
     // Reentrant case: this native runs on the Emacs main thread, inside a
     // `jvm--call-direct`. That thread is blocked in the JVM right now, so the
     // async queue below can never be drained -- run the op directly on the
-    // enclosing frame's live `Env` instead. See `reentry` and the plan doc.
-    if crate::reentry::in_scope() {
+    // enclosing frame's live `Env` instead. See `lisp::runtime` and the plan doc.
+    if crate::lisp::runtime::in_scope() {
         return service_lisp_request_direct(env, build_request(0));
     }
     let id = crate::jvm::inbox::next_id();
@@ -446,7 +446,7 @@ fn service_lisp_request_direct<'local>(
     env: &mut jni::Env<'local>,
     request: crate::lisp_requests::Inbound,
 ) -> jni::errors::Result<JObject<'local>> {
-    let reply = crate::reentry::with_current_env(|lisp_env| {
+    let reply = crate::lisp::runtime::with_current_env(|lisp_env| {
         crate::lisp_requests::compute_reply(lisp_env, &request)
     })
     // `in_scope()` was true and this is the same thread, so the scope cannot
@@ -604,9 +604,9 @@ fn lisp_apply_async<'local>(
     // apply directly and hand back an *already-completed* future, so Clojure's
     // `(deref (applyAsync ...))` returns at once without needing the blocked
     // main thread to drain the queue.
-    if crate::reentry::in_scope() {
+    if crate::lisp::runtime::in_scope() {
         let request = crate::lisp_requests::Inbound::Apply { id: 0, f, args: request_args };
-        let reply = crate::reentry::with_current_env(|lisp_env| {
+        let reply = crate::lisp::runtime::with_current_env(|lisp_env| {
             crate::lisp_requests::compute_reply(lisp_env, &request)
         })
         .ok_or_else(|| crate::jvm::convert::marshal_error("reentrant apply lost its Env scope"))?;

@@ -5,7 +5,6 @@ mod jvm;
 mod lisp;
 mod lisp_requests;
 mod protocol;
-mod reentry;
 
 emacs::plugin_is_GPL_compatible!();
 
@@ -181,10 +180,10 @@ fn jvm_call_direct<'e>(
     let args = lisp_list_to_args(args)?;
     let loader = runtime::loader();
     // Record this frame's `Env` so any Clojure -> Lisp callback made *during*
-    // the call runs directly on it (`reentry`/`jvm::entry`), rather than deadlocking
-    // on the async queue this blocked main thread cannot drain. Dropped when
-    // the call returns or unwinds.
-    let _scope = reentry::enter(env);
+    // the call runs directly on it (`lisp::runtime`/`jvm::entry`), rather than
+    // deadlocking on the async queue this blocked main thread cannot drain.
+    // Dropped when the call returns or unwinds.
+    let _scope = lisp::runtime::enter(env);
     match jvm::invoke::call_direct(&vm, &loader, &target, &member, &args) {
         Ok(arg) => lisp::convert::from_bridge(env, &arg),
         // A Lisp signal/throw raised in a reentrant callback, unwound back up
