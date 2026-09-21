@@ -7,7 +7,6 @@ mod jvm_thread;
 mod lisp_requests;
 mod marshal;
 mod pending;
-mod protocol;
 mod reentry;
 mod runtime;
 mod shim;
@@ -150,7 +149,7 @@ fn parse_call_target(target: Value) -> Result<commands::CallTarget> {
         Ok(commands::CallTarget::ClassName(class_name))
     } else {
         let h: &handles::JvmHandle = target.into_rust()?;
-        Ok(commands::CallTarget::Object(h.0))
+        Ok(commands::CallTarget::Object(h.0.clone()))
     }
 }
 
@@ -169,7 +168,12 @@ fn parse_call_target(target: Value) -> Result<commands::CallTarget> {
 /// blocks Emacs's main loop for its whole duration — the caller must keep
 /// heavy/blocking work on the Clojure side's own threads.
 #[defun(mod_in_name = false, name = "jvm--call-direct")]
-fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value) -> Result<Value<'e>> {
+fn jvm_call_direct<'e>(
+    env: &'e Env,
+    target: Value,
+    member: String,
+    args: Value,
+) -> Result<Value<'e>> {
     if STATUS.get() != Status::Ready {
         return env.signal(jvm_illegal_transition, (STATUS.get().as_tag(),));
     }
@@ -185,7 +189,7 @@ fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value)
     // the call returns or unwinds.
     let _scope = reentry::enter(env);
     match jvm_thread::call_direct(&vm, &loader, &target, &member, &args) {
-        Ok(arg) => lisp_requests::lisp_arg_to_value(env, &arg),
+        Ok(arg) => lisp_requests::bridge_value_to_value(env, &arg),
         // A Lisp signal/throw raised in a reentrant callback, unwound back up
         // through Clojure: rebind its symbol/data (or tag/value) to this
         // frame's `Env` and re-raise the *original* non-local exit, so the
@@ -205,105 +209,68 @@ fn jvm_call_direct<'e>(env: &'e Env, target: Value, member: String, args: Value)
     }
 }
 
-/// Constructs a `JvmHandle` `user-ptr` from a raw handle integer received
-/// over the wire (in a `(jvm-handle N)` tag — see `marshal::lisp_arg_to_sexp`).
-/// The Rust-side handle table entry itself already exists by the time this
-/// runs (it was populated by `marshal::jvm_value_to_lisp_arg` when the
-/// value first crossed from Java to Lisp); this just gives Lisp a
-/// `user-ptr` wrapper for the handle number it already received.
-#[defun(mod_in_name = false, name = "jvm--wrap-handle")]
-fn jvm_wrap_handle(handle: u64) -> Result<Box<handles::JvmHandle>> {
-    Ok(Box::new(handles::JvmHandle(handle)))
+/// Drains the inbound queue (`lisp_requests`) and runs each message's `Env`
+/// op on this (the main) thread — the module-primitive half of both the
+/// built-in-Lisp-access design (see design spec, "Request/reply flow") and
+/// every other JVM→Emacs message (`call-done`/`load-jar-done`/`invoke`/
+/// `release`/`status`/`log`). Set as the pipe process's `:filter`
+/// (`jvm--ensure-pipe-process`, `elisp/jvm.el`), so Emacs calls it directly
+/// as `(process output-string)`; both args are ignored — the raw wakeup
+/// byte (`channel::poke`) carries no payload, since the actual message
+/// rides the Rust-side queue, not the wire.
+#[defun(mod_in_name = false, name = "jvm--service-inbound")]
+fn jvm_service_inbound(env: &Env, _process: Value, _data: Value) -> Result<()> {
+    lisp_requests::service_inbound(env)
 }
 
-/// Drains the Lisp-access request queue (`lisp_requests`) and runs each
-/// request's `Env` op on this (the main) thread — the module-primitive
-/// half of the built-in-Lisp-access design (see design spec, "Request/
-/// reply flow"). Called from `jvm--dispatch-message`'s `(lisp-request)`
-/// case (`elisp/jvm.el`), itself triggered by a JVM thread's
-/// `channel::send`-based wakeup after enqueuing a request (`shim.rs`'s
-/// `Lisp.*`/`LispRefReleaseNotifier` natives).
-#[defun(mod_in_name = false, name = "jvm--service-lisp-requests")]
-fn jvm_service_lisp_requests(env: &Env) -> Result<()> {
-    lisp_requests::service(env)
-}
-
-/// Replies to a pending JVM-initiated `invoke` request: RESULT is either
-/// the Lisp function's return value (OK is `t`) or a formatted error
-/// message (OK is `nil`), per `jvm--dispatch-message`'s `invoke` case in
-/// `elisp/jvm.el`. Sends `Cmd::InvokeReply` to the worker thread,
-/// which resolves (or exceptionally completes) the `CompletableFuture`
-/// `shim::lisp_function_call` handed back to Java — the reverse direction
-/// of `jvm--call`. Silently drops the reply (like every other `worker::
-/// send_command` caller in this file) if there's no running worker thread
-/// to receive it; there is nothing sensible to signal back to Java in that
-/// case, since the Java side is only ever blocked on its own future, not
-/// on this call succeeding.
+/// Replies to a pending JVM-initiated `invoke` request. VALUE is either the
+/// Lisp callback's return value (OK is `t`) or the real `(SYMBOL . DATA)`
+/// error cons `condition-case` caught (OK is `nil`), per `jvm--resolve-
+/// invoke`'s two call sites in `elisp/jvm.el`. Marshals either shape into a
+/// `LispOutcome` — a plain return value the same way an ordinary callback
+/// result always has (`lisp_value_to_arg`), or the real signal symbol/data
+/// via `lisp_requests::value_to_outcome` (the same classifier the Clojure
+/// apply path's `error_to_reply` uses) — and sends `Cmd::InvokeReply` to the
+/// worker thread, which resolves (or exceptionally completes, with a real
+/// `LispSignal`) the `CompletableFuture` `shim::lisp_function_call` handed
+/// back to Java — the reverse direction of `jvm--call`. Silently drops the
+/// reply (like every other `worker::send_command` caller in this file) if
+/// there's no running worker thread to receive it; there is nothing
+/// sensible to signal back to Java in that case, since the Java side is
+/// only ever blocked on its own future, not on this call succeeding.
 #[defun(mod_in_name = false, name = "jvm--invoke-reply")]
-fn jvm_invoke_reply(id: u64, ok: Value, result: Value) -> Result<()> {
+fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
     // The `emacs` crate (0.21.0) has no `FromLisp` impl for `bool` (Emacs
     // Lisp has no dedicated boolean type -- see `lisp_value_to_arg`'s own
     // note on this same point), so OK is received as a raw `Value` and
     // checked for Lisp truthiness directly, matching `jvm--invoke-reply`'s
     // two call sites in `elisp/jvm.el`, which always pass literally
     // `t` or `nil`.
-    let ok = ok.is_not_nil();
-    let arg = if ok {
-        lisp_value_to_arg_no_callback(result)?
+    let outcome = if ok.is_not_nil() {
+        commands::LispOutcome::Value(lisp_value_to_arg(value)?)
     } else {
-        let message: String = result.into_rust()?;
-        commands::LispArg::Str(message)
+        // VALUE is the real `(SYMBOL . DATA)' condition-case caught --
+        // classify each half through the same `value_to_outcome' the
+        // Lisp-access apply path's `error_to_reply' uses, so a callback
+        // signal surfaces to Java as a real `LispSignal' carrying the
+        // actual symbol/data, not a fabricated `error'/stringified message.
+        let symbol = value.car()?;
+        let data = value.cdr()?;
+        commands::LispOutcome::Signal {
+            symbol: Box::new(lisp_requests::value_to_outcome(env, symbol)?),
+            data: Box::new(lisp_requests::value_to_outcome(env, data)?),
+        }
     };
-    let _ = worker::send_command(commands::Cmd::InvokeReply { id, ok, result: arg });
+    let _ = worker::send_command(commands::Cmd::InvokeReply { id, outcome });
     Ok(())
 }
 
-/// Same scalar cases as `lisp_value_to_arg` (Task 6) minus the
-/// function-wrapping case — a callback's *own* return value being itself
-/// another bare Lisp function is out of scope for this plan (nothing in
-/// the spec's marshalling table requires it, and it would need the same
-/// `env`-threading `lisp_value_to_arg` already does, for a case this plan
-/// doesn't need to support yet). Values this function doesn't recognize —
-/// including a bare Lisp function, since the function-wrapping case above
-/// is unsupported here — signal `jvm-invalid-argument`, the same
-/// "don't silently misrepresent an unmarshallable value" convention
-/// `lisp_value_to_arg` itself established, rather than the older, since-
-/// corrected behavior of silently defaulting to `t`.
-fn lisp_value_to_arg_no_callback(v: Value) -> Result<commands::LispArg> {
-    if !v.is_not_nil() {
-        return Ok(commands::LispArg::Nil);
-    }
-    if let Ok(n) = v.into_rust::<i64>() {
-        return Ok(commands::LispArg::Int(n));
-    }
-    // See `lisp_value_to_arg`'s matching check for why bignums must be
-    // routed through `LispArg::BigInt` rather than falling through to the
-    // lossy `f64` conversion below.
-    if v.env.call("integerp", (v,))?.is_not_nil() {
-        let digits: String = v.env.call("number-to-string", (v,))?.into_rust()?;
-        return Ok(commands::LispArg::BigInt(digits));
-    }
-    if let Ok(f) = v.into_rust::<f64>() {
-        return Ok(commands::LispArg::Float(f));
-    }
-    if let Ok(s) = v.into_rust::<String>() {
-        return Ok(commands::LispArg::Str(s));
-    }
-    if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
-        return Ok(commands::LispArg::Object(h.0));
-    }
-    if v == v.env.intern("t")? {
-        return Ok(commands::LispArg::True);
-    }
-    v.env.signal(jvm_invalid_argument, (v,))
-}
-
 /// Walks a Lisp list of arguments (as raw `Value`s, same pattern as the
-/// existing `string_list` helper) converting each to a `LispArg` by
+/// existing `string_list` helper) converting each to a `BridgeValue` by
 /// runtime type — see `lisp_value_to_arg`'s doc comment for what each
 /// Lisp type maps to, and what happens to a value this bridge doesn't
 /// recognize.
-fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::LispArg>> {
+fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::BridgeValue>> {
     let mut out = Vec::new();
     while list.is_not_nil() {
         let item: Value = list.car()?;
@@ -313,36 +280,43 @@ fn lisp_list_to_args(mut list: Value) -> Result<Vec<commands::LispArg>> {
     Ok(out)
 }
 
-/// Converts a single Lisp value to a `LispArg` by runtime type, trying
+/// Converts a single Lisp value to a `BridgeValue` by runtime type, trying
 /// each marshallable Lisp type in turn.
-fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
+fn lisp_value_to_arg(v: Value) -> Result<commands::BridgeValue> {
     if !v.is_not_nil() {
-        return Ok(commands::LispArg::Nil);
+        return Ok(commands::BridgeValue::Nil);
+    }
+    if v.env.call("keywordp", (v,))?.is_not_nil() {
+        let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
+        // `symbol-name` of a keyword includes its leading `:`; strip it so
+        // `name` is the bare name the marker carries.
+        let name = name.strip_prefix(':').unwrap_or(&name).to_string();
+        return Ok(commands::BridgeValue::Symbol { name, keyword: true });
     }
     if let Ok(n) = v.into_rust::<i64>() {
-        return Ok(commands::LispArg::Int(n));
+        return Ok(commands::BridgeValue::Int(n));
     }
     // A Lisp integer (fixnum or bignum) that didn't fit in i64 above is a
     // bignum too large for a 64-bit register — this must be routed
-    // through `LispArg::BigInt` via its exact decimal string, not the
+    // through `BridgeValue::BigInt` via its exact decimal string, not the
     // `f64` attempt below. `extract_float` (which backs `into_rust::<f64>`)
     // coerces any Lisp number, including bignums, so skipping this check
-    // would silently accept a bignum as a lossy `LispArg::Float` instead of
+    // would silently accept a bignum as a lossy `BridgeValue::Float` instead of
     // erroring or round-tripping exactly — the same "don't silently
     // misrepresent" concern `marshal::jvm_value_to_lisp_arg` (Task 4)
     // already applies on the Java-to-Lisp direction for boxed Long/Integer.
     if v.env.call("integerp", (v,))?.is_not_nil() {
         let digits: String = v.env.call("number-to-string", (v,))?.into_rust()?;
-        return Ok(commands::LispArg::BigInt(digits));
+        return Ok(commands::BridgeValue::BigInt(digits));
     }
     if let Ok(f) = v.into_rust::<f64>() {
-        return Ok(commands::LispArg::Float(f));
+        return Ok(commands::BridgeValue::Float(f));
     }
     if let Ok(s) = v.into_rust::<String>() {
-        return Ok(commands::LispArg::Str(s));
+        return Ok(commands::BridgeValue::Str(s));
     }
     if let Ok(h) = v.into_rust::<&handles::JvmHandle>() {
-        return Ok(commands::LispArg::Object(h.0));
+        return Ok(commands::BridgeValue::Object(h.0.clone()));
     }
     // `t` has no useful into_rust::<T>() scalar conversion (there's no
     // `FromLisp` impl for `bool` — Emacs Lisp has no dedicated boolean
@@ -350,7 +324,17 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     // interned `t` symbol, matching Lisp's own notion of "is this
     // literally `t`" rather than "is this any non-nil symbol".
     if v == v.env.intern("t")? {
-        return Ok(commands::LispArg::True);
+        return Ok(commands::BridgeValue::True);
+    }
+    // A symbol is data: it crosses as a marker, not a callback. Checked
+    // before `functionp` so a symbol holding a function cell (`car`) is a
+    // marker too; only a non-symbol function object (lambda, closure,
+    // byte-code, subr) reaches the `functionp` arm below. Matches the
+    // Clojure `->lisp` model, where every symbol is a `LispSymbol` marker
+    // and callability is opt-in via `require-symbol`.
+    if v.env.call("symbolp", (v,))?.is_not_nil() {
+        let name: String = v.env.call("symbol-name", (v,))?.into_rust()?;
+        return Ok(commands::BridgeValue::Symbol { name, keyword: false });
     }
     // A Lisp function (symbol with a function cell, lambda, closure,
     // subr, or byte-compiled object) is registered Lisp-side in
@@ -369,14 +353,14 @@ fn lisp_value_to_arg(v: Value) -> Result<commands::LispArg> {
     // crate doesn't expose" pattern already used above for `integerp'.
     if v.env.call("functionp", (v,))?.is_not_nil() {
         let handle: u64 = v.env.call("jvm--register-callback", (v,))?.into_rust()?;
-        return Ok(commands::LispArg::Callback(handle));
+        return Ok(commands::BridgeValue::Callback(handle));
     }
-    // Anything else reaching this point (a vector, keyword, hash-table,
-    // or any symbol other than `t`) is not a value this bridge knows how
-    // to marshal. Earlier code silently treated it as `LispArg::True`,
-    // which could mask real caller bugs (e.g. accidentally passing a
-    // vector where a number was intended would silently become Java
-    // `true`) -- signal a clear error instead.
+    // Anything else reaching this point (a vector, hash-table, or other
+    // unsupported value) is not a value this bridge knows how to marshal.
+    // Earlier code silently treated it as `BridgeValue::True`, which could mask
+    // real caller bugs (e.g. accidentally passing a vector where a number
+    // was intended would silently become Java `true`) -- signal a clear
+    // error instead.
     v.env.signal(jvm_invalid_argument, (v,))
 }
 
@@ -387,22 +371,6 @@ fn jvm_test_panic(env: &Env) -> Result<()> {
         Ok(()) => Ok(()),
         Err(()) => env.signal(jvm_illegal_transition, ("no running JVM worker thread",)),
     }
-}
-
-/// Throwaway plumbing-only defun: proves a `handles::JvmHandle` round-trips
-/// through Lisp as a genuine `user-ptr` before Task 5 replaces this with the
-/// real `jvm-call`/`jvm-new` machinery that produces `JvmHandle`s from
-/// actual method calls. Returning `Box<handles::JvmHandle>` (rather than a
-/// bare `handles::JvmHandle`) is what the `emacs` crate's blanket
-/// `impl<T: Transfer> IntoLisp for Box<T>` picks up to embed the value as a
-/// `user-ptr` -- see `src/handles.rs`'s `Transfer` impl.
-#[cfg(feature = "test-support")]
-#[defun(mod_in_name = false, name = "jvm--test-make-handle")]
-fn jvm_test_make_handle() -> Result<Box<handles::JvmHandle>> {
-    // A handle registered against nothing real (no live JVM object needed
-    // for this plumbing-only test) — Task 5 is what makes handles wrap
-    // genuine JNI objects.
-    Ok(Box::new(handles::JvmHandle(handles::register_dummy_for_test())))
 }
 
 /// Converts a Lisp list of strings into a `Vec<String>` by walking its cons

@@ -42,9 +42,6 @@ docs/explanation/architecture.md).")
 (defvar jvm--pipe-process nil
   "The pipe process used to receive messages from the JVM worker thread.")
 
-(defvar jvm--filter-buffer ""
-  "Accumulates partial output from `jvm--pipe-process' between newlines.")
-
 (defvar jvm--pending-load-jar nil
   "Alist of request-id -> callback for in-flight `jvm-load-jar-async' calls.")
 
@@ -60,80 +57,55 @@ docs/explanation/architecture.md).")
     (goto-char (point-max))
     (insert (apply #'format format-string args) "\n")))
 
-(defun jvm--dispatch-message (sexp)
-  "Handle one parsed message SEXP from the JVM worker thread."
-  (pcase sexp
-    (`(status ,state ,msg)
-     (setq jvm--status state)
-     (when msg
-       (jvm--log "[status] %s: %s" state msg))
-     (run-hook-with-args 'jvm-status-hook state))
-    (`(log ,level ,msg)
-     (jvm--log "[%s] %s" level msg)
-     (message "emacs-jni [%s]: %s" level msg))
-    (`(load-jar-done ,id ,ok ,err)
-     (when-let ((callback (alist-get id jvm--pending-load-jar)))
-       (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
-       (funcall callback ok err)))
-    (`(call-done ,id ,ok ,result ,err)
-     (when-let ((callback (alist-get id jvm--pending-call)))
-       (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
-       (funcall callback ok (jvm--resolve-sexp-result result) err)))
-    (`(invoke ,id ,handle ,args)
-     ;; A JVM-initiated call into a previously wrapped Lisp function (see
-     ;; `jvm--register-callback'): look it up by HANDLE, funcall it with
-     ;; ARGS, and reply with the result (or a formatted error) via
-     ;; `jvm--invoke-reply', which resolves the `CompletableFuture' on the
-     ;; Rust/Java side.
-     ;;
-     ;; ARGS can contain a `(jvm-handle N)' tag, exactly like a `call-done'
-     ;; RESULT can: any real Java object passed as one of the call's
-     ;; arguments (not just an object that started out as a Lisp value and
-     ;; crossed into Java earlier) renders this way -- see
-     ;; `marshal::jvm_value_to_lisp_arg' and `shim.rs''s
-     ;; `jobject_array_to_sexp'. So each argument must go through
-     ;; `jvm--resolve-sexp-result' first, the same as `call-done' does,
-     ;; to turn any such tag into a real `user-ptr' before FN sees it.
-     (let ((fn (gethash handle jvm--lisp-callbacks)))
-       (if (null fn)
-           (jvm--invoke-reply id nil (format "no such callback handle %s" handle))
-         (condition-case err
-             (jvm--invoke-reply id t (apply fn (mapcar #'jvm--resolve-sexp-result args)))
-           (error
-            (jvm--invoke-reply id nil (format "%S" err)))))))
-    (`(lisp-request)
-     ;; A JVM thread enqueued one or more Lisp-access requests (`intern',
-     ;; `apply', `type-of', `is-not-nil?', `eq', `prin1-to-string', or a
-     ;; GC-driven `FreeRef') on the Rust-side queue and woke us up to
-     ;; service them -- see `jvm--service-lisp-requests' and the design
-     ;; spec's "Request/reply flow". No payload: the request itself rides
-     ;; the Rust queue, not this message.
-     (jvm--service-lisp-requests))
-    (`(release ,handle)
-     ;; The JVM-side LispFunction proxy for HANDLE was garbage collected
-     ;; (see `ReleaseNotifier' in java/emacs_jni and its native `run',
-     ;; registered from `marshal.rs''s `register_release_on_gc'): drop our
-     ;; own function-table entry so it doesn't outlive the proxy that
-     ;; referenced it. A no-op if HANDLE is already gone.
-     (remhash handle jvm--lisp-callbacks))
-    (_ (message "emacs-jni: unrecognized channel message: %S" sexp))))
+;; The helpers below are called from `lisp_requests.rs''s `service_inbound'
+;; (the `#[defun]' process filter, `jvm--service-inbound') once VALUE/ARGS
+;; have already been converted to real Lisp values on the Rust side -- the
+;; pipe carries only a raw wakeup byte, never the payload itself.
 
-(defun jvm--resolve-sexp-result (result)
-  "Convert RESULT as parsed from the wire (may contain `(jvm-handle N)')
-into its final Lisp-visible form."
-  (pcase result
-    (`(jvm-handle ,n) (jvm--wrap-handle n))
-    (_ result)))
+(defun jvm--resolve-call (id ok value err)
+  "Resolve the pending `jvm-call-async' callback for ID."
+  (when-let ((callback (alist-get id jvm--pending-call)))
+    (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
+    (funcall callback ok value err)))
 
-(defun jvm--process-filter (_proc data)
-  "Accumulate DATA and dispatch each complete newline-terminated S-expression."
-  (setq jvm--filter-buffer (concat jvm--filter-buffer data))
-  (let (newline-pos)
-    (while (setq newline-pos (string-search "\n" jvm--filter-buffer))
-      (let ((line (substring jvm--filter-buffer 0 newline-pos)))
-        (setq jvm--filter-buffer (substring jvm--filter-buffer (1+ newline-pos)))
-        (unless (string-empty-p line)
-          (jvm--dispatch-message (read line)))))))
+(defun jvm--resolve-invoke (id handle args)
+  "Funcall the callback registered for HANDLE with ARGS (already real Lisp
+values, converted on the Rust side -- see the comment above), and reply to
+the JVM with the result via `jvm--invoke-reply'. On a Lisp error or other
+signal (including `quit', e.g. `C-g' during the callback), ERR is the real
+`(SYMBOL . DATA)' `condition-case' caught -- passed through as-is, not
+flattened into a string, so `jvm--invoke-reply' (`lib.rs') can marshal the
+real symbol/data into a `LispSignal' the JVM caller actually sees. The
+handler condition is `t', not `error', so the pending JVM future always
+completes: `quit' is not a subtype of `error' and would otherwise escape
+`condition-case' uncaught, leaving the future waiting forever."
+  (let ((fn (gethash handle jvm--lisp-callbacks)))
+    (if (null fn)
+        (jvm--invoke-reply id nil (cons 'error (list (format "no such callback handle %s" handle))))
+      (condition-case err
+          (jvm--invoke-reply id t (apply fn args))
+        (t (jvm--invoke-reply id nil err))))))
+
+(defun jvm--resolve-load-jar (id ok err)
+  "Resolve the pending `jvm-load-jar-async' callback for ID."
+  (when-let ((callback (alist-get id jvm--pending-load-jar)))
+    (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
+    (funcall callback ok err)))
+
+(defun jvm--apply-status (state detail)
+  "Apply a JVM lifecycle transition to STATE, logging optional DETAIL."
+  (setq jvm--status (intern state))
+  (when detail (jvm--log "[status] %s: %s" state detail))
+  (run-hook-with-args 'jvm-status-hook (intern state)))
+
+(defun jvm--log-message (level text)
+  "Append a `[LEVEL] TEXT' line to the `*jvm-log*' buffer and echo it."
+  (jvm--log "[%s] %s" level text)
+  (message "emacs-jni [%s]: %s" level text))
+
+(defun jvm--drop-callback (handle)
+  "Drop HANDLE's entry from `jvm--lisp-callbacks' (its JVM proxy was GC'd)."
+  (remhash handle jvm--lisp-callbacks))
 
 (defun jvm--ensure-pipe-process ()
   "Create the pipe process and open the Rust-side channel, once."
@@ -141,7 +113,7 @@ into its final Lisp-visible form."
     (setq jvm--pipe-process
           (make-pipe-process
            :name "emacs-jni-channel"
-           :filter #'jvm--process-filter
+           :filter #'jvm--service-inbound
            :noquery t))
     ;; Multiple Lisp threads may independently call a `-await' wrapper;
     ;; without this, any thread other than whichever one created the
@@ -356,8 +328,9 @@ for the non-blocking form and `jvm-new-await' for the worker-blocking form.")
 
 (defvar jvm--lisp-callbacks (make-hash-table :test 'eql)
   "Handle -> Lisp function, for functions wrapped as JVM LispFunction
-proxies. Entries are removed when the JVM notifies us via `(release
-HANDLE)' that the corresponding proxy was garbage collected.")
+proxies. Entries are removed via `jvm--drop-callback' when the JVM notifies
+us (an `Inbound::Release' on the Rust-side queue) that the corresponding
+proxy was garbage collected.")
 
 (defvar jvm--next-callback-handle 1
   "Monotonic counter for `jvm--lisp-callbacks' keys.")

@@ -147,21 +147,20 @@ non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
     (should (equal (jvm-clj-test--prin1 result) "(1 2 3)"))))
 
 (ert-deftest jvm-clj-test-apply-error-becomes-lisp-signal ()
-  "A Lisp `error' surfaces to Clojure as an ex-info tagged ::lisp-signal,
-carrying the signal symbol and data."
+  "A Lisp `error' surfaces to Clojure as a LispSignal caught by type,
+exposing the signal symbol and data as fields."
   (jvm-clj-test--ensure-ready)
   (should
    (equal
     (jvm-clj-test--eval
      "(try (emacs-jni.clj/apply (emacs-jni.clj/intern \"error\") \"boom\")
-        (catch clojure.lang.ExceptionInfo e
-          (let [d (ex-data e)]
-            (str (:type d) \"|\" (:symbol d)))))")
-    ":emacs-jni.clj/lisp-signal|error")))
+        (catch emacs_jni.core.LispSignal e
+          (str (emacs-jni.clj/->clj (.-symbol e)))))")
+    "error")))
 
 (ert-deftest jvm-clj-test-throw-becomes-lisp-throw ()
-  "A Lisp `throw' surfaces to Clojure as an ex-info tagged ::lisp-throw,
-carrying tag and value."
+  "A Lisp `throw' surfaces to Clojure as a LispThrow caught by type,
+exposing tag and value as fields."
   (jvm-clj-test--ensure-ready)
   (should
    (equal
@@ -170,10 +169,9 @@ carrying tag and value."
             form (emacs-jni.clj/apply (emacs-jni.clj/intern \"read\")
                                        \"(throw 'my-tag 42)\")]
         (try (emacs-jni.clj/apply f form)
-          (catch clojure.lang.ExceptionInfo e
-            (let [d (ex-data e)]
-              (str (:type d) \"|\" (:tag d) \"|\" (:value d))))))")
-    ":emacs-jni.clj/lisp-throw|my-tag|42")))
+          (catch emacs_jni.core.LispThrow e
+            (str (emacs-jni.clj/->clj (.-tag e)) \"|\" (.-value e)))))")
+    "my-tag|42")))
 
 (ert-deftest emacs-jni-jvm-clj-test/type-of-returns-a-clojure-symbol ()
   (jvm-clj-test--ensure-ready)

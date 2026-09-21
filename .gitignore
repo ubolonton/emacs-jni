@@ -1,3 +1,6 @@
 .probe/
 /target
 /target/emacs-jni-shim-classes/
+
+# Ephemeral cross-session handoff notes — never committed (specs/plans are tracked).
+/docs/superpowers/handoffs/

@@ -7,7 +7,6 @@ use jni::JNIVersion;
 
 use crate::commands::Cmd;
 use crate::marshal::marshal_error;
-use crate::protocol;
 use crate::status::{Status, STATUS};
 use crate::{channel, worker};
 
@@ -21,12 +20,20 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
             // synchronous `jvm--call-direct` (see `runtime` and `call_direct`).
             crate::runtime::set_vm(vm.clone());
             STATUS.finish(Status::Ready);
-            channel::send(&protocol::status_message(Status::Ready, None));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                status: Status::Ready,
+                detail: None,
+            });
+            channel::poke();
             vm
         }
         Err(e) => {
             STATUS.finish(Status::StartFailed);
-            channel::send(&protocol::status_message(Status::StartFailed, Some(&e)));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                status: Status::StartFailed,
+                detail: Some(e),
+            });
+            channel::poke();
             worker::clear_sender();
             return;
         }
@@ -57,25 +64,23 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
                 std::thread::spawn(move || handle_call(&vm, loader, id, target, member, args));
                 false
             }
-            Cmd::InvokeReply { id, ok, result } => {
+            Cmd::InvokeReply { id, outcome } => {
                 // Handled inline, unlike `Cmd::Call` — see `handle_invoke_reply`'s
                 // own doc comment for why completing an already-existing
                 // `CompletableFuture` doesn't need its own thread.
-                handle_invoke_reply(&vm, id, ok, result);
+                handle_invoke_reply(&vm, id, outcome);
                 false
             }
             // Handled inline, like `Cmd::InvokeReply` — dropping a
-            // `GlobalRef` is a single cheap JNI call (`DeleteGlobalRef`),
-            // not an arbitrary user method, so it doesn't need its own
-            // thread (spec "Worker thread role"). This is the other half
-            // of `handles::JvmHandle::Drop`'s round trip: Lisp's GC
-            // collected a `user-ptr` wrapping a JVM object, which posted
-            // this command instead of releasing the ref directly (that
-            // `Drop` may run on a thread with no JNI attachment at all —
-            // see its own doc comment), and now the worker thread (which
-            // *is* attached) actually drops it.
-            Cmd::ReleaseRef { handle } => {
-                crate::handles::release(handle);
+            // `GlobalRef` is one cheap JNI call (`DeleteGlobalRef`), not an
+            // arbitrary user method (spec "Worker thread role"). Lisp's GC
+            // collected a `user-ptr` wrapping a JVM object; its `Drop`
+            // handed the shared reference here (its own `Drop` may run on a
+            // thread with no JNI attachment). Dropping this last `Arc` runs
+            // `Global::Drop`'s `DeleteGlobalRef` on this attached worker
+            // thread.
+            Cmd::ReleaseRef { object } => {
+                std::mem::drop(object);
                 false
             }
             // Handled inline, same reasoning as `Cmd::InvokeReply`: completing
@@ -102,7 +107,11 @@ pub fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>
             Err(payload) => {
                 let message = panic_message(&payload);
                 STATUS.finish(Status::Crashed);
-                channel::send(&protocol::status_message(Status::Crashed, Some(&message)));
+                crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                    status: Status::Crashed,
+                    detail: Some(message),
+                });
+                channel::poke();
                 worker::clear_sender();
                 return;
             }
@@ -182,7 +191,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     // caller actually did this at runtime before Task 6 (only
     // `shim.rs`'s own unit test, against its own throwaway JVM) — Task 6
     // is the first thing that references a shim class outside that test
-    // (`marshal::lisp_arg_to_jvalue`'s `LispArg::Callback` arm calls
+    // (`marshal::lisp_arg_to_jvalue`'s `BridgeValue::Callback` arm calls
     // `find_class(emacs_jni/core/LispFunction)` on every `jvm-call` argument
     // that turns out to be a Lisp function), so without this, that
     // `find_class` would throw `ClassNotFoundException` against a real
@@ -235,10 +244,11 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
         Ok(()) => {}
         Err(e) if is_first_attempt => return Err(e.to_string()),
         Err(e) => {
-            channel::send(&protocol::log_message(
-                "error",
-                &format!("failed to define emacs_jni.core shim classes: {e}"),
-            ));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+                level: "error".to_string(),
+                text: format!("failed to define emacs_jni.core shim classes: {e}"),
+            });
+            channel::poke();
         }
     }
 
@@ -259,7 +269,11 @@ fn handle_pause(vm: &JavaVM) {
     match vm.detach_current_thread() {
         Ok(()) => {
             STATUS.finish(Status::Paused);
-            channel::send(&protocol::status_message(Status::Paused, None));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                status: Status::Paused,
+                detail: None,
+            });
+            channel::poke();
         }
         Err(e) => {
             // Detach failing is unexpected; stay in `pausing` rather than
@@ -267,10 +281,11 @@ fn handle_pause(vm: &JavaVM) {
             // line rather than a status (there's no `pause-failed` state
             // in the spec's state machine, so pausing simply never
             // completes — the caller's `-sync` wrapper times out).
-            channel::send(&protocol::log_message(
-                "error",
-                &format!("jvm-pause: detach_current_thread failed: {e}"),
-            ));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+                level: "error".to_string(),
+                text: format!("jvm-pause: detach_current_thread failed: {e}"),
+            });
+            channel::poke();
         }
     }
 }
@@ -278,10 +293,8 @@ fn handle_pause(vm: &JavaVM) {
 fn handle_stop(vm: JavaVM) {
     // Safety: `destroy` requires no Java methods on the calling thread's
     // stack (true here — we're between command handlers) and that the
-    // JavaVM isn't used again afterward except to drop it, which is
-    // exactly what follows.
+    // JavaVM isn't used again afterward — nothing below touches `vm`.
     let result = unsafe { vm.destroy() };
-    std::mem::drop(vm);
     // Drop the shared handles the main thread reads for `call_direct`: the VM
     // is gone now. The main thread already detached itself in the `jvm--stop`
     // defun (before this `Cmd::Stop` was sent), so no main-thread attachment
@@ -291,11 +304,19 @@ fn handle_stop(vm: JavaVM) {
     match result {
         Ok(()) => {
             STATUS.finish(Status::Stopped);
-            channel::send(&protocol::status_message(Status::Stopped, None));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                status: Status::Stopped,
+                detail: None,
+            });
+            channel::poke();
         }
         Err(e) => {
             STATUS.finish(Status::StopFailed);
-            channel::send(&protocol::status_message(Status::StopFailed, Some(&e.to_string())));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                status: Status::StopFailed,
+                detail: Some(e.to_string()),
+            });
+            channel::poke();
         }
     }
     worker::clear_sender();
@@ -309,11 +330,19 @@ fn handle_resume(vm: &JavaVM) {
     match result {
         Ok(()) => {
             STATUS.finish(Status::Ready);
-            channel::send(&protocol::status_message(Status::Ready, None));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                status: Status::Ready,
+                detail: None,
+            });
+            channel::poke();
         }
         Err(e) => {
             STATUS.finish(Status::StartFailed);
-            channel::send(&protocol::status_message(Status::StartFailed, Some(&e.to_string())));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Status {
+                status: Status::StartFailed,
+                detail: Some(e.to_string()),
+            });
+            channel::poke();
         }
     }
 }
@@ -334,11 +363,12 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     // so this primitive doubles as "add a classpath directory", used by
     // `jvm-clj-start` to add `clojure-src/` alongside real jars.
     if !std::path::Path::new(&path).exists() {
-        channel::send(&protocol::load_jar_done_message(
+        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
             id,
-            false,
-            Some(&format!("jar/classpath entry not found: {path}")),
-        ));
+            ok: false,
+            err: Some(format!("jar/classpath entry not found: {path}")),
+        });
+        channel::poke();
         return;
     }
 
@@ -350,17 +380,26 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     });
 
     match result {
-        Ok(()) => channel::send(&protocol::load_jar_done_message(id, true, None)),
-        Err(e) => channel::send(&protocol::load_jar_done_message(id, false, Some(&e.to_string()))),
+        Ok(()) => crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
+            id,
+            ok: true,
+            err: None,
+        }),
+        Err(e) => crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::LoadJarDone {
+            id,
+            ok: false,
+            err: Some(e.to_string()),
+        }),
     }
+    channel::poke();
 }
 
 /// Synchronous main-thread counterpart of `handle_load_jar`: adds PATH to the
 /// shared classloader on *this* thread, sharing the one loader with the async
 /// path through `runtime::get_or_create_loader`. Returns an error string (a
-/// missing path, or a JNI failure) instead of sending a `load-jar-done`
-/// message, since the caller (`jvm--load-jar-direct`) returns or signals
-/// directly. See `call_direct` for the main-thread attach model.
+/// missing path, or a JNI failure) instead of enqueueing an
+/// `Inbound::LoadJarDone`, since the caller (`jvm--load-jar-direct`) returns
+/// or signals directly. See `call_direct` for the main-thread attach model.
 pub(crate) fn load_jar_direct(vm: &JavaVM, path: &str) -> Result<(), String> {
     // Same up-front existence check as `handle_load_jar`: `addURL` is lazy and
     // never fails for a nonexistent path on its own.
@@ -465,10 +504,7 @@ fn add_jar_url(
         &method,
         jni::jni_str!("invoke"),
         jni::jni_sig!((obj: java.lang.Object, args: [java.lang.Object]) -> java.lang.Object),
-        &[
-            jni::objects::JValue::Object(loader),
-            jni::objects::JValue::Object(&invoke_args),
-        ],
+        &[jni::objects::JValue::Object(loader), jni::objects::JValue::Object(&invoke_args)],
     )?;
 
     Ok(())
@@ -480,55 +516,27 @@ fn add_jar_url(
 /// completing a future is not itself a slow operation (it's a single JNI
 /// call to `CompletableFuture#complete`/`#completeExceptionally`, not an
 /// arbitrary user method that might block for arbitrary reasons). This is
-/// the other half of the round trip `shim::lisp_function_call` starts:
-/// that function posts `(invoke ID HANDLE ARGS)` and returns immediately;
-/// this function runs once Lisp's `jvm--invoke-reply` sends back
-/// `Cmd::InvokeReply` with the Lisp function's result (or error).
-fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::LispArg) {
+/// the other half of the round trip `shim::lisp_function_call` starts: that
+/// function enqueues an `Inbound::Invoke` and returns immediately; this
+/// function runs once Lisp's `jvm--invoke-reply` sends back
+/// `Cmd::InvokeReply` with the Lisp callback's outcome — its real return
+/// value, or the real `condition-case` signal it raised, already marshalled
+/// to a `LispOutcome`. Identical shape to `handle_lisp_reply` below (both
+/// just hand their `LispOutcome` to `complete_future_with_reply`) — the
+/// callback round trip and the Clojure apply round trip complete their
+/// futures exactly the same way.
+fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::commands::LispOutcome) {
     let Some(future) = crate::pending::take(id) else {
-        channel::send(&protocol::log_message("error", &format!("invoke-reply for unknown id {id}")));
+        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+            level: "error".to_string(),
+            text: format!("invoke-reply for unknown id {id}"),
+        });
+        channel::poke();
         return;
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
         let future_local = env.new_local_ref(future.as_obj())?;
-        if ok {
-            // `LispCallable#call` is declared to return `CompletableFuture<Object>`
-            // -- `Object` is the only param type `lisp_arg_to_jvalue` ever
-            // needs to marshal against here, matching how `Method.invoke`'s
-            // own `Object[]` args array (Task 5's `build_invoke_args`) does
-            // the same "unknown declared type, box everything" thing.
-            let param_type = env.find_class(jni::jni_str!("java/lang/Object"))?;
-            let jvalue = crate::marshal::lisp_arg_to_jvalue(env, &result, &param_type)?;
-            let boxed = crate::marshal::box_if_primitive(env, jvalue)?;
-            env.call_method(
-                &future_local,
-                jni::jni_str!("complete"),
-                jni::jni_sig!((v: java.lang.Object) -> boolean),
-                &[jni::objects::JValueOwned::Object(boxed).borrow()],
-            )?;
-        } else {
-            // The Lisp side (`jvm--invoke-reply`) always sends a formatted
-            // error message as a plain string for a failed callback (see
-            // `jvm_invoke_reply` in `lib.rs`) -- any other shape here would
-            // mean a protocol-level bug, not a normal application error, so
-            // there's nothing sensible to complete the future with; just
-            // leave it pending rather than fabricate a result.
-            let crate::commands::LispArg::Str(message) = result else {
-                return Ok(());
-            };
-            complete_future_with_reply(
-                env,
-                &future_local,
-                crate::commands::LispReplyValue::Signal {
-                    symbol: Box::new(crate::commands::LispReplyValue::Symbol {
-                        name: "error".to_string(),
-                        keyword: false,
-                    }),
-                    data: Box::new(crate::commands::LispReplyValue::Str(message)),
-                },
-            )?;
-        }
-        Ok(())
+        complete_future_with_reply(env, &future_local, outcome)
     });
     if let Err(e) = result {
         // The future is already removed from `pending` by this point (via
@@ -536,10 +544,11 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::
         // through -- the Java side just sees its future hang until its own
         // wait times out. Logging here at least makes the failure visible
         // in `*jvm-log*` rather than disappearing silently.
-        channel::send(&protocol::log_message(
-            "error",
-            &format!("invoke-reply for id {id}: failed to complete the pending future: {e}"),
-        ));
+        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+            level: "error".to_string(),
+            text: format!("invoke-reply for id {id}: failed to complete the pending future: {e}"),
+        });
+        channel::poke();
     }
 }
 
@@ -551,9 +560,13 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, ok: bool, result: crate::commands::
 /// attached to the JVM"). Runs inline, like `handle_invoke_reply`, for the
 /// same reason: completing a future is one or two cheap JNI calls, not an
 /// arbitrary user method.
-fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispReplyValue) {
+fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispOutcome) {
     let Some(future) = crate::pending::take(id) else {
-        channel::send(&protocol::log_message("error", &format!("lisp-reply for unknown id {id}")));
+        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+            level: "error".to_string(),
+            text: format!("lisp-reply for unknown id {id}"),
+        });
+        channel::poke();
         return;
     };
     let result: jni::errors::Result<()> = vm.attach_current_thread(|env| {
@@ -561,30 +574,35 @@ fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::commands::LispReplyValu
         complete_future_with_reply(env, &future_local, value)
     });
     if let Err(e) = result {
-        channel::send(&protocol::log_message(
-            "error",
-            &format!("lisp-reply for id {id}: failed to complete the pending future: {e}"),
-        ));
+        crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Log {
+            level: "error".to_string(),
+            text: format!("lisp-reply for id {id}: failed to complete the pending future: {e}"),
+        });
+        channel::poke();
     }
 }
 
-/// Builds the actual Java value a successful `LispReplyValue` becomes —
-/// factored out of `handle_lisp_reply` since the `LispReplyValue::Signal`/
+/// Builds the actual Java value a successful `LispOutcome` becomes —
+/// factored out of `handle_lisp_reply` since the `LispOutcome::Signal`/
 /// `Throw` cases (handled by that function's caller) never reach here.
 ///
 /// `pub(crate)` because the reentrant direct path (`shim.rs`) builds the same
-/// Java object on its own thread, from the `LispReplyValue`
+/// Java object on its own thread, from the `LispOutcome`
 /// `lisp_requests::compute_reply` returns, instead of over the channel.
 pub(crate) fn build_lisp_reply_object<'local>(
     env: &mut jni::Env<'local>,
-    value: crate::commands::LispReplyValue,
+    value: crate::commands::LispOutcome,
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
     match value {
-        crate::commands::LispReplyValue::Ptr(ptr) => {
-            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
-            env.new_object(&class, jni::jni_sig!((ptr: long) -> void), &[jni::objects::JValue::Long(ptr)])
+        crate::commands::LispOutcome::Value(bridge) => {
+            // Reuse the one Lisp->JVM marshaller against java.lang.Object,
+            // then box any primitive — identical to how handle_invoke_reply
+            // completes a callback's return value.
+            let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
+            let jvalue = crate::marshal::lisp_arg_to_jvalue(env, &bridge, &object_class)?;
+            crate::marshal::box_if_primitive(env, jvalue)
         }
-        crate::commands::LispReplyValue::Bool(b) => {
+        crate::commands::LispOutcome::Bool(b) => {
             let class = env.find_class(jni::jni_str!("java/lang/Boolean"))?;
             env.call_static_method(
                 &class,
@@ -594,56 +612,25 @@ pub(crate) fn build_lisp_reply_object<'local>(
             )?
             .l()
         }
-        crate::commands::LispReplyValue::Str(s) => {
-            let jstr = env.new_string(&s)?;
-            Ok(jstr.into())
-        }
-        crate::commands::LispReplyValue::Nil => Ok(jni::objects::JObject::null()),
-        crate::commands::LispReplyValue::Int(n) => {
-            let class = env.find_class(jni::jni_str!("java/lang/Long"))?;
-            env.call_static_method(
-                &class,
-                jni::jni_str!("valueOf"),
-                jni::jni_sig!((v: long) -> java.lang.Long),
-                &[jni::objects::JValue::Long(n)],
-            )?
-            .l()
-        }
-        crate::commands::LispReplyValue::Float(f) => {
-            let class = env.find_class(jni::jni_str!("java/lang/Double"))?;
-            env.call_static_method(
-                &class,
-                jni::jni_str!("valueOf"),
-                jni::jni_sig!((v: double) -> java.lang.Double),
-                &[jni::objects::JValue::Double(f)],
-            )?
-            .l()
-        }
-        crate::commands::LispReplyValue::BigInt(digits) => {
-            let jstr = env.new_string(&digits)?;
-            let class = env.find_class(jni::jni_str!("java/math/BigInteger"))?;
+        crate::commands::LispOutcome::Ptr(ptr) => {
+            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
             env.new_object(
                 &class,
-                jni::jni_sig!((val: java.lang.String) -> void),
-                &[jni::objects::JValueOwned::Object(jstr.into()).borrow()],
+                jni::jni_sig!((ptr: long) -> void),
+                &[jni::objects::JValue::Long(ptr)],
             )
         }
-        crate::commands::LispReplyValue::Symbol { name, keyword } => {
-            let jname: jni::objects::JObject = env.new_string(&name)?.into();
-            let class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
-            env.new_object(
-                &class,
-                jni::jni_sig!((name: java.lang.String, keyword: boolean) -> void),
-                &[jni::objects::JValue::Object(&jname), jni::objects::JValue::Bool(keyword)],
+        crate::commands::LispOutcome::Signal { .. }
+        | crate::commands::LispOutcome::Throw { .. } => {
+            unreachable!(
+                "Signal/Throw are handled by complete_future_with_reply/throw_non_local_exit \
+                 before build_lisp_reply_object"
             )
-        }
-        crate::commands::LispReplyValue::Signal { .. } | crate::commands::LispReplyValue::Throw { .. } => {
-            unreachable!("Signal/Throw are handled by handle_lisp_reply before build_lisp_reply_object")
         }
     }
 }
 
-/// Turns one `LispReplyValue` into a Java result: a `Signal`/`Throw`
+/// Turns one `LispOutcome` into a Java result: a `Signal`/`Throw`
 /// completes FUTURE exceptionally with the matching `LispNonLocalExit`, and
 /// anything else completes it normally with its built object.
 ///
@@ -654,10 +641,10 @@ pub(crate) fn build_lisp_reply_object<'local>(
 pub(crate) fn complete_future_with_reply<'local>(
     env: &mut jni::Env<'local>,
     future: &jni::objects::JObject<'local>,
-    value: crate::commands::LispReplyValue,
+    value: crate::commands::LispOutcome,
 ) -> jni::errors::Result<()> {
     match value {
-        crate::commands::LispReplyValue::Signal { symbol, data } => {
+        crate::commands::LispOutcome::Signal { symbol, data } => {
             let ex = build_non_local_exit(env, 0, *symbol, *data)?;
             env.call_method(
                 future,
@@ -666,7 +653,7 @@ pub(crate) fn complete_future_with_reply<'local>(
                 &[jni::objects::JValueOwned::Object(ex).borrow()],
             )?;
         }
-        crate::commands::LispReplyValue::Throw { tag, value } => {
+        crate::commands::LispOutcome::Throw { tag, value } => {
             let ex = build_non_local_exit(env, 1, *tag, *value)?;
             env.call_method(
                 future,
@@ -688,26 +675,28 @@ pub(crate) fn complete_future_with_reply<'local>(
     Ok(())
 }
 
-/// Builds an `emacs_jni.core.LispNonLocalExit(kind, symbolOrTag,
-/// dataOrValue)` from two already-classified reply values. `kind` is 0
-/// (signal) or 1 (throw).
+/// Builds an `emacs_jni.core.LispSignal(a, b)` (`kind == 0`) or
+/// `LispThrow(a, b)` (`kind == 1`) from two already-classified reply
+/// values — both still a `LispNonLocalExit`/`Throwable`, so the existing
+/// catch/rethrow sites (`describe_caught_java_exception`,
+/// `extract_non_local_exit`) keep matching by the shared base.
 fn build_non_local_exit<'local>(
     env: &mut jni::Env<'local>,
     kind: i32,
-    a: crate::commands::LispReplyValue,
-    b: crate::commands::LispReplyValue,
+    a: crate::commands::LispOutcome,
+    b: crate::commands::LispOutcome,
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
     let a_obj = build_lisp_reply_object(env, a)?;
     let b_obj = build_lisp_reply_object(env, b)?;
-    let class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
+    let class = if kind == 0 {
+        env.find_class(jni::jni_str!("emacs_jni/core/LispSignal"))?
+    } else {
+        env.find_class(jni::jni_str!("emacs_jni/core/LispThrow"))?
+    };
     env.new_object(
         &class,
-        jni::jni_sig!((kind: int, a: java.lang.Object, b: java.lang.Object) -> void),
-        &[
-            jni::objects::JValue::Int(kind),
-            jni::objects::JValue::Object(&a_obj),
-            jni::objects::JValue::Object(&b_obj),
-        ],
+        jni::jni_sig!((a: java.lang.Object, b: java.lang.Object) -> void),
+        &[jni::objects::JValue::Object(&a_obj), jni::objects::JValue::Object(&b_obj)],
     )
 }
 
@@ -720,8 +709,8 @@ fn build_non_local_exit<'local>(
 pub(crate) fn throw_non_local_exit(
     env: &mut jni::Env,
     kind: i32,
-    a: crate::commands::LispReplyValue,
-    b: crate::commands::LispReplyValue,
+    a: crate::commands::LispOutcome,
+    b: crate::commands::LispOutcome,
 ) -> jni::errors::Error {
     let thrown = build_non_local_exit(env, kind, a, b)
         .and_then(|ex| env.cast_local::<jni::objects::JThrowable>(ex))
@@ -733,8 +722,8 @@ pub(crate) fn throw_non_local_exit(
 }
 
 /// Handles a `Cmd::Call`: resolves TARGET.MEMBER reflectively and invokes
-/// it with ARGS, then sends a `call-done` message with the result. Runs on
-/// its own short-lived thread (spawned by `run`'s `Cmd::Call` arm above) —
+/// it with ARGS, then enqueues an `Inbound::CallDone` with the result. Runs
+/// on its own short-lived thread (spawned by `run`'s `Cmd::Call` arm above) —
 /// never inline on the worker's dispatch loop, per spec "Worker thread
 /// role": an arbitrary Java call can take a long time for reasons unrelated
 /// to callbacks, and must not stall other pending commands.
@@ -744,18 +733,30 @@ fn handle_call(
     id: u64,
     target: crate::commands::CallTarget,
     member: String,
-    args: Vec<crate::commands::LispArg>,
+    args: Vec<crate::commands::BridgeValue>,
 ) {
-    let result: jni::errors::Result<crate::commands::LispArg> =
+    let result: jni::errors::Result<crate::commands::BridgeValue> =
         vm.attach_current_thread(|env| resolve_and_invoke(env, &loader, &target, &member, &args));
 
     match result {
         Ok(value) => {
-            let sexp = crate::marshal::lisp_arg_to_sexp(&value);
-            channel::send(&protocol::call_done_message(id, true, Some(&sexp), None));
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::CallDone {
+                id,
+                ok: true,
+                result: value,
+                err: None,
+            });
         }
-        Err(e) => channel::send(&protocol::call_done_message(id, false, None, Some(&e.to_string()))),
+        Err(e) => {
+            crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::CallDone {
+                id,
+                ok: false,
+                result: crate::commands::BridgeValue::Nil,
+                err: Some(e.to_string()),
+            });
+        }
     }
+    channel::poke();
 }
 
 /// Resolves TARGET.MEMBER against the shared classloader and invokes it with
@@ -764,15 +765,15 @@ fn handle_call(
 /// Shared by the async worker (`handle_call`, on a spawned thread) and the
 /// synchronous main-thread path (`call_direct`). Identical behaviour in both:
 /// the only differences are which thread runs it and what the caller does
-/// with the `LispArg` afterward (an sexp `call-done` message vs. a direct
-/// `Value`).
+/// with the `BridgeValue` afterward (an `Inbound::CallDone` enqueue vs. a
+/// direct `Value`).
 pub(crate) fn resolve_and_invoke(
     env: &mut jni::Env,
     loader: &Option<crate::runtime::SharedLoader>,
     target: &crate::commands::CallTarget,
     member: &str,
-    args: &[crate::commands::LispArg],
-) -> jni::errors::Result<crate::commands::LispArg> {
+    args: &[crate::commands::BridgeValue],
+) -> jni::errors::Result<crate::commands::BridgeValue> {
     // A freshly attached thread's context classloader is null. Plain
     // JNI class resolution (find_class/loadClass, used just below)
     // doesn't need it, but Clojure's own namespace loader
@@ -789,7 +790,12 @@ pub(crate) fn resolve_and_invoke(
         let loader_local = env.new_local_ref(global.as_obj())?;
         let thread_class = env.find_class(jni::jni_str!("java/lang/Thread"))?;
         let current_thread = env
-            .call_static_method(&thread_class, jni::jni_str!("currentThread"), jni::jni_sig!(() -> java.lang.Thread), &[])?
+            .call_static_method(
+                &thread_class,
+                jni::jni_str!("currentThread"),
+                jni::jni_sig!(() -> java.lang.Thread),
+                &[],
+            )?
             .l()?;
         env.call_method(
             &current_thread,
@@ -826,10 +832,8 @@ pub(crate) fn resolve_and_invoke(
             };
             (class, None)
         }
-        crate::commands::CallTarget::Object(handle) => {
-            let global = crate::handles::resolve(*handle)
-                .ok_or_else(|| marshal_error(&format!("unknown JVM object handle {handle}")))?;
-            let local = env.new_local_ref(global.as_obj())?;
+        crate::commands::CallTarget::Object(object) => {
+            let local = env.new_local_ref(object.0.as_obj())?;
             (env.get_object_class(&local)?, Some(local))
         }
     };
@@ -844,14 +848,14 @@ pub(crate) fn resolve_and_invoke(
 thread_local! {
     /// Nesting depth of in-flight `call_direct` frames on this thread. Used
     /// only to gate the reentrant-boundary outbound path
-    /// (`describe_pending_java_exception` classifies a `LispNonLocalExit` into
+    /// (`describe_caught_java_exception` classifies a `LispNonLocalExit` into
     /// `PENDING_NLE` only when `> 0`, i.e. inside a direct call — never on the
     /// async worker thread). It no longer drives detaching: the main thread
     /// stays permanently attached, and non-main callers rely on the scoped
     /// attach in `call_direct` to detach on return.
     static ATTACH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 
-    /// Side channel from `describe_pending_java_exception` back to
+    /// Side channel from `describe_caught_java_exception` back to
     /// `call_direct`, for the outbound half of the reentrant boundary: a Lisp
     /// signal/throw raised in a callback unwinds up through Clojure as a
     /// `LispNonLocalExit`; when it reaches the top of a direct call
@@ -872,7 +876,11 @@ pub(crate) enum DirectError {
     /// `LispNonLocalExit`. `kind` is 0 (signal) or 1 (throw); `a`/`b` are the
     /// already-classified symbol/data or tag/value, ready to rebind to the
     /// caller's `Env` and re-raise via `(signal …)`/`(throw …)`.
-    NonLocalExit { kind: i32, a: crate::lisp_requests::LispRequestArg, b: crate::lisp_requests::LispRequestArg },
+    NonLocalExit {
+        kind: i32,
+        a: crate::lisp_requests::LispInput,
+        b: crate::lisp_requests::LispInput,
+    },
     /// Any other JVM-side failure — surfaced as `jvm-error` with this message.
     Jni(jni::errors::Error),
 }
@@ -882,15 +890,15 @@ pub(crate) enum DirectError {
 /// return the marshalled result. The main thread stays permanently attached
 /// (for a stable thread identity); the per-call attach is scoped, so on any
 /// *other* thread it detaches on return (see the attach comments in the body).
-/// Called by the `jvm--call-direct` defun, which converts the `LispArg` to a
+/// Called by the `jvm--call-direct` defun, which converts the `BridgeValue` to a
 /// real `Value` on the same thread's live `Env`.
 pub(crate) fn call_direct(
     vm: &JavaVM,
     loader: &Option<crate::runtime::SharedLoader>,
     target: &crate::commands::CallTarget,
     member: &str,
-    args: &[crate::commands::LispArg],
-) -> Result<crate::commands::LispArg, DirectError> {
+    args: &[crate::commands::BridgeValue],
+) -> Result<crate::commands::BridgeValue, DirectError> {
     ATTACH_DEPTH.with(|d| d.set(d.get() + 1));
     // Clear any stale slot before this frame's invoke, so a `Some` seen after
     // it can only be this frame's (each frame fills and takes its own).
@@ -907,22 +915,24 @@ pub(crate) fn call_direct(
     // `make-thread` Lisp thread) is never recorded as main, so its scoped
     // attach owns the attachment and detaches on return — transient, no leaked
     // attachment to block a later `destroy`.
-    if crate::runtime::on_main_thread() && !crate::runtime::main_attached() {
-        if vm.attach_current_thread(|_env| Ok::<(), jni::errors::Error>(())).is_ok() {
-            crate::runtime::set_main_attached(true);
-        }
+    if crate::runtime::on_main_thread()
+        && !crate::runtime::main_attached()
+        && vm.attach_current_thread(|_env| Ok::<(), jni::errors::Error>(())).is_ok()
+    {
+        crate::runtime::set_main_attached(true);
     }
 
     // The actual invoke always goes through a *scoped* attach: a no-op on the
     // permanently-attached main thread, an owning attach-and-detach on any
     // other thread.
-    let result =
-        vm.attach_current_thread_for_scope(|env| resolve_and_invoke(env, loader, target, member, args));
+    let result = vm.attach_current_thread_for_scope(|env| {
+        resolve_and_invoke(env, loader, target, member, args)
+    });
 
     ATTACH_DEPTH.with(|d| d.set(d.get() - 1));
     match result {
         Ok(arg) => Ok(arg),
-        // A `LispNonLocalExit` reconstructed by `describe_pending_java_exception`
+        // A `LispNonLocalExit` reconstructed by `describe_caught_java_exception`
         // takes precedence over its flattened message: re-raise the original
         // signal/throw. Otherwise it's a genuine JVM failure → `jvm-error`.
         Err(e) => Err(PENDING_NLE.with(|s| s.borrow_mut().take()).unwrap_or(DirectError::Jni(e))),
@@ -950,10 +960,9 @@ fn resolve_class_via_loader<'local>(
     env.cast_local::<jni::objects::JClass>(class_obj)
 }
 
-/// Renders a pending Java exception (after a reflective `Method.invoke`/
-/// `Constructor.newInstance` call reports `Error::JavaException`) as a
-/// readable message that includes the whole `getCause()` chain, not just
-/// the outermost exception.
+/// Renders an already-caught Java exception (the caller must `exception_catch()`
+/// it first — see below) as a readable message that includes the whole
+/// `getCause()` chain, not just the outermost exception.
 ///
 /// This matters specifically for `Method.invoke`/`Constructor.newInstance`:
 /// both always wrap whatever the *target* code actually threw in an
@@ -971,16 +980,19 @@ fn resolve_class_via_loader<'local>(
 /// \nStack trace:\n0: ...DirectMethodHandleAccessor.invoke...\n1: ...
 /// Method.invoke...\n"` — true, but useless for diagnosing what actually
 /// went wrong (found empirically running this task's own ERT test: see
-/// task-7-report.md). Catching and describing the exception here instead,
-/// immediately after the failing reflective call and before it can escape
-/// this function, lets the message include the real cause.
-fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
-    let caught = match env.exception_catch() {
-        Err(e) => e,
-        Ok(()) => {
-            return marshal_error("expected a pending Java exception (Error::JavaException) but found none")
-        }
-    };
+/// task-7-report.md). Describing the exception here, immediately after the
+/// failing reflective call and before it can escape this function, lets the
+/// message include the real cause.
+///
+/// Takes an already-caught exception rather than catching it itself: callers
+/// at the invoke sites (`invoke_method`/`invoke_constructor`) need to inspect
+/// the caught exception first (`is_overload_arg_mismatch`) to decide whether
+/// to fall through to the next overload candidate or describe-and-return, so
+/// the catch has to happen before this is called.
+fn describe_caught_java_exception(
+    env: &mut jni::Env,
+    caught: jni::errors::Error,
+) -> jni::errors::Error {
     let jni::errors::Error::CaughtJavaException { name, msg, exception, .. } = caught else {
         // `exception_catch` itself failed in some unexpected way (e.g.
         // couldn't query the throwable's class/message) -- surface that
@@ -1037,6 +1049,22 @@ fn describe_pending_java_exception(env: &mut jni::Env) -> jni::errors::Error {
     marshal_error(&lines.join("\n"))
 }
 
+/// True when CAUGHT is a bare `IllegalArgumentException` straight off
+/// `Method.invoke`/`Constructor.newInstance` — the JDK's own signal that ARGS
+/// didn't fit the candidate's declared parameter types (e.g. a `Str` argument
+/// marshalled fine as a `String` but the candidate actually wanted a `long`).
+/// A real exception thrown by the invoked method/constructor body always
+/// arrives wrapped in `InvocationTargetException` instead, so this can't
+/// mistake a genuine `IllegalArgumentException` thrown *by user code* for an
+/// overload mismatch — that one comes through with a different `name`.
+fn is_overload_arg_mismatch(caught: &jni::errors::Error) -> bool {
+    matches!(
+        caught,
+        jni::errors::Error::CaughtJavaException { name, .. }
+            if name == "java.lang.IllegalArgumentException"
+    )
+}
+
 /// Walks THROWABLE's `getCause()` chain for an `emacs_jni.core.LispNonLocalExit`
 /// and, if found, classifies its `kind`/`symbolOrTag`/`dataOrValue` back into a
 /// `DirectError::NonLocalExit`. The two fields run through the same
@@ -1050,7 +1078,7 @@ fn extract_non_local_exit<'local>(
 ) -> jni::errors::Result<Option<DirectError>> {
     let nle_class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
     let mut current = throwable;
-    // Bounded like `describe_pending_java_exception`'s own walk: a normal cause
+    // Bounded like `describe_caught_java_exception`'s own walk: a normal cause
     // chain can't cycle, but this is recovery code, not worth an unbounded loop.
     for _ in 0..10 {
         if current.is_null() {
@@ -1090,8 +1118,8 @@ fn invoke_method(
     class: &jni::objects::JClass,
     instance: Option<&jni::objects::JObject>,
     method_name: &str,
-    args: &[crate::commands::LispArg],
-) -> jni::errors::Result<crate::commands::LispArg> {
+    args: &[crate::commands::BridgeValue],
+) -> jni::errors::Result<crate::commands::BridgeValue> {
     let methods = env
         .call_method(
             class,
@@ -1106,10 +1134,21 @@ fn invoke_method(
     let null_receiver = jni::objects::JObject::null();
     let receiver = instance.unwrap_or(&null_receiver);
 
+    // Remembers the most recent invoke-time argument mismatch (a bare
+    // `IllegalArgumentException`, per `is_overload_arg_mismatch`) so the
+    // final "no method found" error can describe *why* the closest same-
+    // name/arity candidate didn't work, instead of a bare "not found".
+    let mut last_arg_mismatch: Option<jni::errors::Error> = None;
+
     for i in 0..count {
         let candidate = methods.get_element(env, i)?;
         let name = env
-            .call_method(&candidate, jni::jni_str!("getName"), jni::jni_sig!(() -> java.lang.String), &[])?
+            .call_method(
+                &candidate,
+                jni::jni_str!("getName"),
+                jni::jni_sig!(() -> java.lang.String),
+                &[],
+            )?
             .l()?;
         let name = env.cast_local::<jni::objects::JString>(name)?.to_string();
         if name != method_name {
@@ -1143,32 +1182,49 @@ fn invoke_method(
             &candidate,
             jni::jni_str!("invoke"),
             jni::jni_sig!((obj: java.lang.Object, args: [java.lang.Object]) -> java.lang.Object),
-            &[
-                jni::objects::JValue::Object(receiver),
-                jni::objects::JValue::Object(&invoke_args),
-            ],
+            &[jni::objects::JValue::Object(receiver), jni::objects::JValue::Object(&invoke_args)],
         ) {
             Ok(v) => v.l()?,
-            // See `describe_pending_java_exception`'s doc comment: without
-            // this, the caller only ever learns "a Java exception was
-            // thrown", not what it actually said.
-            Err(jni::errors::Error::JavaException) => return Err(describe_pending_java_exception(env)),
+            // A bare `IllegalArgumentException` here means ARGS didn't fit
+            // THIS candidate's declared parameter types (marshalling alone
+            // can't catch every mismatch, e.g. `Str` fits any reference
+            // parameter type) — fall through to the next same-name/arity
+            // candidate instead of giving up. Anything else is a real
+            // failure (or the invoked method's own exception, always
+            // wrapped in `InvocationTargetException` — see
+            // `describe_caught_java_exception`'s doc comment): describe and
+            // return it.
+            Err(jni::errors::Error::JavaException) => match env.exception_catch() {
+                Ok(()) => {
+                    return Err(marshal_error(
+                        "expected a pending Java exception after Method.invoke but found none",
+                    ))
+                }
+                Err(caught) if is_overload_arg_mismatch(&caught) => {
+                    last_arg_mismatch = Some(caught);
+                    continue;
+                }
+                Err(caught) => return Err(describe_caught_java_exception(env, caught)),
+            },
             Err(e) => return Err(e),
         };
-        return crate::marshal::jvm_value_to_lisp_arg(env, jni::objects::JValueOwned::Object(result));
+        return crate::marshal::jvm_value_to_lisp_arg(
+            env,
+            jni::objects::JValueOwned::Object(result),
+        );
     }
 
-    Err(marshal_error(&format!(
-        "no method {method_name} with {} argument(s) found",
-        args.len()
-    )))
+    Err(last_arg_mismatch.map_or_else(
+        || marshal_error(&format!("no method {method_name} with {} argument(s) found", args.len())),
+        |caught| describe_caught_java_exception(env, caught),
+    ))
 }
 
 fn invoke_constructor(
     env: &mut jni::Env<'_>,
     class: &jni::objects::JClass,
-    args: &[crate::commands::LispArg],
-) -> jni::errors::Result<crate::commands::LispArg> {
+    args: &[crate::commands::BridgeValue],
+) -> jni::errors::Result<crate::commands::BridgeValue> {
     let constructors = env
         .call_method(
             class,
@@ -1179,6 +1235,11 @@ fn invoke_constructor(
         .l()?;
     let constructors = env.cast_local::<jni::objects::JObjectArray>(constructors)?;
     let count = constructors.len(env)?;
+
+    // See `invoke_method`'s matching field: remembers the most recent
+    // invoke-time argument mismatch so the final "no constructor found"
+    // error can describe why, instead of a bare "not found".
+    let mut last_arg_mismatch: Option<jni::errors::Error> = None;
 
     for i in 0..count {
         let candidate = constructors.get_element(env, i)?;
@@ -1210,16 +1271,34 @@ fn invoke_constructor(
             &[jni::objects::JValue::Object(&invoke_args)],
         ) {
             Ok(v) => v.l()?,
-            Err(jni::errors::Error::JavaException) => return Err(describe_pending_java_exception(env)),
+            // See `invoke_method`'s matching arm: a bare
+            // `IllegalArgumentException` here means ARGS didn't fit THIS
+            // candidate's declared parameter types, so fall through to the
+            // next same-arity constructor instead of giving up.
+            Err(jni::errors::Error::JavaException) => match env.exception_catch() {
+                Ok(()) => {
+                    return Err(marshal_error(
+                        "expected a pending Java exception after Constructor.newInstance but found none",
+                    ))
+                }
+                Err(caught) if is_overload_arg_mismatch(&caught) => {
+                    last_arg_mismatch = Some(caught);
+                    continue;
+                }
+                Err(caught) => return Err(describe_caught_java_exception(env, caught)),
+            },
             Err(e) => return Err(e),
         };
-        return crate::marshal::jvm_value_to_lisp_arg(env, jni::objects::JValueOwned::Object(instance));
+        return crate::marshal::jvm_value_to_lisp_arg(
+            env,
+            jni::objects::JValueOwned::Object(instance),
+        );
     }
 
-    Err(marshal_error(&format!(
-        "no constructor with {} argument(s) found",
-        args.len()
-    )))
+    Err(last_arg_mismatch.map_or_else(
+        || marshal_error(&format!("no constructor with {} argument(s) found", args.len())),
+        |caught| describe_caught_java_exception(env, caught),
+    ))
 }
 
 /// Shared by `invoke_method`/`invoke_constructor`: marshals ARGS against
@@ -1229,10 +1308,11 @@ fn invoke_constructor(
 fn build_invoke_args<'local>(
     env: &mut jni::Env<'local>,
     param_types: &jni::objects::JObjectArray<'local>,
-    args: &[crate::commands::LispArg],
+    args: &[crate::commands::BridgeValue],
 ) -> jni::errors::Result<jni::objects::JObjectArray<'local>> {
     let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
-    let invoke_args = env.new_object_array(args.len() as i32, &object_class, jni::objects::JObject::null())?;
+    let invoke_args =
+        env.new_object_array(args.len() as i32, &object_class, jni::objects::JObject::null())?;
     for (i, arg) in args.iter().enumerate() {
         let param_type_obj = param_types.get_element(env, i)?;
         let param_type = env.cast_local::<jni::objects::JClass>(param_type_obj)?;

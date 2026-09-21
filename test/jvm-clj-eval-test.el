@@ -26,12 +26,17 @@ problem Phase 2's Task 5 already hit for `jvm-call-test.el'.")
     (should (eq (jvm-start-await) 'ready))
     (dolist (jar (directory-files jvm-clj-eval-test--jars-dir t "\\.jar\\'"))
       (jvm-load-jar-await jar))
+    (jvm-load-jar-await jvm-clj--source-dir)
+    (jvm-clj-require-await "emacs-jni.clj")
     (setq jvm-clj-eval-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/context-classloader-fix-lets-clojure-bootstrap ()
-  "Proves Task 1's fix: without it, this fails with
-ExceptionInInitializerError the first time Clojure's runtime is touched
-\(see the spec's Feasibility section for the exact failure)."
+  "Proves Task 1's fix stays in effect: a `Clojure/var'+`read'+`require'
+sequence keeps working (without the fix, touching Clojure's runtime fails
+with ExceptionInInitializerError -- see the spec's Feasibility section for
+the exact failure). `--ensure-ready' already bootstraps Clojure's runtime
+via `emacs-jni.clj', so this is not that first touch, just a check that
+the sequence itself still succeeds."
   (jvm-clj-eval-test--ensure-ready)
   (let* ((require-fn (jvm-call-await "clojure.java.api.Clojure" "var" (list "clojure.core" "require")))
          (sym (jvm-call-await "clojure.java.api.Clojure" "read" (list "clojure.set"))))
@@ -104,6 +109,10 @@ socket for the bound port is a wildcard address, not loopback."
           ;; default (no BIND) produces and what this option fixes.
           (should-not (string-match-p (format "127\\.0\\.0\\.1:%d\\b" port) listen)))
       (jvm-clj-nrepl-stop-await server))))
+
+(ert-deftest emacs-jni-jvm-clj-eval-test/eval-string-await-returns-keyword ()
+  (jvm-clj-eval-test--ensure-ready)
+  (should (eq (jvm-clj-eval-string-await ":a") :a)))
 
 (provide 'jvm-clj-eval-test)
 ;;; jvm-clj-eval-test.el ends here

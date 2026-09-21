@@ -22,6 +22,8 @@
     (should (eq (jvm-start-await) 'ready))
     (dolist (jar (directory-files jvm-clj-eval-direct-test--jars-dir t "\\.jar\\'"))
       (jvm-load-jar-await jar))
+    (jvm-load-jar-await jvm-clj--source-dir)
+    (jvm-clj-require-await "emacs-jni.clj")
     (setq jvm-clj-eval-direct-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-marshalled-scalar ()
@@ -64,6 +66,25 @@ like `jvm-clj-nrepl-start-await'."
     (should (integerp port))
     (should (> port 0))
     (jvm-clj-nrepl-stop-direct server)))
+
+(ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-keyword ()
+  "A Clojure keyword result comes back as a real Lisp keyword, not a pointer."
+  (jvm-clj-eval-direct-test--ensure-ready)
+  (should (eq (jvm-clj-eval-string-direct ":a") :a)))
+
+(ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-symbol ()
+  "A Clojure symbol result comes back as a real Lisp symbol. The `'' shorthand
+must work: eval-string reads with the full Clojure reader (`load-string'), not
+EDN, so `'foo' reads as `(quote foo)'."
+  (jvm-clj-eval-direct-test--ensure-ready)
+  (should (eq (jvm-clj-eval-string-direct "'foo") 'foo)))
+
+(ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-accepts-reader-macros ()
+  "Reader macros beyond quote work too (EDN would reject these): an anonymous-fn
+literal `#(...)' evaluates and applies, and a regex literal `#\"re\"' matches."
+  (jvm-clj-eval-direct-test--ensure-ready)
+  (should (equal (jvm-clj-eval-string-direct "(#(+ % 1) 41)") 42))
+  (should (equal (jvm-clj-eval-string-direct "(re-find #\"\\d+\" \"ab12cd\")") "12")))
 
 (provide 'jvm-clj-eval-direct-test)
 ;;; jvm-clj-eval-direct-test.el ends here

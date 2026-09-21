@@ -1,30 +1,51 @@
-use jni::objects::{JClass, JClassLoader, JObject, JObjectArray, JString, JThrowable, JValue, JValueOwned};
+use jni::objects::{
+    JClass, JClassLoader, JObject, JObjectArray, JString, JThrowable, JValue, JValueOwned,
+};
 
-const LISP_CALLABLE_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispCallable.class"));
-const LISP_FUNCTION_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispFunction.class"));
+const LISP_CALLABLE_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispCallable.class"
+));
+const LISP_FUNCTION_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispFunction.class"
+));
 const LISP_NON_LOCAL_EXIT_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/LispNonLocalExit.class"
+));
+const LISP_SIGNAL_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispSignal.class"
+));
+const LISP_THROW_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispThrow.class"
 ));
 const RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/ReleaseNotifier.class"
 ));
-const LISP_OBJECT_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispObject.class"));
-const LISP_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/Lisp.class"));
+const LISP_OBJECT_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispObject.class"
+));
+const LISP_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/Lisp.class"
+));
 const LISP_REF_RELEASE_NOTIFIER_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/LispRefReleaseNotifier.class"
 ));
-const LISP_SYMBOL_CLASS: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/target/emacs-jni-shim-classes/emacs_jni/core/LispSymbol.class"));
+const LISP_SYMBOL_CLASS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/target/emacs-jni-shim-classes/emacs_jni/core/LispSymbol.class"
+));
 
 /// Defines the `emacs_jni.core.{LispCallable,LispFunction,LispNonLocalExit,
-/// ReleaseNotifier,LispObject,Lisp,LispRefReleaseNotifier}` shim classes
+/// LispSignal,LispThrow,ReleaseNotifier,LispObject,Lisp,
+/// LispRefReleaseNotifier,LispSymbol}` shim classes
 /// into the currently-attached JVM, using the *platform* classloader
 /// (not the system/application classloader, despite this file's original
 /// Task 1 comment saying otherwise — see below) so they're visible both
@@ -99,13 +120,32 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     // go anywhere.
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispCallable", LISP_CALLABLE_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispFunction", LISP_FUNCTION_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/core/LispNonLocalExit", LISP_NON_LOCAL_EXIT_CLASS)?;
-    define_if_absent(env, &platform_loader, "emacs_jni/core/ReleaseNotifier", RELEASE_NOTIFIER_CLASS)?;
+    define_if_absent(
+        env,
+        &platform_loader,
+        "emacs_jni/core/LispNonLocalExit",
+        LISP_NON_LOCAL_EXIT_CLASS,
+    )?;
+    // LispSignal/LispThrow extend LispNonLocalExit, so the base must already
+    // be defined -- same ordering reasoning as LispCallable/LispFunction.
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispSignal", LISP_SIGNAL_CLASS)?;
+    define_if_absent(env, &platform_loader, "emacs_jni/core/LispThrow", LISP_THROW_CLASS)?;
+    define_if_absent(
+        env,
+        &platform_loader,
+        "emacs_jni/core/ReleaseNotifier",
+        RELEASE_NOTIFIER_CLASS,
+    )?;
     // LispRefReleaseNotifier has no class-loading dependency on LispObject
     // (LispObject's constructor only *references* it inside a method body,
     // which the verifier resolves lazily) -- defined first anyway, out of
     // the same caution as LispCallable/LispFunction's ordering above.
-    define_if_absent(env, &platform_loader, "emacs_jni/core/LispRefReleaseNotifier", LISP_REF_RELEASE_NOTIFIER_CLASS)?;
+    define_if_absent(
+        env,
+        &platform_loader,
+        "emacs_jni/core/LispRefReleaseNotifier",
+        LISP_REF_RELEASE_NOTIFIER_CLASS,
+    )?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispObject", LISP_OBJECT_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/Lisp", LISP_CLASS)?;
     // Pure data carrier (no natives, no dependencies) -- the wire form for
@@ -117,6 +157,8 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispSignal"))?;
+    env.find_class(jni::jni_str!("emacs_jni/core/LispThrow"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
@@ -181,14 +223,15 @@ fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> 
 
 /// The actual implementation behind `LispFunction.call`: allocates a fresh
 /// correlation id, constructs a (still-incomplete) `CompletableFuture`,
-/// registers it in `pending`, posts `(invoke ID HANDLE ARGS)` on the
-/// channel, and returns the future immediately — the concrete realization
-/// of the design spec's "Java shim" section. Never blocks: everything here
-/// is either process-local bookkeeping or a non-blocking channel write; the
-/// actual Lisp call happens later, off this thread entirely (on Emacs's
-/// own main thread, via `jvm--dispatch-message`'s `invoke` case), and its
-/// result arrives back asynchronously via `Cmd::InvokeReply`
-/// (`jvm_thread::handle_invoke_reply`).
+/// registers it in `pending`, enqueues an `Inbound::Invoke` and wakes the
+/// main thread up, and returns the future immediately — the concrete
+/// realization of the design spec's "Java shim" section. Never blocks:
+/// everything here is either process-local bookkeeping or a non-blocking
+/// channel write; the actual Lisp call happens later, off this thread
+/// entirely (on Emacs's own main thread, via `lisp_requests::
+/// service_inbound`'s `Invoke` arm, which calls the Elisp
+/// `jvm--resolve-invoke`), and its result arrives back asynchronously via
+/// `Cmd::InvokeReply` (`jvm_thread::handle_invoke_reply`).
 ///
 /// Registered (not called directly) via `register_lisp_function_native`
 /// above -- see that function's doc comment for the actual native-method
@@ -206,8 +249,9 @@ fn lisp_function_call<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::pending::register(id, future_global);
 
-    let args_sexp = jobject_array_to_sexp(env, &args)?;
-    crate::channel::send(&crate::protocol::invoke_message(id, handle, &args_sexp));
+    let args = jobject_array_to_bridge_values(env, &args)?;
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Invoke { id, handle, args });
+    crate::channel::poke();
 
     Ok(future)
 }
@@ -237,19 +281,23 @@ fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<(
 /// `user-ptr` GC'd -> tell Rust to drop a `GlobalRef`, over the Lisp-to-
 /// worker `Cmd` channel). Here, the JVM-side `LispFunction` proxy this
 /// notifier was registered against (via `marshal::register_release_on_gc`)
-/// was collected, so Lisp needs telling -- over the worker-to-Lisp
-/// `channel::send` wire, not a `Cmd` -- to drop its own function-table
-/// entry for the same handle. Runs on a `Cleaner`-managed background
-/// thread, not the worker thread, but that's fine: `get_handle_field` is
-/// plain JNI field access (needs only the `Env` this native call itself
-/// provides) and `channel::send` just writes to a process-global pipe
-/// writer, neither of which cares which thread calls them.
+/// was collected, so Lisp needs telling -- via an `Inbound::Release` on the
+/// worker-to-Lisp queue, not a `Cmd` -- to drop its own function-table entry
+/// for the same handle. Runs on a `Cleaner`-managed background thread, not
+/// the worker thread, but that's fine: `get_handle_field` is plain JNI
+/// field access (needs only the `Env` this native call itself provides)
+/// and `lisp_requests::enqueue`/`channel::poke` just write to process-
+/// global state, neither of which cares which thread calls them.
 ///
 /// Registered (not called directly) via `register_release_notifier_native`
 /// above.
-fn release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
+fn release_notifier_run<'local>(
+    env: &mut jni::Env<'local>,
+    this: JObject<'local>,
+) -> jni::errors::Result<()> {
     let handle = get_handle_field(env, &this)?;
-    crate::channel::send(&crate::protocol::release_message(handle));
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Release { handle });
+    crate::channel::poke();
     Ok(())
 }
 
@@ -266,21 +314,22 @@ fn get_handle_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::
     Ok(value as u64)
 }
 
-/// Renders an `Object[]` of `call`'s actual varargs arguments back into the
-/// S-expression list fragment `protocol::invoke_message` embeds — the
-/// reverse direction of what `jvm_thread::handle_call` (Task 5) does for
-/// its own return values, reused here since a JVM-initiated call's
-/// arguments need the exact same Java-object -> `LispArg` -> sexp pipeline
-/// as any other value crossing from Java to Lisp.
-fn jobject_array_to_sexp(env: &mut jni::Env<'_>, args: &JObjectArray<'_>) -> jni::errors::Result<String> {
+/// Renders an `Object[]` of `call`'s actual varargs arguments into a
+/// `Vec<BridgeValue>` — the reverse direction of what `jvm_thread::
+/// handle_call` (Task 5) does for its own return values, reused here since
+/// a JVM-initiated call's arguments need the exact same Java-object ->
+/// `BridgeValue` pipeline as any other value crossing from Java to Lisp.
+fn jobject_array_to_bridge_values(
+    env: &mut jni::Env<'_>,
+    args: &JObjectArray<'_>,
+) -> jni::errors::Result<Vec<crate::commands::BridgeValue>> {
     let len = args.len(env)?;
-    let mut parts = Vec::with_capacity(len);
+    let mut out = Vec::with_capacity(len);
     for i in 0..len {
         let obj = args.get_element(env, i)?;
-        let arg = crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(obj))?;
-        parts.push(crate::marshal::lisp_arg_to_sexp(&arg));
+        out.push(crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(obj))?);
     }
-    Ok(format!("({})", parts.join(" ")))
+    Ok(out)
 }
 
 fn define_if_absent(
@@ -383,11 +432,11 @@ fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors:
 /// JVM thread on the future's own `get(timeout, SECONDS)` — see design
 /// spec, "Request/reply flow", step 1's "sync variant: `future.get()`
 /// (blocks the JVM thread, with timeout)". Mirrors `lisp_function_call`'s
-/// future/`pending`/`channel::send` setup, but waits in place instead of
+/// future/`pending`/`channel::poke` setup, but waits in place instead of
 /// handing the future back to the Java caller.
 fn service_lisp_request_sync<'local>(
     env: &mut jni::Env<'local>,
-    build_request: impl FnOnce(u64) -> crate::lisp_requests::LispRequest,
+    build_request: impl FnOnce(u64) -> crate::lisp_requests::Inbound,
 ) -> jni::errors::Result<JObject<'local>> {
     // Reentrant case: this native runs on the Emacs main thread, inside a
     // `jvm--call-direct`. That thread is blocked in the JVM right now, so the
@@ -403,7 +452,7 @@ fn service_lisp_request_sync<'local>(
     crate::pending::register(id, future_global);
 
     crate::lisp_requests::enqueue(build_request(id));
-    crate::channel::send(&crate::protocol::lisp_request_message());
+    crate::channel::poke();
 
     block_on_lisp_reply(env, &future)
 }
@@ -415,7 +464,7 @@ fn service_lisp_request_sync<'local>(
 /// equivalent of `block_on_lisp_reply`'s checked-exception rethrow.
 fn service_lisp_request_direct<'local>(
     env: &mut jni::Env<'local>,
-    request: crate::lisp_requests::LispRequest,
+    request: crate::lisp_requests::Inbound,
 ) -> jni::errors::Result<JObject<'local>> {
     let reply = crate::reentry::with_current_env(|lisp_env| {
         crate::lisp_requests::compute_reply(lisp_env, &request)
@@ -425,10 +474,10 @@ fn service_lisp_request_direct<'local>(
     .ok_or_else(|| crate::marshal::marshal_error("reentrant Lisp call lost its Env scope"))?;
 
     match reply {
-        crate::commands::LispReplyValue::Signal { symbol, data } => {
+        crate::commands::LispOutcome::Signal { symbol, data } => {
             Err(crate::jvm_thread::throw_non_local_exit(env, 0, *symbol, *data))
         }
-        crate::commands::LispReplyValue::Throw { tag, value } => {
+        crate::commands::LispOutcome::Throw { tag, value } => {
             Err(crate::jvm_thread::throw_non_local_exit(env, 1, *tag, *value))
         }
         other => crate::jvm_thread::build_lisp_reply_object(env, other),
@@ -437,7 +486,7 @@ fn service_lisp_request_direct<'local>(
 
 /// Blocks on FUTURE's own `get(LISP_REQUEST_TIMEOUT_SECS, SECONDS)`,
 /// reflection-free (a direct `CompletableFuture` instance method call, not
-/// `Method.invoke`) — so unlike `describe_pending_java_exception`'s
+/// `Method.invoke`) — so unlike `describe_caught_java_exception`'s
 /// `InvocationTargetException` unwrapping in `jvm_thread.rs`, a checked
 /// exception from `get()` (`ExecutionException`/`TimeoutException`/
 /// `InterruptedException`) is itself the JVM's pending exception, not
@@ -448,7 +497,11 @@ fn block_on_lisp_reply<'local>(
 ) -> jni::errors::Result<JObject<'local>> {
     let time_unit_class = env.find_class(jni::jni_str!("java/util/concurrent/TimeUnit"))?;
     let seconds = env
-        .get_static_field(&time_unit_class, jni::jni_str!("SECONDS"), jni::jni_sig!(java.util.concurrent.TimeUnit))?
+        .get_static_field(
+            &time_unit_class,
+            jni::jni_str!("SECONDS"),
+            jni::jni_sig!(java.util.concurrent.TimeUnit),
+        )?
         .l()?;
     match env.call_method(
         future,
@@ -467,7 +520,7 @@ fn block_on_lisp_reply<'local>(
 /// whatever `jvm_thread::handle_lisp_reply` completed the future with
 /// exceptionally (a `LispNonLocalExit`) — the useful part is that cause, one
 /// `getCause()` hop down, same reasoning as
-/// `jvm_thread::describe_pending_java_exception`. A `TimeoutException`/
+/// `jvm_thread::describe_caught_java_exception`. A `TimeoutException`/
 /// `InterruptedException` (from `get`'s own timeout/interruption, not a
 /// completed-exceptionally future) has no cause, so it's rethrown as-is.
 ///
@@ -507,14 +560,14 @@ fn rethrow_lisp_reply_exception(env: &mut jni::Env) -> jni::errors::Error {
 }
 
 /// `Lisp.intern`'s native implementation: `env.intern(name)` on the main
-/// thread, via a `LispRequest::Intern` round trip.
+/// thread, via an `Inbound::Intern` round trip.
 fn lisp_intern<'local>(
     env: &mut jni::Env<'local>,
     _class: JClass<'local>,
     name: JString<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
     let name = name.try_to_string(env)?;
-    service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::Intern { id, name })
+    service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Intern { id, name })
 }
 
 /// `Lisp.typeOf`'s native implementation.
@@ -524,13 +577,18 @@ fn lisp_type_of<'local>(
     v: JObject<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
     let arg = object_to_lisp_request_arg(env, v)?;
-    service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::TypeOf { id, arg })
+    service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::TypeOf { id, arg })
 }
 
 /// `Lisp.isNotNil`'s native implementation.
-fn lisp_is_not_nil<'local>(env: &mut jni::Env<'local>, _class: JClass<'local>, v: JObject<'local>) -> jni::errors::Result<bool> {
+fn lisp_is_not_nil<'local>(
+    env: &mut jni::Env<'local>,
+    _class: JClass<'local>,
+    v: JObject<'local>,
+) -> jni::errors::Result<bool> {
     let arg = object_to_lisp_request_arg(env, v)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::IsNotNil { id, arg })?;
+    let result =
+        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::IsNotNil { id, arg })?;
     unbox_boolean(env, &result)
 }
 
@@ -543,7 +601,8 @@ fn lisp_eq<'local>(
 ) -> jni::errors::Result<bool> {
     let a = object_to_lisp_request_arg(env, a)?;
     let b = object_to_lisp_request_arg(env, b)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::Eq { id, a, b })?;
+    let result =
+        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Eq { id, a, b })?;
     unbox_boolean(env, &result)
 }
 
@@ -564,12 +623,13 @@ fn lisp_apply_async<'local>(
     // `(deref (applyAsync ...))` returns at once without needing the blocked
     // main thread to drain the queue.
     if crate::reentry::in_scope() {
-        let request = crate::lisp_requests::LispRequest::Apply { id: 0, f, args: request_args };
+        let request = crate::lisp_requests::Inbound::Apply { id: 0, f, args: request_args };
         let reply = crate::reentry::with_current_env(|lisp_env| {
             crate::lisp_requests::compute_reply(lisp_env, &request)
         })
         .ok_or_else(|| crate::marshal::marshal_error("reentrant apply lost its Env scope"))?;
-        let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
+        let future_class =
+            env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
         let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
         crate::jvm_thread::complete_future_with_reply(env, &future, reply)?;
         return Ok(future);
@@ -581,8 +641,12 @@ fn lisp_apply_async<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::pending::register(id, future_global);
 
-    crate::lisp_requests::enqueue(crate::lisp_requests::LispRequest::Apply { id, f, args: request_args });
-    crate::channel::send(&crate::protocol::lisp_request_message());
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::Apply {
+        id,
+        f,
+        args: request_args,
+    });
+    crate::channel::poke();
     Ok(future)
 }
 
@@ -592,18 +656,22 @@ fn lisp_object_prin1_to_string<'local>(
     this: JObject<'local>,
 ) -> jni::errors::Result<JString<'local>> {
     let ptr = get_ptr_field(env, &this)?;
-    let result = service_lisp_request_sync(env, |id| crate::lisp_requests::LispRequest::Prin1 { id, ptr })?;
+    let result =
+        service_lisp_request_sync(env, |id| crate::lisp_requests::Inbound::Prin1 { id, ptr })?;
     env.cast_local::<JString>(result)
 }
 
 /// `LispRefReleaseNotifier.run`'s native implementation: enqueues a
 /// `FreeRef` for this notifier's own `ptr` and wakes the main thread up.
-/// No reply -- see `lisp_requests::LispRequest::FreeRef`'s own doc
+/// No reply -- see `lisp_requests::Inbound::FreeRef`'s own doc
 /// comment ("carries no `id` and produces no reply").
-fn lisp_ref_release_notifier_run<'local>(env: &mut jni::Env<'local>, this: JObject<'local>) -> jni::errors::Result<()> {
+fn lisp_ref_release_notifier_run<'local>(
+    env: &mut jni::Env<'local>,
+    this: JObject<'local>,
+) -> jni::errors::Result<()> {
     let ptr = get_ptr_field(env, &this)?;
-    crate::lisp_requests::enqueue(crate::lisp_requests::LispRequest::FreeRef { ptr });
-    crate::channel::send(&crate::protocol::lisp_request_message());
+    crate::lisp_requests::enqueue(crate::lisp_requests::Inbound::FreeRef { ptr });
+    crate::channel::poke();
     Ok(())
 }
 
@@ -622,7 +690,7 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
 }
 
 /// Classifies one value crossing Clojure → Lisp (an `apply` receiver or
-/// argument, or a `typeOf`/`isNotNil`/`eq` operand) into a `LispRequestArg`,
+/// argument, or a `typeOf`/`isNotNil`/`eq` operand) into a `LispInput`,
 /// per spec "Argument conversion":
 /// - `null` → `Nil`;
 /// - an `emacs_jni.core.LispObject` → carried by its `ptr`;
@@ -633,37 +701,39 @@ fn get_ptr_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Res
 pub(crate) fn object_to_lisp_request_arg<'local>(
     env: &mut jni::Env<'local>,
     elem: JObject<'local>,
-) -> jni::errors::Result<crate::lisp_requests::LispRequestArg> {
-    use crate::lisp_requests::LispRequestArg;
+) -> jni::errors::Result<crate::lisp_requests::LispInput> {
+    use crate::lisp_requests::LispInput;
     // `IsInstanceOf` (what `is_instance_of` calls) reports `true` for a
     // null reference against ANY class per the JNI spec, so null must be
     // checked before the class checks below -- otherwise a null value
     // would be misread as `Obj(0)`.
     if elem.is_null() {
-        return Ok(LispRequestArg::Scalar(crate::commands::LispArg::Nil));
+        return Ok(LispInput::Scalar(crate::commands::BridgeValue::Nil));
     }
     let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
     if env.is_instance_of(&elem, &lisp_object_class)? {
-        return Ok(LispRequestArg::Obj(get_ptr_field(env, &elem)?));
+        return Ok(LispInput::Obj(get_ptr_field(env, &elem)?));
     }
     let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
     if env.is_instance_of(&elem, &lisp_symbol_class)? {
-        let name_obj = env.get_field(&elem, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?.l()?;
+        let name_obj =
+            env.get_field(&elem, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?.l()?;
         let name = env.cast_local::<JString>(name_obj)?;
         let name = name.try_to_string(env)?;
-        let keyword = env.get_field(&elem, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?.z()?;
-        return Ok(LispRequestArg::Symbol { name, keyword });
+        let keyword =
+            env.get_field(&elem, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?.z()?;
+        return Ok(LispInput::Symbol { name, keyword });
     }
     let lisp_arg = crate::marshal::jvm_value_to_lisp_arg(env, JValueOwned::Object(elem))?;
-    Ok(LispRequestArg::Scalar(lisp_arg))
+    Ok(LispInput::Scalar(lisp_arg))
 }
 
-/// Converts `applyAsync`'s `Object[]` ARGS into `LispRequestArg`s, element
+/// Converts `applyAsync`'s `Object[]` ARGS into `LispInput`s, element
 /// by element via `object_to_lisp_request_arg`.
 fn jobject_array_to_lisp_request_args<'local>(
     env: &mut jni::Env<'local>,
     args: &JObjectArray<'local>,
-) -> jni::errors::Result<Vec<crate::lisp_requests::LispRequestArg>> {
+) -> jni::errors::Result<Vec<crate::lisp_requests::LispInput>> {
     let len = args.len(env)?;
     let mut out = Vec::with_capacity(len);
     for i in 0..len {
@@ -681,8 +751,8 @@ mod tests {
 
     /// Retries against jni-rs 0.22.4's racy check-then-create singleton --
     /// this file now has two tests each creating a JVM, so it needs the
-    /// same retry loop `handles.rs`/`marshal.rs`/`jvm_thread.rs` already
-    /// use (see their own copies' doc comments for the full explanation).
+    /// same retry loop `marshal.rs` and `pending.rs` already use (see
+    /// `marshal.rs`'s `create_test_jvm` for the full explanation).
     fn create_test_jvm() -> JavaVM {
         let mut last_err = None;
         for _ in 0..20 {
@@ -711,19 +781,24 @@ mod tests {
             define_classes(env)?;
             // Confirm LispFunction really implements LispCallable, not
             // just that both classes independently exist.
-            let lisp_function_class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
-            let lisp_callable_class = env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
-            let is_assignable = env.is_assignable_from(&lisp_function_class, &lisp_callable_class)?;
+            let lisp_function_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
+            let lisp_callable_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
+            let is_assignable =
+                env.is_assignable_from(&lisp_function_class, &lisp_callable_class)?;
             assert!(is_assignable, "LispFunction should implement LispCallable");
             // Same shape of check for ReleaseNotifier/LispRefReleaseNotifier:
             // confirm both really implement Runnable.
             let runnable_class = env.find_class(jni::jni_str!("java/lang/Runnable"))?;
-            let release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
+            let release_notifier_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
             assert!(
                 env.is_assignable_from(&release_notifier_class, &runnable_class)?,
                 "ReleaseNotifier should implement Runnable"
             );
-            let lisp_ref_release_notifier_class = env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
+            let lisp_ref_release_notifier_class =
+                env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
             assert!(
                 env.is_assignable_from(&lisp_ref_release_notifier_class, &runnable_class)?,
                 "LispRefReleaseNotifier should implement Runnable"
@@ -736,7 +811,7 @@ mod tests {
     /// End-to-end proof that `intern`/`isNotNil`/`eq`/`typeOf`/`applyAsync`/
     /// `prin1ToString` actually work against a *real* Lisp-like `Env` --
     /// but this crate's unit tests have no real Emacs process to service
-    /// `(lisp-request)`, so this test instead drives `lisp_requests::service`
+    /// `(lisp-request)`, so this test instead drives `lisp_requests::service_inbound`
     /// directly against a throwaway in-process "Env" substitute... which
     /// this crate cannot construct outside of a real Emacs module call
     /// (`emacs::Env` has no public constructor). The Lisp-access round

@@ -42,7 +42,10 @@ yourself.
 ```
 
 A Lisp error raised inside the callback propagates back to the Java
-caller as a real exception, not a silently dropped call. See
+caller as a real exception, not a silently dropped call: a
+`signal`/`error` as `emacs_jni.core.LispSignal`, a `throw` as
+`emacs_jni.core.LispThrow` (both extend `LispNonLocalExit`), which Java
+catches by type. See
 [How to handle errors and timeouts](handle-errors-and-timeouts.md).
 
 ## Know when the callback stops working

@@ -66,10 +66,12 @@ for why.
 ;; => "[1 2 3]"
 ```
 
-A keyword, symbol, vector, map, or lazy sequence comes back as an
-opaque wrapped JVM object, not a Lisp-visible structure. Call
-`toString` on it through `jvm-call`, as shown above, or evaluate
-`pr-str` around the original expression instead:
+A scalar (number, string, boolean, nil) comes back as its Lisp value,
+and a keyword or symbol result comes back as a Lisp keyword or symbol.
+A vector, map, or lazy sequence comes back as an opaque wrapped JVM
+object, not a Lisp-visible structure. Call `toString` on it through
+`jvm-call`, as shown above, or evaluate `pr-str` around the original
+expression instead:
 
 ```elisp
 (jvm-clj-eval-string "(pr-str [1 2 3])")

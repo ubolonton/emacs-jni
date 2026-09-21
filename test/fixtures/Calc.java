@@ -13,6 +13,15 @@ public class Calc {
         this.base = base;
     }
 
+    // Overloaded constructor for the constructor-overload fall-through test:
+    // `Calc(long)` and `Calc(String)` share arity, so `invoke_constructor`
+    // must skip a candidate whose declared parameter type the actual argument
+    // doesn't fit (a string against `Calc(long)' fails at `newInstance' with
+    // an `IllegalArgumentException', not at marshalling).
+    public Calc(String label) {
+        this.base = label.length();
+    }
+
     public long addToBase(long n) {
         return base + n;
     }
@@ -53,5 +62,29 @@ public class Calc {
 
     public static String pick(String s) {
         return "string";
+    }
+
+    // Task 7 fixture: proves a failed callback completes the future
+    // exceptionally with a real `emacs_jni.core.LispSignal' carrying the
+    // callback's actual `condition-case' symbol -- not a fabricated `error'
+    // symbol with a stringified message. Returns the signal's symbol name
+    // (via the wire `LispSymbol' marker's own `name' field), so the ERT
+    // test can assert on the real symbol instead of coarse exception-chain
+    // text.
+    public static String describeCallbackError(emacs_jni.core.LispCallable fn, long n) throws Exception {
+        try {
+            fn.call(n).get(10, java.util.concurrent.TimeUnit.SECONDS);
+            return "no-exception";
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof emacs_jni.core.LispSignal) {
+                Object symbol = ((emacs_jni.core.LispSignal) cause).symbol;
+                if (symbol instanceof emacs_jni.core.LispSymbol) {
+                    return ((emacs_jni.core.LispSymbol) symbol).name;
+                }
+                return "non-symbol:" + symbol;
+            }
+            return "not-a-lisp-signal:" + cause;
+        }
     }
 }
