@@ -1,4 +1,9 @@
-use crate::handles::JvmObject;
+//! The payload types that cross the Lisp/JVM boundary — `CallTarget`,
+//! `BridgeValue`, `LispOutcome`, `LispInput`, and `Status` — shared by both
+//! the `lisp::` and `jvm::` sides instead of each side inventing its own
+//! shape for the same value.
+
+use crate::jvm::convert::JvmObject;
 
 #[derive(Debug, Clone)]
 pub enum CallTarget {
@@ -41,9 +46,9 @@ pub enum BridgeValue {
 }
 
 /// The value a `Cmd::LispReply` or `Cmd::InvokeReply` completes a pending
-/// future with — built by `lisp_requests::service_inbound`/`jvm--invoke-
+/// future with — built by `lisp::inbox::service_inbound`/`jvm--invoke-
 /// reply` (which run the actual `Env` op, or marshal `jvm--resolve-invoke`'s
-/// result) and consumed by `jvm_thread::handle_lisp_reply`/
+/// result) and consumed by `jvm::inbox::handle_lisp_reply`/
 /// `handle_invoke_reply` (which turn it into a real Java value, or a thrown
 /// `LispSignal`/`LispThrow`, on the worker's own JNI attachment) via the
 /// shared `complete_future_with_reply`. A single enum since a reply's
@@ -68,49 +73,71 @@ pub enum LispOutcome {
     Throw { tag: Box<LispOutcome>, value: Box<LispOutcome> },
 }
 
+/// One value crossing Clojure → Lisp — an `apply` receiver or argument, or
+/// the operand of `typeOf`/`isNotNil`/`eq` — already classified on the JVM
+/// thread (`jvm::convert::to_input`). See spec "Argument
+/// conversion".
 #[derive(Debug)]
-pub enum Cmd {
-    /// Sent to an already-running worker thread to resume from `paused`.
-    /// A first-time start never goes through this enum at all — see
-    /// `worker::start_or_resume`, which spawns a fresh thread with
-    /// classpath/options as plain arguments instead.
-    Resume,
-    Pause,
-    Stop,
-    LoadJar {
-        id: u64,
-        path: String,
-    },
-    Call {
-        id: u64,
-        target: CallTarget,
-        member: String,
-        args: Vec<BridgeValue>,
-    },
-    /// Completes a pending `LispFunction.call` future (`shim::
-    /// lisp_function_call`) with the Lisp callback's outcome — sent by
-    /// `jvm--invoke-reply` once `jvm--resolve-invoke` (`elisp/jvm.el`) has
-    /// funcalled the callback and marshalled its return value or its real
-    /// `condition-case` signal into a `LispOutcome`. See
-    /// `jvm_thread::handle_invoke_reply`.
-    InvokeReply {
-        id: u64,
-        outcome: LispOutcome,
-    },
-    /// A Lisp `user-ptr` wrapping a JVM object was GC'd; drop its reference
-    /// on the attached worker thread (see `handles::JvmHandle::Drop`).
-    ReleaseRef {
-        object: JvmObject,
-    },
-    /// Completes a pending Lisp-access native's reply future (`intern`,
-    /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by
-    /// `jvm--service-inbound` (`lisp_requests::service_inbound`) after
-    /// running the corresponding `Env` op on the main thread. See
-    /// `jvm_thread::handle_lisp_reply`.
-    LispReply {
-        id: u64,
-        value: LispOutcome,
-    },
-    #[cfg(feature = "test-support")]
-    TestPanic,
+pub enum LispInput {
+    /// A `LispObject`, carried by its `ptr` — bound to a `Value` on the
+    /// main thread, never freed here (see `borrow`).
+    Obj(i64),
+    /// A Clojure symbol or keyword (an `emacs_jni.core.LispSymbol` marker) —
+    /// interned on the main thread. `name` is the bare name; a keyword is
+    /// interned with a leading `:`.
+    Symbol { name: String, keyword: bool },
+    /// A scalar or other-JVM-object argument, already reduced to a
+    /// `BridgeValue` the same way an ordinary `jvm-call` argument would be
+    /// (reuses `jvm::convert::to_bridge`) — `BridgeValue::Callback`
+    /// never appears here (that variant is only ever produced from the
+    /// Lisp-to-Java direction in `lisp::convert::to_bridge`).
+    Scalar(BridgeValue),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Status {
+    NotStarted = 0,
+    Starting = 1,
+    Ready = 2,
+    Pausing = 3,
+    Paused = 4,
+    Stopping = 5,
+    Stopped = 6,
+    StartFailed = 7,
+    StopFailed = 8,
+    Crashed = 9,
+}
+
+impl Status {
+    pub(crate) fn from_u8(v: u8) -> Status {
+        match v {
+            0 => Status::NotStarted,
+            1 => Status::Starting,
+            2 => Status::Ready,
+            3 => Status::Pausing,
+            4 => Status::Paused,
+            5 => Status::Stopping,
+            6 => Status::Stopped,
+            7 => Status::StartFailed,
+            8 => Status::StopFailed,
+            9 => Status::Crashed,
+            _ => unreachable!("invalid Status discriminant"),
+        }
+    }
+
+    pub fn as_tag(self) -> &'static str {
+        match self {
+            Status::NotStarted => "not-started",
+            Status::Starting => "starting",
+            Status::Ready => "ready",
+            Status::Pausing => "pausing",
+            Status::Paused => "paused",
+            Status::Stopping => "stopping",
+            Status::Stopped => "stopped",
+            Status::StartFailed => "start-failed",
+            Status::StopFailed => "stop-failed",
+            Status::Crashed => "crashed",
+        }
+    }
 }

@@ -4,7 +4,7 @@
 //! A synchronous `jvm--call-direct` runs Clojure on the Emacs main thread and
 //! blocks there for the whole call. If that Clojure code calls back into Lisp
 //! (`emacs-jni.clj/apply`, `intern`, ...), the ordinary async path would
-//! deadlock: it enqueues a `lisp_requests::Inbound` and waits for the main
+//! deadlock: it enqueues a `lisp::inbox::Inbound` and waits for the main
 //! thread to drain the queue, but the main thread is the one blocked inside
 //! the JVM. So the `Lisp.*` natives must instead run the op *directly*, on the
 //! still-live `Env` of the enclosing `jvm--call-direct` frame.

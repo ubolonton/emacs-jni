@@ -1,15 +1,19 @@
+//! `BridgeValue`/`LispInput` ↔ JVM value conversion: marshalling a call
+//! argument or return value across the JNI boundary in both directions,
+//! type-directed by the actual declared Java parameter or return type.
+
 use std::sync::Arc;
 
-use jni::objects::{JClass, JObject, JValueOwned};
+use jni::objects::{JClass, JObject, JObjectArray, JString, JValueOwned};
+use jni::refs::Global;
 
-use crate::commands::BridgeValue;
-use crate::handles::JvmObject;
+use crate::protocol::{BridgeValue, LispInput};
 
 /// Converts ARG to a JNI value matching PARAM_TYPE's actual declared type
 /// — see spec "Value marshalling": this is deliberately type-directed,
 /// not a fixed independent mapping, because `Method.invoke` only allows
 /// widening primitive conversions.
-pub fn lisp_arg_to_jvalue<'local>(
+pub fn from_bridge<'local>(
     env: &mut jni::Env<'local>,
     arg: &BridgeValue,
     param_type: &JClass<'local>,
@@ -41,7 +45,7 @@ pub fn lisp_arg_to_jvalue<'local>(
         // Lisp function simply returning an integer or float back to Java
         // (the common case) would always fail marshalling here rather than
         // completing the future at all. `long`/`double`/`BigInteger` are
-        // the same choices `object_to_lisp_arg` (the reverse direction,
+        // the same choices `object_to_bridge` (the reverse direction,
         // below) already treats as canonical for "an arbitrary boxed
         // number", so a value that crosses Java -> Lisp -> Java this way
         // round-trips through the same representation rather than
@@ -76,7 +80,7 @@ pub fn lisp_arg_to_jvalue<'local>(
             Ok(JValueOwned::Object(local))
         }
         // The handle here already denotes a live entry in Lisp's own
-        // `jvm--lisp-callbacks' table (`lisp_value_to_arg` in `lib.rs`
+        // `jvm--lisp-callbacks' table (`lisp::convert::to_bridge`
         // registered it there before this `BridgeValue` was ever built —
         // this module has no access to that table itself, only the
         // handle number). Wrapping it as a `LispFunction' here is what
@@ -98,7 +102,7 @@ pub fn lisp_arg_to_jvalue<'local>(
         }
         // A Lisp symbol/keyword crosses into Java as the platform-loader
         // `LispSymbol` marker (identical construction to
-        // `jvm_thread::build_lisp_reply_object`'s `Symbol` arm), so the
+        // `jvm::invoke::build_lisp_reply_object`'s `Symbol` arm), so the
         // Clojure layer's `<-lisp` and any other consumer read it the same
         // way regardless of which direction produced it.
         (BridgeValue::Symbol { name, keyword }, _) => {
@@ -118,7 +122,7 @@ pub fn lisp_arg_to_jvalue<'local>(
 /// `LispFunction` proxy) that, when OBJ becomes phantom-reachable, sends
 /// `(release HANDLE)` on the worker-to-Lisp channel — the JVM-side half of
 /// the spec's "Identity and lifetime" GC-notification loop, mirroring
-/// `handles::JvmHandle::Drop` on the Rust side. The cleaner runs on a
+/// `JvmHandle::Drop` on the Rust side. The cleaner runs on a
 /// JVM-managed background thread at some point after OBJ is collected, not
 /// synchronously — this is standard `Cleaner` behavior, not a bug, and
 /// exactly why this task has no dedicated automated test asserting the
@@ -130,7 +134,7 @@ pub fn lisp_arg_to_jvalue<'local>(
 /// registering a *second* native method just for that (on top of `call`)
 /// would be pure duplication of `register_lisp_function_native`'s dance —
 /// simpler to reuse a small dedicated shim class (`ReleaseNotifier`,
-/// registered by `shim::define_classes` alongside the other three) and
+/// registered by `jvm::entry::define_classes` alongside the other three) and
 /// drive its construction/registration from here instead.
 fn register_release_on_gc<'local>(
     env: &mut jni::Env<'local>,
@@ -219,7 +223,7 @@ fn class_name(env: &mut jni::Env<'_>, class: &JClass<'_>) -> jni::errors::Result
 /// label mismatch (these aren't parse failures), but it's the closest fit
 /// available without widening this task's scope into inventing new error
 /// infrastructure.
-// `pub(crate)` rather than private: Task 5's `jvm_thread.rs` needs the exact
+// `pub(crate)` rather than private: `jvm_thread.rs` needs the exact
 // same "wrap an owned message as a jni::errors::Error" behavior for its own
 // application-level errors (unknown handle, no matching overload, etc.) —
 // none of those are marshalling failures either, so the name is already a
@@ -233,10 +237,10 @@ pub(crate) fn marshal_error(msg: &str) -> jni::errors::Error {
 
 /// `Method.invoke`/`Constructor.newInstance` always want an `Object[]`,
 /// even for parameters whose declared type is primitive — so any
-/// primitive `JValueOwned` `lisp_arg_to_jvalue` produced must be boxed
+/// primitive `JValueOwned` `from_bridge` produced must be boxed
 /// before going into that array. Object values (including `null`) pass
 /// through unchanged.
-pub fn box_if_primitive<'local>(
+pub(crate) fn box_if_primitive<'local>(
     env: &mut jni::Env<'local>,
     value: JValueOwned<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
@@ -319,7 +323,7 @@ where
 /// (Item 6 — no handle table) — this is the mechanism behind "wrap a JVM
 /// object as a Lisp value" whenever it happens as a side effect of a
 /// method's return value, not just via an explicit call.
-pub fn jvm_value_to_lisp_arg<'local>(
+pub fn to_bridge<'local>(
     env: &mut jni::Env<'local>,
     value: JValueOwned<'local>,
 ) -> jni::errors::Result<BridgeValue> {
@@ -333,11 +337,11 @@ pub fn jvm_value_to_lisp_arg<'local>(
         JValueOwned::Float(f) => Ok(BridgeValue::Float(f as f64)),
         JValueOwned::Double(f) => Ok(BridgeValue::Float(f)),
         JValueOwned::Char(c) => Ok(BridgeValue::Int(c as i64)),
-        JValueOwned::Object(obj) => object_to_lisp_arg(env, obj),
+        JValueOwned::Object(obj) => object_to_bridge(env, obj),
     }
 }
 
-fn object_to_lisp_arg<'local>(
+fn object_to_bridge<'local>(
     env: &mut jni::Env<'local>,
     obj: JObject<'local>,
 ) -> jni::errors::Result<BridgeValue> {
@@ -414,6 +418,117 @@ fn object_to_lisp_arg<'local>(
     Ok(BridgeValue::Object(JvmObject(Arc::new(global))))
 }
 
+/// A live global reference to a JVM object, shared by `Arc` clone.
+///
+/// Replaces the former `u64` handle plus process-global table. The table
+/// only existed so a JVM object could be a text-serialisable integer over
+/// the old sexp pipe (deleted in Item 2). `jni::refs::Global` is `Send +
+/// Sync` (0.22.4), so the reference itself rides the typed `Cmd`/`Inbound`
+/// queues directly. `Arc` because 0.22's `Global` has no `Clone` (a real
+/// clone is a fresh `NewGlobalRef`, needing a live `Env`); an `Arc` clone
+/// is a cheap refcount bump.
+#[derive(Debug, Clone)]
+pub struct JvmObject(pub Arc<Global<JObject<'static>>>);
+
+/// The Lisp-visible wrapper for a JVM object — a `user-ptr`. Exactly one
+/// wrapper owns a given reference (mirrors `LispObject`'s single-owner
+/// rule): each JVM→Lisp crossing mints a fresh `Global`, and the wrapper
+/// is neither cloned nor copied.
+pub struct JvmHandle(pub JvmObject);
+
+// `Transfer` is the `emacs` crate's marker for "expose as an opaque,
+// GC-owned `user-ptr`" (vendored emacs-0.21.0, `src/types/user_ptr.rs`) —
+// a bare impl, no required method.
+impl emacs::Transfer for JvmHandle {}
+
+impl Drop for JvmHandle {
+    fn drop(&mut self) {
+        // Lisp's GC may run this on a thread with no JNI attachment, so the
+        // reference is cloned and handed to the worker thread to release:
+        // in the common case, dropping the last `Arc` there runs
+        // `Global::Drop`'s `DeleteGlobalRef` on an attached thread, avoiding
+        // `jni::Global::Drop`'s GC-thread auto-attach and its logged perf
+        // warning (jni-0.22.4, `src/refs/global.rs`). This is best-effort,
+        // not a guarantee: if the worker drops its clone before the field
+        // drop below runs, this (GC) thread ends up holding the last `Arc`
+        // and pays the auto-attach cost itself. Either way the delete runs
+        // exactly once -- never a double-free, never a leak.
+        let object = self.0.clone();
+        let _ = crate::jvm::inbox::submit(crate::jvm::inbox::Cmd::ReleaseRef { object });
+    }
+}
+
+/// Classifies one value crossing Clojure → Lisp (an `apply` receiver or
+/// argument, or a `typeOf`/`isNotNil`/`eq` operand) into a `LispInput`,
+/// per spec "Argument conversion":
+/// - `null` → `Nil`;
+/// - an `emacs_jni.core.LispObject` → carried by its `ptr`;
+/// - an `emacs_jni.core.LispSymbol` marker (a Clojure symbol/keyword the
+///   namespace wrapped) → `Symbol { name, keyword }`;
+/// - everything else → the same `to_bridge` an
+///   ordinary `jvm-call` argument would go through.
+pub(crate) fn to_input<'local>(
+    env: &mut jni::Env<'local>,
+    elem: JObject<'local>,
+) -> jni::errors::Result<LispInput> {
+    // `IsInstanceOf` (what `is_instance_of` calls) reports `true` for a
+    // null reference against ANY class per the JNI spec, so null must be
+    // checked before the class checks below -- otherwise a null value
+    // would be misread as `Obj(0)`.
+    if elem.is_null() {
+        return Ok(LispInput::Scalar(BridgeValue::Nil));
+    }
+    let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
+    if env.is_instance_of(&elem, &lisp_object_class)? {
+        return Ok(LispInput::Obj(crate::jvm::entry::get_ptr_field(env, &elem)?));
+    }
+    let lisp_symbol_class = env.find_class(jni::jni_str!("emacs_jni/core/LispSymbol"))?;
+    if env.is_instance_of(&elem, &lisp_symbol_class)? {
+        let name_obj =
+            env.get_field(&elem, jni::jni_str!("name"), jni::jni_sig!(java.lang.String))?.l()?;
+        let name = env.cast_local::<JString>(name_obj)?;
+        let name = name.try_to_string(env)?;
+        let keyword =
+            env.get_field(&elem, jni::jni_str!("keyword"), jni::jni_sig!(boolean))?.z()?;
+        return Ok(LispInput::Symbol { name, keyword });
+    }
+    let lisp_arg = to_bridge(env, JValueOwned::Object(elem))?;
+    Ok(LispInput::Scalar(lisp_arg))
+}
+
+/// Converts `applyAsync`'s `Object[]` ARGS into `LispInput`s, element
+/// by element via `to_input`.
+pub(crate) fn jobject_array_to_lisp_request_args<'local>(
+    env: &mut jni::Env<'local>,
+    args: &JObjectArray<'local>,
+) -> jni::errors::Result<Vec<LispInput>> {
+    let len = args.len(env)?;
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let elem = args.get_element(env, i)?;
+        out.push(to_input(env, elem)?);
+    }
+    Ok(out)
+}
+
+/// Renders an `Object[]` of `call`'s actual varargs arguments into a
+/// `Vec<BridgeValue>` — the reverse direction of what `jvm::invoke::
+/// handle_call` (Task 5) does for its own return values, reused here since
+/// a JVM-initiated call's arguments need the exact same Java-object ->
+/// `BridgeValue` pipeline as any other value crossing from Java to Lisp.
+pub(crate) fn jobject_array_to_bridge_values(
+    env: &mut jni::Env<'_>,
+    args: &JObjectArray<'_>,
+) -> jni::errors::Result<Vec<BridgeValue>> {
+    let len = args.len(env)?;
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let obj = args.get_element(env, i)?;
+        out.push(to_bridge(env, JValueOwned::Object(obj))?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod jvm_tests {
     use super::*;
@@ -470,7 +585,7 @@ mod jvm_tests {
             let method = env.cast_local::<jni::objects::JObject>(methods)?;
 
             let long_primitive = primitive_long_class(env)?;
-            let arg = lisp_arg_to_jvalue(env, &BridgeValue::Int(42), &long_primitive)?;
+            let arg = from_bridge(env, &BridgeValue::Int(42), &long_primitive)?;
             let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
             let args_array = env.new_object_array(1, &object_class, JObject::null())?;
             let boxed_arg = arg_to_object(env, arg)?;
@@ -486,7 +601,7 @@ mod jvm_tests {
                     &[receiver_arg.borrow(), args_array_arg.borrow()],
                 )?
                 .l()?;
-            let result_arg = object_to_lisp_arg(env, result)?;
+            let result_arg = object_to_bridge(env, result)?;
             // Checks the actual variant, not just a stringified value: a
             // boxed `Long` return misrouted into `BridgeValue::Float`
             // instead of `BridgeValue::Int` would still print as `42`, so
@@ -505,12 +620,12 @@ mod jvm_tests {
     // Object, but Method.invoke's args array needs boxed Objects — a
     // Long primitive value must be boxed via Long.valueOf before going
     // into the array. Rather than hand-roll that boxing logic separately
-    // from lisp_arg_to_jvalue (which intentionally returns unboxed
+    // from from_bridge (which intentionally returns unboxed
     // primitives for primitive parameter types, matching what
     // Method.invoke itself expects for a *primitive*-typed formal
     // parameter), this test-only helper exists so the test can exercise
     // the reflective invoke path realistically. This is a real open design
-    // question (whether lisp_arg_to_jvalue needs a boxed-Object sibling for
+    // question (whether from_bridge needs a boxed-Object sibling for
     // Task 6's varargs-style Method.invoke callers) for Task 6 to resolve
     // — not solved here; see plan's Task 5 section, where `box_if_primitive`
     // is later introduced for exactly that purpose.
