@@ -3,6 +3,7 @@
 - `cargo clippy` and `cargo fmt` before committing.
 - Prefer `thiserror` for library errors, `anyhow` for application-level error handling.
 - If you are not familiar with a library, prefer reading its source code over guessing. You can use `cargo metadata` to find the source directory.
+- Hard-wrap comments and docstrings at 100 characters.
 
 ## Style
 
