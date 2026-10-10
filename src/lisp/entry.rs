@@ -125,7 +125,7 @@ fn parse_call_target(target: Value) -> Result<crate::protocol::CallTarget> {
 /// returns the result. Signals `jvm-error` on failure. The main thread stays attached to the JVM
 /// across calls; see `jvm::invoke::call_direct`.
 ///
-/// Not the same as `jvm-call-sync` (`elisp/jvm.el`), which waits on the async path. This blocks
+/// Not the same as `jvm-call-await` (`elisp/jvm.el`), which waits on the async path. This blocks
 /// Emacs for the whole call.
 #[defun(mod_in_name = false, name = "jvm--call-direct")]
 fn jvm_call_direct<'e>(

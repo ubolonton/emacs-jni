@@ -274,7 +274,7 @@ fn handle_pause(vm: &JavaVM) {
             });
         }
         Err(e) => {
-            // Stay in `pausing` and log. There is no `pause-failed` state; the caller's `-sync`
+            // Stay in `pausing` and log. There is no `pause-failed` state; the caller's `-await`
             // wrapper times out.
             crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
                 level: "error".to_string(),

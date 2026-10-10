@@ -71,14 +71,12 @@ pub enum Inbound {
     Release {
         handle: u64,
     },
-    /// A log line from the worker thread. Enqueued by every log call site
-    /// in `jvm_thread`/`lisp_requests`.
+    /// A log line from the worker thread.
     Log {
         level: String,
         text: String,
     },
-    /// A JVM lifecycle status transition. Enqueued by every status-send
-    /// call site in `jvm_thread`.
+    /// A JVM lifecycle status transition, from the worker thread.
     Status {
         status: Status,
         detail: Option<String>,
