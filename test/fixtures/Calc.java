@@ -35,7 +35,7 @@ public class Calc {
         return fn.call(n).get(10, java.util.concurrent.TimeUnit.SECONDS);
     }
 
-    // Calls FN with a Java object (`this`), not a primitive.
+    /** Calls {@code fn} with a Java object ({@code this}), not a primitive. */
     public Object callWithSelf(emacs_jni.core.LispCallable fn) throws Exception {
         return fn.call(this).get(10, java.util.concurrent.TimeUnit.SECONDS);
     }
@@ -49,7 +49,7 @@ public class Calc {
         return "string";
     }
 
-    // Returns the symbol name of the `LispSignal` that FN's failure produces.
+    /** Returns the symbol name of the {@code LispSignal} from a failure of {@code fn}. */
     public static String describeCallbackError(emacs_jni.core.LispCallable fn, long n) throws Exception {
         try {
             fn.call(n).get(10, java.util.concurrent.TimeUnit.SECONDS);

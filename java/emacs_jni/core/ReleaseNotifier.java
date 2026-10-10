@@ -1,10 +1,17 @@
 package emacs_jni.core;
 
-// The `Cleaner` action of a `LispFunction`. After the function is collected, `run` tells Lisp to
-// drop the handle from its function table.
+/**
+ * The {@link java.lang.ref.Cleaner} action of a {@link LispFunction}. After the function is
+ * collected, {@link #run} tells Lisp to remove {@code handle} from {@code jvm--lisp-callbacks}.
+ */
 final class ReleaseNotifier implements Runnable {
     private final long handle;
 
+    /**
+     * Watches one {@link LispFunction}.
+     *
+     * @param handle the handle of the watched function
+     */
     ReleaseNotifier(long handle) {
         this.handle = handle;
     }
