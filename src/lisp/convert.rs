@@ -1,10 +1,14 @@
+//! Lisp value conversion, on the Emacs main thread: Lisp [`Value`] ↔ [`BridgeValue`] for
+//! `jvm-call` arguments and results, and Lisp [`Value`] ↔ [`LispInput`]/[`LispOutcome`] for
+//! Clojure's access to Lisp values.
+
 use emacs::{Env, IntoLisp, Result as EmacsResult, Value};
 
 use crate::jvm::convert::JvmHandle;
 use crate::protocol::{BridgeValue, LispInput, LispOutcome};
 
-/// Converts a single Lisp value to a `BridgeValue` by runtime type, trying
-/// each marshallable Lisp type in turn.
+/// Converts a Lisp value to a [`BridgeValue`] by its runtime type. Signals `jvm-invalid-argument`
+/// for a type with no Java form, such as a vector.
 pub fn to_bridge(v: Value) -> EmacsResult<BridgeValue> {
     if !v.is_not_nil() {
         return Ok(BridgeValue::Nil);
@@ -44,7 +48,7 @@ pub fn to_bridge(v: Value) -> EmacsResult<BridgeValue> {
         return Ok(BridgeValue::Symbol { name, keyword: false });
     }
     // Lisp owns the function table (`jvm--lisp-callbacks`); Rust only carries the handle. See
-    // `docs/explanation/interop-design.md`, "Why a Lisp function becomes a real Java object".
+    // `docs/explanation/interop-design.md`, "Why a Lisp function becomes a Java object".
     if v.env.call("functionp", (v,))?.is_not_nil() {
         let handle: u64 = v.env.call("jvm--register-callback", (v,))?.into_rust()?;
         return Ok(BridgeValue::Callback(handle));
@@ -53,8 +57,10 @@ pub fn to_bridge(v: Value) -> EmacsResult<BridgeValue> {
     v.env.signal(crate::lisp::entry::jvm_invalid_argument, (v,))
 }
 
-/// Converts a `BridgeValue` to a Lisp `Value`. Every JVM-to-Lisp value goes through this, on the
-/// main thread.
+/// Converts a [`BridgeValue`] to a Lisp [`Value`]. Every JVM-to-Lisp value goes through this, on
+/// the main thread.
+///
+/// Panics on [`BridgeValue::Callback`], which flows Lisp to Java only.
 pub fn from_bridge<'e>(env: &'e Env, arg: &BridgeValue) -> EmacsResult<Value<'e>> {
     match arg {
         BridgeValue::Nil => ().into_lisp(env),
@@ -79,7 +85,7 @@ pub fn from_bridge<'e>(env: &'e Env, arg: &BridgeValue) -> EmacsResult<Value<'e>
     }
 }
 
-/// Converts one already-classified apply argument to a `Value`.
+/// Converts one [`LispInput`] (an `apply` function or argument, or an operand) to a [`Value`].
 pub(crate) fn from_input<'e>(env: &'e Env, arg: &LispInput) -> EmacsResult<Value<'e>> {
     match arg {
         LispInput::Obj(ptr) => Ok(crate::lisp::inbox::borrow(env, *ptr)),
@@ -95,8 +101,9 @@ pub(crate) fn from_input<'e>(env: &'e Env, arg: &LispInput) -> EmacsResult<Value
 }
 
 /// Classifies a Lisp value for return to Clojure. Scalars, strings, and interned symbols convert
-/// to Clojure values; anything else stays an opaque `LispObject`. `nil` becomes `nil` and `t`
-/// becomes `true`, so a Lisp predicate result works in a Clojure conditional.
+/// to Clojure values; anything else becomes [`LispOutcome::Ptr`], an opaque `LispObject`. `nil`
+/// becomes `nil` and `t` becomes `true`, so a Lisp predicate result works in a Clojure
+/// conditional.
 pub(crate) fn to_outcome(env: &Env, value: Value) -> EmacsResult<LispOutcome> {
     if !value.is_not_nil() {
         return Ok(LispOutcome::Value(BridgeValue::Nil));

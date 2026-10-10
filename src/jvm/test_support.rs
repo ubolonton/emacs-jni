@@ -5,7 +5,7 @@ use jni::JNIVersion;
 
 /// Creates the test JVM, or attaches to the one that already exists in this process.
 ///
-/// Retries `JavaVM::new`. jni 0.22.4 checks for an existing JVM without a lock, so parallel tests
+/// Retries [`JavaVM::new`]. jni 0.22.4 checks for an existing JVM without a lock, so parallel tests
 /// can get `AlreadyCreated`; the next attempt finds the winner's JVM.
 pub(crate) fn create_test_jvm() -> JavaVM {
     let mut last_err = None;

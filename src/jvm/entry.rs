@@ -1,5 +1,13 @@
+//! The `emacs_jni.core` Java shim: defining its classes in the JVM, and the Rust implementations
+//! of its `native` methods.
+//!
+//! A Lisp-access native (`Lisp.*`, `LispObject.prin1ToString`) blocks its JVM thread until the
+//! main thread replies. Inside `jvm--call-direct` it runs the request directly instead, on the
+//! main thread's [`Env`](emacs::Env) (see [`crate::lisp::runtime`]).
+
 use jni::objects::{JClass, JClassLoader, JObject, JObjectArray, JString, JThrowable, JValue};
 
+// Shim class files, compiled by `build.rs`.
 const LISP_CALLABLE_CLASS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/target/emacs-jni-shim-classes/emacs_jni/core/LispCallable.class"
@@ -44,10 +52,10 @@ const LISP_SYMBOL_CLASS: &[u8] = include_bytes!(concat!(
 /// Defines the `emacs_jni.core` shim classes in the attached JVM. Call once, right after the JVM
 /// is created, before anything looks up these classes.
 ///
-/// The classes go into the platform classloader. It is the parent of both the system loader
-/// (used by `FindClass` with no Java frames on the stack) and the shared jar loader
-/// (`jvm::inbox::create_shared_classloader`), so both can see the classes. A class in the system
-/// loader is not visible to jar classes, which then fail with `NoClassDefFoundError`.
+/// The classes go into the platform classloader. It is the parent of both the system loader (used
+/// by `FindClass` with no Java frames on the stack) and the shared jar loader
+/// (`jvm::inbox::create_shared_classloader`), so both can see the classes. A class in the
+/// system loader is not visible to jar classes, which then fail with `NoClassDefFoundError`.
 ///
 /// Idempotent. jni 0.22.4 keeps one process-global `JavaVM`, so a restart (or a second test)
 /// reuses a JVM that already has these classes. Defining a class twice is a `LinkageError`.
@@ -129,14 +137,15 @@ fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> 
         name = "call",
         fn lisp_function_call(args: [java.lang.Object]) -> java.util.concurrent.CompletableFuture,
     };
-    // Safety: `native_method!` checks that `lisp_function_call` matches the JNI signature, and
+    // SAFETY: `native_method!` checks that `lisp_function_call` matches the JNI signature, and
     // `call` is an instance method on `LispFunction`, as `register_native_methods` requires.
     unsafe { env.register_native_methods(&class, &[CALL_METHOD]) }
 }
 
 /// Implements `LispFunction.call`: registers a new `CompletableFuture`, enqueues an
-/// `Inbound::Invoke`, and returns the future. Does not block. Emacs runs the Lisp function later
-/// on its main thread, and the result arrives as `Cmd::InvokeReply`.
+/// [`Inbound::Invoke`](crate::lisp::inbox::Inbound::Invoke), and returns the future. Does not
+/// block. Emacs runs the Lisp function later on its main thread, and the result arrives as
+/// [`Cmd::InvokeReply`](crate::jvm::inbox::Cmd::InvokeReply).
 fn lisp_function_call<'local>(
     env: &mut jni::Env<'local>,
     this: JObject<'local>,
@@ -180,13 +189,13 @@ fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<(
         name = "run",
         fn release_notifier_run() -> void,
     };
-    // Safety: as in `register_lisp_function_native`; `run` is an instance method on
+    // SAFETY: as in `register_lisp_function_native`; `run` is an instance method on
     // `ReleaseNotifier`.
     unsafe { env.register_native_methods(&class, &[RUN_METHOD]) }
 }
 
 /// Implements `ReleaseNotifier.run`. The `LispFunction` this notifier watches was collected, so
-/// tell Lisp to drop HANDLE from its function table. Runs on a `Cleaner` thread.
+/// tell Lisp to drop its handle from the function table. Runs on a `Cleaner` thread.
 fn release_notifier_run<'local>(
     env: &mut jni::Env<'local>,
     this: JObject<'local>,
@@ -203,6 +212,8 @@ fn get_handle_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::
     Ok(value as u64)
 }
 
+/// Defines the class `name` (internal form, e.g. `emacs_jni/core/Lisp`) from `bytecode` in
+/// `loader`, unless `FindClass` already finds it.
 fn define_if_absent(
     env: &mut jni::Env,
     loader: &JClassLoader<'_>,
@@ -247,6 +258,8 @@ fn register_lisp_native(env: &mut jni::Env) -> jni::errors::Result<()> {
         name = "applyAsync",
         static fn lisp_apply_async(f: java.lang.Object, args: [java.lang.Object]) -> java.util.concurrent.CompletableFuture,
     };
+    // SAFETY: `native_method!` checks each function against its JNI signature, and each name is a
+    // static method on `Lisp`, as `register_native_methods` requires.
     unsafe {
         env.register_native_methods(
             &class,
@@ -262,6 +275,8 @@ fn register_lisp_object_native(env: &mut jni::Env) -> jni::errors::Result<()> {
         name = "prin1ToString",
         fn lisp_object_prin1_to_string() -> java.lang.String,
     };
+    // SAFETY: as in `register_lisp_function_native`; `prin1ToString` is an instance method on
+    // `LispObject`.
     unsafe { env.register_native_methods(&class, &[PRIN1_TO_STRING_METHOD]) }
 }
 
@@ -272,11 +287,14 @@ fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors:
         name = "run",
         fn lisp_ref_release_notifier_run() -> void,
     };
+    // SAFETY: as in `register_lisp_function_native`; `run` is an instance method on
+    // `LispRefReleaseNotifier`.
     unsafe { env.register_native_methods(&class, &[RUN_METHOD]) }
 }
 
-/// Sends a Lisp-access request built by BUILD_REQUEST and blocks this JVM thread on the reply,
-/// with a timeout.
+/// Sends the Lisp-access request that `build_request` makes from an id, and blocks this JVM
+/// thread on the reply for up to [`LISP_REQUEST_TIMEOUT_SECS`]. Inside `jvm--call-direct`, runs
+/// it directly instead ([`service_lisp_request_direct`]), with id 0.
 fn service_lisp_request_sync<'local>(
     env: &mut jni::Env<'local>,
     build_request: impl FnOnce(u64) -> crate::lisp::inbox::Inbound,
@@ -297,8 +315,8 @@ fn service_lisp_request_sync<'local>(
     block_on_lisp_reply(env, &future)
 }
 
-/// Runs a Lisp-access REQUEST on the `Env` of the enclosing `jvm--call-direct`. Returns the Java
-/// result, or throws the Lisp signal/throw as a `LispNonLocalExit`.
+/// Runs a Lisp-access `request` on the [`Env`](emacs::Env) of the enclosing `jvm--call-direct`.
+/// Returns the Java result, or throws the Lisp signal/throw as a `LispNonLocalExit`.
 fn service_lisp_request_direct<'local>(
     env: &mut jni::Env<'local>,
     request: crate::lisp::inbox::Inbound,
@@ -311,16 +329,27 @@ fn service_lisp_request_direct<'local>(
 
     match reply {
         crate::protocol::LispOutcome::Signal { symbol, data } => {
-            Err(crate::jvm::invoke::throw_non_local_exit(env, 0, *symbol, *data))
+            Err(crate::jvm::invoke::throw_non_local_exit(
+                env,
+                crate::protocol::NON_LOCAL_EXIT_SIGNAL,
+                *symbol,
+                *data,
+            ))
         }
         crate::protocol::LispOutcome::Throw { tag, value } => {
-            Err(crate::jvm::invoke::throw_non_local_exit(env, 1, *tag, *value))
+            Err(crate::jvm::invoke::throw_non_local_exit(
+                env,
+                crate::protocol::NON_LOCAL_EXIT_THROW,
+                *tag,
+                *value,
+            ))
         }
         other => crate::jvm::invoke::build_lisp_reply_object(env, other),
     }
 }
 
-/// Blocks on FUTURE's `get(LISP_REQUEST_TIMEOUT_SECS, SECONDS)`.
+/// Blocks on `future.get(LISP_REQUEST_TIMEOUT_SECS, SECONDS)`. See
+/// [`LISP_REQUEST_TIMEOUT_SECS`].
 fn block_on_lisp_reply<'local>(
     env: &mut jni::Env<'local>,
     future: &JObject<'local>,
@@ -472,7 +501,8 @@ fn lisp_object_prin1_to_string<'local>(
     env.cast_local::<JString>(result)
 }
 
-/// `LispRefReleaseNotifier.run`'s native implementation: enqueues a `FreeRef` for THIS's `ptr`.
+/// `LispRefReleaseNotifier.run`'s native implementation: enqueues an
+/// [`Inbound::FreeRef`](crate::lisp::inbox::Inbound::FreeRef) for the `ptr` of `this`.
 fn lisp_ref_release_notifier_run<'local>(
     env: &mut jni::Env<'local>,
     this: JObject<'local>,
@@ -487,7 +517,8 @@ fn unbox_boolean(env: &mut jni::Env, obj: &JObject) -> jni::errors::Result<bool>
     env.call_method(obj, jni::jni_str!("booleanValue"), jni::jni_sig!(() -> boolean), &[])?.z()
 }
 
-/// Reads THIS's private `ptr` field. JNI field access ignores Java access control.
+/// Reads the private `ptr` field of `this`, a `LispObject` or `LispRefReleaseNotifier`. JNI field
+/// access ignores Java access control.
 pub(crate) fn get_ptr_field(
     env: &mut jni::Env<'_>,
     this: &JObject<'_>,

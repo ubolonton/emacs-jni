@@ -1,5 +1,5 @@
-//! The worker thread: its `Cmd` queue, event loop, JVM lifecycle, jar loading, and the table of
-//! futures waiting for a Lisp reply. Reflective calls are in `jvm::invoke`.
+//! The worker thread: its [`Cmd`] queue, event loop, JVM lifecycle, jar loading, and the table of
+//! futures waiting for a Lisp reply. Reflective calls are in [`crate::jvm::invoke`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,46 +16,43 @@ use crate::jvm::convert::JvmObject;
 use crate::jvm::runtime::STATUS;
 use crate::protocol::{BridgeValue, CallTarget, LispOutcome, Status};
 
+/// One message to the worker thread. Sent by [`submit`], except [`Cmd::Resume`].
 #[derive(Debug)]
 pub(crate) enum Cmd {
-    /// Resumes a paused worker. A first start spawns a new thread instead (`start_or_resume`).
+    /// Resumes a paused worker. A first start spawns a new thread instead ([`start_or_resume`]).
     Resume,
+    /// Detaches the worker from the JVM. Sent by `jvm--pause`.
     Pause,
+    /// Destroys the JVM and ends the worker. Sent by `jvm--stop`.
     Stop,
-    LoadJar {
-        id: u64,
-        path: String,
-    },
-    Call {
-        id: u64,
-        target: CallTarget,
-        member: String,
-        args: Vec<BridgeValue>,
-    },
+    /// Adds `path` to the shared classloader, then enqueues
+    /// [`Inbound::LoadJarDone`](crate::lisp::inbox::Inbound::LoadJarDone). Sent by `jvm--load-jar`.
+    LoadJar { id: u64, path: String },
+    /// Calls `target.member(args)` on a new thread, then enqueues
+    /// [`Inbound::CallDone`](crate::lisp::inbox::Inbound::CallDone). Sent by `jvm--call`.
+    Call { id: u64, target: CallTarget, member: String, args: Vec<BridgeValue> },
     /// Completes a `LispFunction.call` future with the Lisp callback's outcome. Sent by
     /// `jvm--invoke-reply`.
-    InvokeReply {
-        id: u64,
-        outcome: LispOutcome,
-    },
-    /// Drops a JVM reference whose Lisp `user-ptr` was collected. Sent by `JvmHandle::drop`, so
-    /// the delete runs on an attached thread.
-    ReleaseRef {
-        object: JvmObject,
-    },
+    InvokeReply { id: u64, outcome: LispOutcome },
+    /// Drops a JVM reference whose Lisp `user-ptr` was collected. Sent by
+    /// [`JvmHandle::drop`](crate::jvm::convert::JvmHandle), so the delete runs on an attached
+    /// thread.
+    ReleaseRef { object: JvmObject },
     /// Completes a Lisp-access native's future (`intern`, `applyAsync`, ...). Sent after the main
     /// thread runs the request.
-    LispReply {
-        id: u64,
-        value: LispOutcome,
-    },
+    LispReply { id: u64, value: LispOutcome },
+    /// Panics the worker. Sent by `jvm--test-panic`.
     #[cfg(feature = "test-support")]
     TestPanic,
 }
 
+/// The worker's command channel, or `None` if no worker is running.
 static SENDER: Mutex<Option<Sender<Cmd>>> = Mutex::new(None);
+/// The counter behind [`next_request_id`].
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Allocates the id of a Lisp-initiated request (`jvm--call`, `jvm--load-jar`). Lisp keys its
+/// pending callbacks by this id. Separate from [`next_id`], which keys JVM-initiated futures.
 pub(crate) fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst)
 }
@@ -72,7 +69,8 @@ pub(crate) fn start_or_resume(classpath: Vec<String>, options: Vec<String>) {
     }
 }
 
-/// Sends a command other than `Resume` to the worker. Returns `Err(())` if no worker is running.
+/// Sends a command other than [`Cmd::Resume`] to the worker. Returns `Err(())` if no worker is
+/// running.
 pub(crate) fn submit(cmd: Cmd) -> Result<(), ()> {
     let guard = SENDER.lock().unwrap();
     match guard.as_ref() {
@@ -87,10 +85,13 @@ pub(crate) fn clear_sender() {
     *SENDER.lock().unwrap() = None;
 }
 
+/// The counter behind [`next_id`].
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-// A future has one owner at a time (this table, then `take`'s caller), so no `Arc`.
+/// The `CompletableFuture`s that wait for a Lisp reply, by id. A future has one owner at a time
+/// (this table, then the caller of [`take`]), so no [`Arc`].
 static TABLE: Mutex<Option<HashMap<u64, Global<JObject<'static>>>>> = Mutex::new(None);
 
+/// Locks [`TABLE`], creating the map on first use.
 fn table() -> std::sync::MutexGuard<'static, Option<HashMap<u64, Global<JObject<'static>>>>> {
     let mut guard = TABLE.lock().unwrap();
     if guard.is_none() {
@@ -99,25 +100,25 @@ fn table() -> std::sync::MutexGuard<'static, Option<HashMap<u64, Global<JObject<
     guard
 }
 
-/// Allocates a correlation id for an `invoke` round trip. The id is needed before the future
-/// exists.
+/// Allocates the id of a JVM-initiated request (a `LispFunction.call` or a `Lisp.*` native), the
+/// key of its future in [`TABLE`]. Separate from [`next_request_id`].
 pub(crate) fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
 }
 
-/// Registers FUTURE (a global ref to a `java.util.concurrent.CompletableFuture`)
-/// under ID, for later completion by `Cmd::InvokeReply`.
+/// Registers `future` (a global ref to a `java.util.concurrent.CompletableFuture`) under `id`, for
+/// later completion by [`Cmd::InvokeReply`] or [`Cmd::LispReply`].
 pub(crate) fn register(id: u64, future: Global<JObject<'static>>) {
     table().as_mut().unwrap().insert(id, future);
 }
 
-/// Removes and returns the pending future for ID. Each id is completed once.
+/// Removes and returns the pending future for `id`. Each id is completed once.
 fn take(id: u64) -> Option<Global<JObject<'static>>> {
     table().as_mut().unwrap().remove(&id)
 }
 
-/// Entry point for the worker thread. Creates the JVM, then handles commands until a successful
-/// `Cmd::Stop` or a panic.
+/// Entry point for the worker thread. Creates the JVM, then handles commands until a
+/// [`Cmd::Stop`] or a panic.
 pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>) {
     let vm = match create_jvm(&classpath, &options) {
         Ok(vm) => {
@@ -205,20 +206,22 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
     }
 }
 
-// Whether a `create_jvm` call has reached `define_classes` before in this process. Only the first
-// such call treats a `define_classes` failure as fatal; see `create_jvm`.
-//
-// The flag is set just before `define_classes`, not at the start of `create_jvm`. A start can
-// fail earlier (bad options) and be retried from `start-failed`; that retry is still the first
-// real attempt. Worker threads never run `create_jvm` concurrently, so `swap` is enough.
+/// Whether a [`create_jvm`] call has reached [`define_classes`](crate::jvm::entry::define_classes)
+/// before in this process. Only the first such call treats a `define_classes` failure as fatal.
+///
+/// The flag is set just before `define_classes`, not at the start of [`create_jvm`]. A start can
+/// fail earlier (bad options) and be retried from `start-failed`; that retry is still the first
+/// real attempt. Worker threads never run [`create_jvm`] concurrently, so `swap` is enough.
 static JVM_CREATE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
-/// Returns `true` on the first call for FLAG, `false` after. A function so that a test can use
+/// Returns `true` on the first call for `flag`, `false` after. A function so that a test can use
 /// its own flag.
 fn is_first_attempt(flag: &AtomicBool) -> bool {
     !flag.swap(true, Ordering::SeqCst)
 }
 
+/// Creates the JVM with `classpath` and `options`, and defines the shim classes. See
+/// [`JVM_CREATE_ATTEMPTED`] for when a shim failure is fatal.
 fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String> {
     let mut builder = InitArgsBuilder::new().version(JNIVersion::V1_8);
     if !classpath.is_empty() {
@@ -254,6 +257,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     Ok(vm)
 }
 
+/// The message of a caught panic payload.
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
@@ -264,6 +268,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Handles [`Cmd::Pause`]: detaches the worker and reports [`Status::Paused`].
 fn handle_pause(vm: &JavaVM) {
     match vm.detach_current_thread() {
         Ok(()) => {
@@ -284,8 +289,10 @@ fn handle_pause(vm: &JavaVM) {
     }
 }
 
+/// Handles [`Cmd::Stop`]: destroys the JVM and reports [`Status::Stopped`] or
+/// [`Status::StopFailed`].
 fn handle_stop(vm: JavaVM) {
-    // Safety: `destroy` requires no Java frames on this thread's stack (true between commands)
+    // SAFETY: `destroy` requires no Java frames on this thread's stack (true between commands)
     // and no later use of `vm`.
     let result = unsafe { vm.destroy() };
     // The `jvm--stop` defun already detached the main thread, so it cannot block `destroy`.
@@ -309,6 +316,7 @@ fn handle_stop(vm: JavaVM) {
     clear_sender();
 }
 
+/// Handles [`Cmd::Resume`]: re-attaches the worker and reports [`Status::Ready`].
 fn handle_resume(vm: &JavaVM) {
     // A no-op if attached; re-attaches if `Cmd::Pause` detached this thread.
     let result: jni::errors::Result<()> = vm.attach_current_thread(|_env| Ok(()));
@@ -330,6 +338,8 @@ fn handle_resume(vm: &JavaVM) {
     }
 }
 
+/// Handles [`Cmd::LoadJar`]: adds `path` to the shared classloader, creating the loader on first
+/// use, then enqueues [`Inbound::LoadJarDone`](crate::lisp::inbox::Inbound::LoadJarDone).
 fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     // `URLClassLoader#addURL` does not check the path, so check it here.
     //
@@ -366,8 +376,9 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     }
 }
 
-/// Synchronous counterpart of `handle_load_jar`, for `jvm--load-jar-direct`. Uses the same shared
-/// classloader. Returns an error message instead of enqueueing `Inbound::LoadJarDone`.
+/// Synchronous counterpart of [`handle_load_jar`], for `jvm--load-jar-direct`. Uses the same
+/// shared classloader. Returns an error message instead of enqueueing
+/// [`Inbound::LoadJarDone`](crate::lisp::inbox::Inbound::LoadJarDone).
 pub(crate) fn load_jar_direct(vm: &JavaVM, path: &str) -> Result<(), String> {
     // `addURL` does not check the path.
     if !std::path::Path::new(path).exists() {
@@ -415,7 +426,7 @@ fn create_shared_classloader<'local>(
     env.new_global_ref(&loader)
 }
 
-/// Adds PATH to LOADER as a `file:` URL. `URLClassLoader#addURL` is protected, so it is called
+/// Adds `path` to `loader` as a `file:` URL. `URLClassLoader#addURL` is protected, so it is called
 /// reflectively.
 fn add_jar_url(
     env: &mut jni::Env<'_>,
@@ -473,7 +484,7 @@ fn add_jar_url(
     Ok(())
 }
 
-/// Completes the future for ID with a Lisp callback's OUTCOME. Inline on the worker, because
+/// Completes the future for `id` with a Lisp callback's `outcome`. Inline on the worker, because
 /// completing a future is cheap.
 fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutcome) {
     let Some(future) = take(id) else {
@@ -497,7 +508,7 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutco
     }
 }
 
-/// Completes the future for ID with a Lisp-access reply. Only the worker is attached, so the
+/// Completes the future for `id` with a Lisp-access reply. Only the worker is attached, so the
 /// completion runs here.
 fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::protocol::LispOutcome) {
     let Some(future) = take(id) else {

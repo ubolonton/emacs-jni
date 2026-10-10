@@ -1,3 +1,6 @@
+//! The JVM side: code that runs on a thread attached to the JVM, or enqueues work for the worker
+//! thread.
+
 pub(crate) mod convert;
 pub(crate) mod entry;
 pub(crate) mod inbox;
