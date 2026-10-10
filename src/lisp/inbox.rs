@@ -132,8 +132,11 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispOutcome {
         Some(ErrorKind::Signal { symbol, data }) => {
             // SAFETY: `TempValue::value` requires the `Env` that made the error. `env` is the `Env`
             // of the failed call, per this function's contract.
-            let s = boxed(to_outcome(env, unsafe { symbol.value(env) }));
-            let d = boxed(to_outcome(env, unsafe { data.value(env) }));
+            let symbol = unsafe { symbol.value(env) };
+            // SAFETY: as for `symbol`.
+            let data = unsafe { data.value(env) };
+            let s = boxed(to_outcome(env, symbol));
+            let d = boxed(to_outcome(env, data));
             match (s, d) {
                 (Some(symbol), Some(data)) => LispOutcome::Signal { symbol, data },
                 // If only one side converted, it may hold a boxed `GlobalRef`. Free it.
@@ -146,8 +149,11 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispOutcome {
         }
         Some(ErrorKind::Throw { tag, value }) => {
             // SAFETY: as for `Signal` above.
-            let t = boxed(to_outcome(env, unsafe { tag.value(env) }));
-            let v = boxed(to_outcome(env, unsafe { value.value(env) }));
+            let tag = unsafe { tag.value(env) };
+            // SAFETY: as for `Signal` above.
+            let value = unsafe { value.value(env) };
+            let t = boxed(to_outcome(env, tag));
+            let v = boxed(to_outcome(env, value));
             match (t, v) {
                 (Some(tag), Some(value)) => LispOutcome::Throw { tag, value },
                 (t, v) => {
