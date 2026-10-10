@@ -165,7 +165,12 @@ The queue drain runs the same request code, so both paths give the same results.
 the values that an `Env` creates and frees them when the `Env` drops. So each native converts its
 result to a `LispOutcome` before it returns.
 
-`LispFunction.call` does not check `in_scope()`. It always queues `Inbound::Invoke`.
+`Lisp.applyAsync` and `LispFunction.call` return a `CompletableFuture`. They also check
+`in_scope()`. If it is true, they compute the outcome on the current `Env` and return a future that
+`complete_future_with_reply` already completed. `applyAsync` runs `compute_reply` on an
+`Inbound::Apply`. `LispFunction.call` runs `lisp::inbox::invoke_callback`. It looks up the function
+in `jvm--lisp-callbacks` and calls it. It turns a signal or throw into a `Signal` or `Throw`
+outcome. If `in_scope()` is false, `LispFunction.call` queues `Inbound::Invoke`.
 
 A Lisp signal or throw inside a direct call becomes a `LispNonLocalExit` in Java. If it reaches
 the top of the call, `describe_caught_java_exception` stores it in `PENDING_NLE`. It does this

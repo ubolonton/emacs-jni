@@ -158,18 +158,19 @@ the table entry and does not know about other `LispFunction` objects.
 Workaround: if Java keeps a Lisp function after the call returns, pass it to a method that has
 one overload for that argument count.
 
-### A `LispFunction` result is not available inside a direct call
+### A `LispFunction` called from another thread blocks during a direct call
 
-`LispFunction.call` always puts the request in the queue that Emacs drains on the main thread.
-It does this also inside a `jvm-call-direct`. If Java then waits for the result on the main
-thread, the wait cannot finish. It ends only when its own timeout expires. A wait with no
-timeout blocks Emacs permanently.
+Inside a `jvm-call-direct`, a `LispFunction.call` on the main thread runs the Lisp function
+immediately. The returned future is already complete. A call from another JVM thread puts the
+request in the queue that Emacs drains on the main thread. If the direct call waits for that
+thread, the wait ends only when the Java timeout expires. A wait with no timeout blocks Emacs
+permanently.
 
 Why: Emacs drains the queue only when the main thread is free. During a direct call, the main
 thread runs the Java code.
 
-Workaround: call a Java method that waits for a `LispFunction` result with `jvm-call-await` or
-`jvm-call-async`.
+Workaround: call a Java method that waits for a `LispFunction` result from another thread with
+`jvm-call-await` or `jvm-call-async`.
 
 ## Clojure
 
@@ -208,9 +209,9 @@ While Emacs runs a long Lisp computation or a direct call, the queued request wa
 | `intern`, `type-of`, `is-not-nil?`, `eq`, `prin1ToString` | 30 s, then `TimeoutException` |
 | `apply`, and the `require-*`/`refer-*` callables | No timeout |
 
-A `LispFunction.call` from Java always goes into the queue, also during a direct call. See
-[A `LispFunction` result is not available inside a direct
-call](#a-lispfunction-result-is-not-available-inside-a-direct-call).
+A `LispFunction.call` follows the same rules. See [A `LispFunction` called from another
+thread blocks during a direct
+call](#a-lispfunction-called-from-another-thread-blocks-during-a-direct-call).
 
 Do not let a direct call wait for another JVM thread that calls Lisp. The main thread cannot
 drain the queue during the direct call, so both threads wait.

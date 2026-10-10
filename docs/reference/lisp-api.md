@@ -241,8 +241,10 @@ numbers.
 
 `LispSymbol` (`emacs_jni.core.LispSymbol`) has public fields `name` (no leading `:`) and
 `keyword`. `LispFunction` implements `emacs_jni.core.LispCallable`, with method
-`CompletableFuture<Object> call(Object... args)`. A call puts a request in the queue. The future
-completes after Emacs runs the function on the main thread. The function's return value is
+`CompletableFuture<Object> call(Object... args)`. On the main thread inside `jvm-call-direct`, the
+function runs immediately, and the returned future is complete. On any other JVM thread, the call
+puts a request in the queue. The future completes after Emacs runs the function on the main
+thread. The function's return value is
 marshalled as for a `java.lang.Object` parameter. A Lisp signal in the function completes the
 future exceptionally with `LispSignal`. See
 [How to pass a Lisp function to Java](../how-to-guides/pass-a-lisp-function-to-java.md).

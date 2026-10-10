@@ -120,10 +120,10 @@ A queued request waits until Emacs is free. `intern`, `type-of`, `eq`, `is-not-n
 `require-function`, `refer-symbols`, and `refer-functions` wait with no timeout. See
 [Limitations and trade-offs](limitations-and-tradeoffs.md).
 
-A call to a `LispFunction` (a Lisp function passed to Java) always goes through the queue, on
-both paths. It returns a `CompletableFuture`. Inside a direct call, the queue does not drain until
-the direct call returns. So Java code that waits on that future inside a direct call waits until
-its timeout, or forever if it has none.
+A call to a `LispFunction` (a Lisp function passed to Java) follows the same rules. It returns a
+`CompletableFuture`. On the main thread inside a direct call, the Lisp function runs at once, and
+the future is already complete. On any other thread, the call goes through the queue. If a direct
+call waits for that thread, the wait ends only at the Java timeout, or never if it has none.
 
 A Lisp `signal` or `throw` in such a request reaches Java as a `LispSignal` or `LispThrow`. If it
 unwinds back out of a `jvm-call-direct`, Lisp gets the original signal or throw again.

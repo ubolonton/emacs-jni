@@ -121,15 +121,13 @@ We passed the wrapped object as `TARGET`, so `jvm-call` made an instance call.
 ## Step 7: Let Java call a Lisp function
 
 ```elisp
-(jvm-call-await "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
+(jvm-call "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
 ;; => 40
 ```
 
 The first argument is a Lisp `lambda`. It goes into the JVM as a callable Java object.
 `Calc.callWithArg` calls it with `4` and waits for the result. The Lisp function multiplied `4`
 by 10, and Java returned `40` to Lisp.
-
-A call that runs a Lisp function from Java uses `jvm-call-await`, not `jvm-call`.
 
 We called into the JVM, and the JVM called back into Lisp.
 
