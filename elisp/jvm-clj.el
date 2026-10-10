@@ -40,9 +40,8 @@ Returns the result value; signals `jvm-error' on failure."
   "Evaluate CODE (a string of Clojure source) and return its result value.
 Signals `jvm-error' on failure.
 
-Each call can run on a different JVM thread, so `*ns*' set by `in-ns'
-does not persist to the next call. Put the namespace switch in CODE, or
-use `jvm-clj-eval-string-direct'.
+`*ns*' set by `in-ns' does not persist to the next call, because the
+eval binds `*ns*' for that call only. Put the namespace switch in CODE.
 
 CODE can contain many top-level forms; they are evaluated in order, and
 the value of the last one is returned. Keywords and symbols return as Lisp
@@ -54,8 +53,8 @@ keywords and symbols; vectors and maps return as opaque JVM objects."
 ;;;
 ;;; Each step goes through `jvm-call-direct': the call runs on the Emacs
 ;;; main thread, which stays attached to the JVM across calls, so successive
-;;; direct calls share one JVM thread (stable identity, persistent thread-
-;;; locals) and a Clojure->Lisp callback can reenter Lisp without deadlock.
+;;; direct calls share one JVM thread (stable identity, persistent Java
+;;; `ThreadLocal' values) and a Clojure->Lisp callback can reenter Lisp without deadlock.
 ;;; A failure signals `jvm-error'; a Lisp signal/throw raised in a reentrant
 ;;; callback propagates out as itself.
 
@@ -88,9 +87,10 @@ Requires the Clojure NAMESPACE on this thread."
   "Direct counterpart of `jvm-clj-eval-string-await'.
 Evaluates CODE on the Emacs main thread and returns its result.
 
-The main thread stays attached to the JVM, so `*ns*' and dynamic bindings
-persist across calls. Emacs is blocked for the whole eval; run slow work
-on Clojure's own threads."
+The main thread stays attached to the JVM, so Java `ThreadLocal' values
+persist across calls. `*ns*' does not persist; see
+`jvm-clj-eval-string-await'. Emacs is blocked for the whole eval; run
+slow work on Clojure's own threads."
   (jvm-call-direct (jvm-clj--var-direct "emacs-jni.clj" "eval-for-lisp")
                    "invoke" (list code)))
 

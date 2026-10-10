@@ -1,7 +1,8 @@
 ;;; jvm-clj-eval-direct-test.el --- Tests for direct Clojure eval -*- lexical-binding: t; -*-
 
 ;; Direct Clojure eval on the Emacs main thread. Unlike the async path,
-;; every call runs on the same JVM thread, so thread-locals persist.
+;; every call runs on the same JVM thread, so Java `ThreadLocal' values
+;; persist.
 
 (require 'ert)
 (require 'jvm-clj)
