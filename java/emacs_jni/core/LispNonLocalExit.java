@@ -6,7 +6,12 @@ package emacs_jni.core;
  *
  * <p>The class is in the platform classloader, so Rust can construct it without the Clojure
  * classloader.
+ *
+ * <p>Do not serialize. A {@link LispObject} field holds a pointer that is valid only in this Emacs
+ * process, so serialization fails with {@link java.io.NotSerializableException}.
  */
+// Serializable only because every Throwable is. See the class doc.
+@SuppressWarnings("serial")
 public class LispNonLocalExit extends RuntimeException {
     /** The {@link #kind} of a {@link LispSignal}. */
     public static final int SIGNAL = 0;

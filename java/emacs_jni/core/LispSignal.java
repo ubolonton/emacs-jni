@@ -4,6 +4,8 @@ package emacs_jni.core;
  * A Lisp {@code signal} that crosses to the JVM. {@link #symbol} and {@link #data} are a
  * {@link LispSymbol}, a {@link LispObject}, or a boxed scalar.
  */
+// Not meant to be serialized. See LispNonLocalExit.
+@SuppressWarnings("serial")
 public final class LispSignal extends LispNonLocalExit {
     /** The error symbol, for example {@code wrong-type-argument}. */
     public final Object symbol;

@@ -4,6 +4,8 @@ package emacs_jni.core;
  * A Lisp {@code throw} that crosses to the JVM. {@link #tag} and {@link #value} have the same
  * types as in {@link LispSignal}.
  */
+// Not meant to be serialized. See LispNonLocalExit.
+@SuppressWarnings("serial")
 public final class LispThrow extends LispNonLocalExit {
     /** The catch tag. */
     public final Object tag;
