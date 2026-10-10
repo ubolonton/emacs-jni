@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use emacs::{Env, GlobalRef, Result as EmacsResult, Value};
 
 use crate::jvm::inbox::{self, Cmd};
-use crate::lisp::convert::{from_bridge, from_input, to_outcome};
+use crate::lisp::convert::{from_bridge, from_input, to_bridge, to_outcome};
 use crate::protocol::{BridgeValue, LispInput, LispOutcome, Status};
 
 /// One JVM→Emacs message. The first seven variants are Lisp-access requests; all except
@@ -355,6 +355,30 @@ pub fn compute_reply(env: &Env, request: &Inbound) -> LispOutcome {
         Ok(v) => v,
         Err(e) => error_to_reply(env, e),
     }
+}
+
+/// Calls the Lisp callback registered under HANDLE with ARGS, for a `LispFunction.call` made
+/// inside `jvm--call-direct`. The queue would deadlock there, as in `compute_reply`. Errors become
+/// `Signal`/`Throw` outcomes, as on the async path (`jvm--resolve-invoke`).
+pub fn invoke_callback(env: &Env, handle: u64, args: &[BridgeValue]) -> LispOutcome {
+    match run_callback(env, handle, args) {
+        Ok(v) => v,
+        Err(e) => error_to_reply(env, e),
+    }
+}
+
+fn run_callback(env: &Env, handle: u64, args: &[BridgeValue]) -> EmacsResult<LispOutcome> {
+    let table = env.call("symbol-value", (env.intern("jvm--lisp-callbacks")?,))?;
+    let function = env.call("gethash", (handle as i64, table))?;
+    if !function.is_not_nil() {
+        // `error` always signals, so `?` returns here.
+        env.call("error", ("no such callback handle %s", handle as i64))?;
+    }
+    let mut arg_values = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_values.push(from_bridge(env, arg)?);
+    }
+    Ok(LispOutcome::Value(to_bridge(function.call(&arg_values)?)?))
 }
 
 #[cfg(test)]

@@ -63,5 +63,28 @@ is the same for two separate calls."
               (jvm-call-direct "java.lang.Thread" "currentThread" nil) "threadId" nil)))
     (should (equal id1 id2))))
 
+(ert-deftest emacs-jni-jvm-call-direct-test/java-waits-on-a-lisp-callback ()
+  "Java can wait on a Lisp callback's result inside a direct call."
+  (jvm-call-direct-test--ensure-ready)
+  (should (equal (jvm-call-direct "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
+                 40))
+  (should (eq (jvm-call-direct "Calc" "callWithArg" (list (lambda (_n) :ok) 1)) :ok)))
+
+(ert-deftest emacs-jni-jvm-call-direct-test/lisp-callback-error-reaches-java ()
+  "A Lisp error in a callback reaches Java as a `LispSignal' inside a direct call."
+  (jvm-call-direct-test--ensure-ready)
+  (should (equal (jvm-call-direct "Calc" "describeCallbackError"
+                                  (list (lambda (_n) (signal 'wrong-type-argument '(numberp "x")))
+                                        1))
+                 "wrong-type-argument")))
+
+(ert-deftest emacs-jni-jvm-call-direct-test/callback-receives-a-java-object ()
+  "A Java object passed to a callback inside a direct call arrives wrapped."
+  (jvm-call-direct-test--ensure-ready)
+  (let ((calc (jvm-new-direct "Calc" '(100))))
+    (should (equal (jvm-call-direct calc "callWithSelf"
+                                    (list (lambda (self) (jvm-call-direct self "addToBase" '(1)))))
+                   101))))
+
 (provide 'jvm-call-direct-test)
 ;;; jvm-call-direct-test.el ends here

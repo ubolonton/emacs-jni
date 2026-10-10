@@ -143,6 +143,24 @@ fn lisp_function_call<'local>(
     args: JObjectArray<'local>,
 ) -> jni::errors::Result<JObject<'local>> {
     let handle = get_handle_field(env, &this)?;
+    let args = crate::jvm::convert::jobject_array_to_bridge_values(env, &args)?;
+
+    // Inside `jvm--call-direct`, the Java caller may wait on the result on this thread, which is
+    // the one that drains the queue. Run the callback directly and return a completed future.
+    if crate::lisp::runtime::in_scope() {
+        let outcome = crate::lisp::runtime::with_current_env(|lisp_env| {
+            crate::lisp::inbox::invoke_callback(lisp_env, handle, &args)
+        })
+        .ok_or_else(|| {
+            crate::jvm::convert::marshal_error("reentrant callback lost its Env scope")
+        })?;
+        let future_class =
+            env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
+        let future = env.new_object(&future_class, jni::jni_sig!(() -> void), &[])?;
+        crate::jvm::invoke::complete_future_with_reply(env, &future, outcome)?;
+        return Ok(future);
+    }
+
     let id = crate::jvm::inbox::next_id();
 
     let future_class = env.find_class(jni::jni_str!("java/util/concurrent/CompletableFuture"))?;
@@ -150,7 +168,6 @@ fn lisp_function_call<'local>(
     let future_global = env.new_global_ref(&future)?;
     crate::jvm::inbox::register(id, future_global);
 
-    let args = crate::jvm::convert::jobject_array_to_bridge_values(env, &args)?;
     crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Invoke { id, handle, args });
 
     Ok(future)
