@@ -1,6 +1,6 @@
 package emacs_jni.core;
 
-// A Lisp `throw' crossing to the JVM. See LispSignal.
+// A Lisp `throw` that crosses to the JVM. See `LispSignal`.
 public final class LispThrow extends LispNonLocalExit {
     public final Object tag;
     public final Object value;

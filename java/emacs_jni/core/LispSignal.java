@@ -1,8 +1,7 @@
 package emacs_jni.core;
 
-// A Lisp `signal' crossing to the JVM. Extends the neutral base so a single
-// `catch (LispNonLocalExit)' still works; adds typed `symbol'/`data' fields
-// (already marshalled: a LispSymbol marker, a LispObject, or a boxed scalar).
+// A Lisp `signal` that crosses to the JVM. `symbol` and `data` are a `LispSymbol`, a
+// `LispObject`, or a boxed scalar.
 public final class LispSignal extends LispNonLocalExit {
     public final Object symbol;
     public final Object data;
