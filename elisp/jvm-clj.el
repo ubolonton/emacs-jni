@@ -3,20 +3,14 @@
 (require 'jvm)
 
 (defvar jvm-clj-classpath nil
-  "List of paths (jar files or directories) added to the JVM classpath
-for `jvm-clj-start', on top of `jvm-classpath'. Typically the user's
-Clojure/nREPL jars (see test/fetch-clojure-jars.sh for known-working
-versions). `jvm-clj-start' additionally adds this package's own
-`clojure-src' directory, so it need not be listed here.")
+  "Jar files or directories added to the JVM classpath by `jvm-clj-start'.
+Usually the Clojure and nREPL jars; see test/fetch-clojure-jars.sh for
+working versions. `jvm-clj-start' also adds this package's `clojure-src'.")
 
 (defvar jvm-clj--source-dir
   (expand-file-name "../clojure-src/"
                      (file-name-directory (or load-file-name buffer-file-name)))
-  "Absolute path to this package's `clojure-src' directory.
-Computed at load time (`load-file-name'/`buffer-file-name' are only
-meaningful while this file itself is being loaded, unlike inside a
-function called later -- see `jvm--module-path' for the same
-pattern).")
+  "Absolute path to this package's `clojure-src' directory.")
 
 ;;; Clojure interop primitives (worker await path).
 
@@ -31,11 +25,8 @@ Returns the data value; signals `jvm-error' on failure."
   (jvm-call-await "clojure.java.api.Clojure" "read" (list form-string)))
 
 (defun jvm-clj--invoke-with-form-await (var-ns var-name form-string &optional timeout)
-  "Resolve VAR-NS/VAR-NAME, read FORM-STRING as Clojure data, and invoke
-the resolved IFn with it as its sole argument. Returns the result value;
-signals `jvm-error' on the first failing step. Shared plumbing for
-`jvm-clj-require-await' and `jvm-clj-eval-string-await', both of which are
-\"resolve a var, read one form, invoke\"."
+  "Invoke the IFn VAR-NS/VAR-NAME with FORM-STRING read as Clojure data.
+Returns the result; signals `jvm-error' on failure."
   (let ((fn (jvm-clj--var-await var-ns var-name))
         (form (jvm-clj--read-await form-string)))
     (jvm-call-await fn "invoke" (list form) timeout)))
@@ -49,18 +40,13 @@ Returns the result value; signals `jvm-error' on failure."
   "Evaluate CODE (a string of Clojure source) and return its result value.
 Signals `jvm-error' on failure.
 
-Each call may run on a different underlying JVM thread (the async per-call
-dispatch model), so `*ns*' set by a previous call (e.g. via `in-ns') does
-not persist to the next one -- fold namespace switches into CODE itself
-when it matters, or use `jvm-clj-eval-string-direct', which keeps one
-attached thread so thread-locals do persist.
+Each call can run on a different JVM thread, so `*ns*' set by `in-ns'
+does not persist to the next call. Put the namespace switch in CODE, or
+use `jvm-clj-eval-string-direct'.
 
-CODE is read with the full Clojure reader (reader macros like `'', backtick,
-`~', `@', `#()' and `#\"re\"' all work) and every top-level form is
-evaluated in order; the last form's value is returned. A keyword or symbol
-result comes back as a real Lisp keyword/symbol; other non-scalar values
-(vectors, maps) come back as an opaque wrapped JVM object, same limitation as
-any other non-scalar `jvm-call' result."
+CODE can contain many top-level forms; they are evaluated in order, and
+the value of the last one is returned. Keywords and symbols return as Lisp
+keywords and symbols; vectors and maps return as opaque JVM objects."
   (jvm-call-await (jvm-clj--var-await "emacs-jni.clj" "eval-for-lisp")
                   "invoke" (list code) timeout))
 
@@ -84,17 +70,14 @@ Returns the data value directly; signals `jvm-error' on failure."
   (jvm-call-direct "clojure.java.api.Clojure" "read" (list form-string)))
 
 (defun jvm-clj--invoke-with-form-direct (var-ns var-name form-string)
-  "Direct counterpart of `jvm-clj--invoke-with-form-await': resolve VAR-NS/VAR-NAME,
-read FORM-STRING, and invoke the resolved IFn with it, every step via
-`jvm-call-direct'. Returns the result value directly."
+  "Direct counterpart of `jvm-clj--invoke-with-form-await'."
   (let* ((fn (jvm-clj--var-direct var-ns var-name))
          (form (jvm-clj--read-direct form-string)))
     (jvm-call-direct fn "invoke" (list form))))
 
 (defun jvm-clj-require-direct (namespace)
-  "Direct counterpart of `jvm-clj-require-await'. Requires the Clojure NAMESPACE
-synchronously on this thread; returns the result value directly and signals
-`jvm-error' on failure."
+  "Direct counterpart of `jvm-clj-require-await'.
+Requires the Clojure NAMESPACE on this thread."
   (jvm-clj--invoke-with-form-direct "clojure.core" "require" namespace))
 
 (defalias 'jvm-clj-require 'jvm-clj-require-direct
@@ -102,19 +85,12 @@ synchronously on this thread; returns the result value directly and signals
 `jvm-clj-require-await' for the worker-blocking form.")
 
 (defun jvm-clj-eval-string-direct (code)
-  "Direct counterpart of `jvm-clj-eval-string-await': evaluate CODE (a string of
-Clojure source) synchronously on the Emacs main thread and return its result
-value directly (signalling `jvm-error' on failure), with no worker round trip.
+  "Direct counterpart of `jvm-clj-eval-string-await'.
+Evaluates CODE on the Emacs main thread and returns its result.
 
-Unlike `jvm-clj-eval-string-await', successive calls run on the *same*, always-
-attached JVM thread, so a thread-local effect (e.g. `*ns*' after `in-ns', or
-a dynamic binding) does persist across calls. It blocks Emacs's main loop for
-the whole eval, so keep heavy or blocking work on the Clojure side's own
-threads.
-
-CODE is read with the full Clojure reader (reader macros like `'', backtick,
-`~', `@', `#()' and `#\"re\"' all work) and every top-level form is
-evaluated in order; the last form's value is returned."
+The main thread stays attached to the JVM, so `*ns*' and dynamic bindings
+persist across calls. Emacs is blocked for the whole eval; run slow work
+on Clojure's own threads."
   (jvm-call-direct (jvm-clj--var-direct "emacs-jni.clj" "eval-for-lisp")
                    "invoke" (list code)))
 
@@ -125,11 +101,10 @@ evaluated in order; the last form's value is returned."
 ;;; Startup.
 
 (defun jvm-clj-start-await (&optional timeout)
-  "Start the JVM (if needed), load `jvm-clj-classpath' plus this
-package's `clojure-src' directory, and require `emacs-jni.clj'. Returns the
-`require' result value; signals an error if the JVM fails to start, a
-classpath entry fails to load, or the namespace fails to require (e.g. no
-Clojure jar on `jvm-clj-classpath')."
+  "Start the JVM if needed, then load and require `emacs-jni.clj'.
+Signals an error if the JVM does not start, a classpath entry does not
+load, or the namespace cannot be required (e.g. no Clojure jar on
+`jvm-clj-classpath')."
   (unless (eq (jvm-status) 'ready)
     (unless (eq (jvm-start-await nil nil timeout) 'ready)
       (error "jvm-clj-start-await: JVM failed to start (status: %s)" (jvm-status))))
@@ -138,12 +113,8 @@ Clojure jar on `jvm-clj-classpath')."
   (jvm-clj-require-await "emacs-jni.clj" timeout))
 
 (defun jvm-clj-start-direct (&optional timeout)
-  "Like `jvm-clj-start-await', but require `emacs-jni.clj' through the direct
-\(main-thread) path (`jvm-clj-require-direct'). JVM start and jar loading
-stay synchronous -- lifecycle/setup has no direct form. Mostly for symmetry:
-`require' loads the namespace into the process-global runtime, so which
-thread does it does not change the outcome. Returns the require result value
-directly; signals `jvm-error' (or a lifecycle error) on failure."
+  "Like `jvm-clj-start-await', but require `emacs-jni.clj' on the main thread.
+JVM start and jar loading still use the worker."
   (unless (eq (jvm-status) 'ready)
     (unless (eq (jvm-start-await nil nil timeout) 'ready)
       (error "jvm-clj-start-direct: JVM failed to start (status: %s)" (jvm-status))))
@@ -158,26 +129,19 @@ directly; signals `jvm-error' (or a lifecycle error) on failure."
 ;;; nREPL server. One layer: always ensures `emacs-jni.clj' is loaded first.
 
 (defun jvm-clj-nrepl-start-await (&optional port bind timeout)
-  "Ensure `emacs-jni.clj' is loaded (via `jvm-clj-start-await'), then start an
-nREPL server (requiring `nrepl.server' first if needed).
-PORT defaults to 0, letting the OS pick a free port. BIND, if non-nil,
-is the interface address string the server listens on (e.g. \"0.0.0.0\"
-for all interfaces); it defaults to nREPL's own default, loopback. Bind
-beyond loopback only when you need it -- a loopback-only server is
-unreachable through VM/NAT port forwarding, which delivers the
-connection to a routable interface, not the guest's `127.0.0.1'. See
-docs/how-to-guides/run-an-nrepl-server.md for that and the security
-cost. Returns (cons ACTUAL-PORT SERVER) -- the real bound port and a
-wrapped JVM object `jvm-clj-nrepl-stop-await' needs later; signals
-`jvm-error' on failure."
+  "Start an nREPL server, after `jvm-clj-start-await'.
+PORT defaults to 0 (the OS picks a port). BIND is the listen address;
+the default is loopback. Bind to another address only if you must, e.g.
+for VM port forwarding; see docs/how-to-guides/run-an-nrepl-server.md
+for the security cost.
+
+Returns (ACTUAL-PORT . SERVER). Pass SERVER to `jvm-clj-nrepl-stop-await'."
   (jvm-clj-start-await timeout)
   (jvm-clj-require-await "nrepl.server" timeout)
   (let* ((start-fn (jvm-clj--var-await "nrepl.server" "start-server"))
          (port-kw (jvm-clj--read-await ":port"))
          (start-args (list port-kw (or port 0))))
-    ;; `start-server' takes keyword options; add `:bind BIND' to its
-    ;; argument list only when a bind address was requested, so the
-    ;; default path stays a plain `:port' call.
+    ;; Add `:bind' only when requested.
     (when bind
       (setq start-args (append start-args (list (jvm-clj--read-await ":bind") bind))))
     (let* ((server (jvm-call-await start-fn "invoke" start-args timeout))
@@ -191,11 +155,8 @@ signals `jvm-error' on failure."
                   "invoke" (list server) timeout))
 
 (defun jvm-clj-nrepl-start-direct (&optional port bind)
-  "Direct (main-thread) counterpart of `jvm-clj-nrepl-start-await': ensure
-`emacs-jni.clj' is loaded (via `jvm-clj-start-direct') and start the nREPL
-server, routing every JVM/Clojure step through `jvm-call-direct'. PORT and
-BIND are as in `jvm-clj-nrepl-start-await'. Returns (cons ACTUAL-PORT SERVER)
-directly; signals `jvm-error' on failure."
+  "Direct (main-thread) counterpart of `jvm-clj-nrepl-start-await'.
+PORT and BIND are as in `jvm-clj-nrepl-start-await'."
   (jvm-clj-start-direct)
   (jvm-clj-require-direct "nrepl.server")
   (let* ((start-fn (jvm-clj--var-direct "nrepl.server" "start-server"))
@@ -212,9 +173,7 @@ directly; signals `jvm-error' on failure."
 `jvm-clj-nrepl-start-await' for the worker-blocking form.")
 
 (defun jvm-clj-nrepl-stop-direct (server)
-  "Direct counterpart of `jvm-clj-nrepl-stop-await'. Stop SERVER synchronously on
-this thread via `jvm-call-direct'; returns the result value directly and
-signals `jvm-error' on failure."
+  "Direct counterpart of `jvm-clj-nrepl-stop-await'."
   (jvm-call-direct (jvm-clj--var-direct "nrepl.server" "stop-server")
                    "invoke" (list server)))
 

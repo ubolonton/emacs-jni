@@ -11,27 +11,15 @@
 
 (defvar jvm-classpath nil
   "List of paths added to the JVM's classpath when it starts.
-Only honored on a genuinely fresh `jvm-start' (from `not-started',
-`stopped', `start-failed', `stop-failed', or `crashed'). Resuming from
-`paused' reuses the already-running JVM and ignores this variable, since
-JVM options cannot change after the JVM is created.")
+Ignored when `jvm-start' resumes from `paused': the JVM already exists.")
 
 (defvar jvm-options '("-Xrs")
   "List of JVM flag strings (e.g. \"-Xmx512m\") passed at `jvm-start' time.
-Same first-start-only caveat as `jvm-classpath'.
+Ignored when `jvm-start' resumes from `paused', as for `jvm-classpath'.
 
-Defaults to `(\"-Xrs\")': without it, the JVM installs its own handlers for
-SIGINT/SIGTERM/SIGHUP/SIGQUIT (to support `Runtime.addShutdownHook' and a
-SIGQUIT thread dump), which — since the JVM shares Emacs's process — means
-`C-g' can terminate Emacs outright instead of just interrupting Emacs.
-`-Xrs' stops the JVM from installing those handlers at all, leaving
-whatever Emacs itself does with those signals untouched; this has no
-downside for this module, since `jvm-stop' always tears the JVM down via
-the JNI API (`JavaVM::destroy'), not via a signal, and shutdown hooks still
-run on that path with or without `-Xrs'. If you override this variable,
-keep \"-Xrs\" in the list unless you specifically want the JVM's signal
-handlers installed (e.g. to use `kill -QUIT' for a thread dump — see
-docs/explanation/architecture.md).")
+Keep \"-Xrs\" unless you need the JVM's signal handlers (e.g. for a
+SIGQUIT thread dump). Without it, the JVM handles SIGINT, SIGTERM, SIGHUP,
+and SIGQUIT, and `C-g' can kill Emacs. See docs/explanation/architecture.md.")
 
 (defvar jvm--status 'not-started
   "Current JVM lifecycle status. See `jvm-status'.")
@@ -57,10 +45,8 @@ docs/explanation/architecture.md).")
     (goto-char (point-max))
     (insert (apply #'format format-string args) "\n")))
 
-;; The helpers below are called from `lisp_requests.rs''s `service_inbound'
-;; (the `#[defun]' process filter, `jvm--service-inbound') once VALUE/ARGS
-;; have already been converted to real Lisp values on the Rust side -- the
-;; pipe carries only a raw wakeup byte, never the payload itself.
+;; Called by `jvm--service-inbound' with values already converted to Lisp.
+;; The pipe carries only a wakeup byte.
 
 (defun jvm--resolve-call (id ok value err)
   "Resolve the pending `jvm-call-async' callback for ID."
@@ -69,16 +55,10 @@ docs/explanation/architecture.md).")
     (funcall callback ok value err)))
 
 (defun jvm--resolve-invoke (id handle args)
-  "Funcall the callback registered for HANDLE with ARGS (already real Lisp
-values, converted on the Rust side -- see the comment above), and reply to
-the JVM with the result via `jvm--invoke-reply'. On a Lisp error or other
-signal (including `quit', e.g. `C-g' during the callback), ERR is the real
-`(SYMBOL . DATA)' `condition-case' caught -- passed through as-is, not
-flattened into a string, so `jvm--invoke-reply' (`lib.rs') can marshal the
-real symbol/data into a `LispSignal' the JVM caller actually sees. The
-handler condition is `t', not `error', so the pending JVM future always
-completes: `quit' is not a subtype of `error' and would otherwise escape
-`condition-case' uncaught, leaving the future waiting forever."
+  "Call the callback registered for HANDLE with ARGS and reply to the JVM.
+On a signal, reply with the `(SYMBOL . DATA)' that `condition-case'
+caught; the JVM caller gets it as a `LispSignal'. The handler catches `t',
+not `error', so that `quit' also completes the JVM future."
   (let ((fn (gethash handle jvm--lisp-callbacks)))
     (if (null fn)
         (jvm--invoke-reply id nil (cons 'error (list (format "no such callback handle %s" handle))))
@@ -115,10 +95,7 @@ completes: `quit' is not a subtype of `error' and would otherwise escape
            :name "emacs-jni-channel"
            :filter #'jvm--service-inbound
            :noquery t))
-    ;; Multiple Lisp threads may independently call a `-await' wrapper;
-    ;; without this, any thread other than whichever one created the
-    ;; process hard-errors on its first `accept-process-output' (verified
-    ;; empirically — see .probe/lisp-thread-filter-probe/).
+    ;; Let any Lisp thread wait on this process with `accept-process-output'.
     (set-process-thread jvm--pipe-process nil)
     (jvm--init-channel jvm--pipe-process)))
 
@@ -294,8 +271,7 @@ Java/Clojure failure, or `jvm-timeout' if TIMEOUT elapses first."
 
 (defun jvm-new-async (class-name args &optional callback)
   "Construct a new CLASS-NAME(ARGS...) instance on the JVM asynchronously.
-Sugar over `jvm-call-async' with MEMBER set to the constructor's actual internal
-JVM bytecode name, `\"<init>\"'."
+Sugar over `jvm-call-async' with MEMBER `\"<init>\"'."
   (jvm-call-async class-name "<init>" args callback))
 
 (defun jvm-new-await (class-name args &optional timeout)
@@ -327,10 +303,8 @@ worker-blocking form.")
 for the non-blocking form and `jvm-new-await' for the worker-blocking form.")
 
 (defvar jvm--lisp-callbacks (make-hash-table :test 'eql)
-  "Handle -> Lisp function, for functions wrapped as JVM LispFunction
-proxies. Entries are removed via `jvm--drop-callback' when the JVM notifies
-us (an `Inbound::Release' on the Rust-side queue) that the corresponding
-proxy was garbage collected.")
+  "Handle -> Lisp function, for functions passed to Java as `LispFunction'.
+`jvm--drop-callback' removes an entry when the Java proxy is collected.")
 
 (defvar jvm--next-callback-handle 1
   "Monotonic counter for `jvm--lisp-callbacks' keys.")
