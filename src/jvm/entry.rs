@@ -41,66 +41,22 @@ const LISP_SYMBOL_CLASS: &[u8] = include_bytes!(concat!(
     "/target/emacs-jni-shim-classes/emacs_jni/core/LispSymbol.class"
 ));
 
-/// Defines the `emacs_jni.core.{LispCallable,LispFunction,LispNonLocalExit,
-/// LispSignal,LispThrow,ReleaseNotifier,LispObject,Lisp,
-/// LispRefReleaseNotifier,LispSymbol}` shim classes
-/// into the currently-attached JVM, using the *platform* classloader
-/// (not the system/application classloader, despite this file's original
-/// Task 1 comment saying otherwise — see below) so they're visible both
-/// to `find_class` calls made with no Java frames on the stack (which JNI
-/// routes through the system classloader by default -- see `FindClass`'s
-/// documented fallback behavior) and to classes loaded through
-/// `jvm::inbox::create_shared_classloader`'s `URLClassLoader` (Task 3),
-/// whose parent is deliberately the platform loader, not the system
-/// loader (see that function's own doc comment). Standard `ClassLoader`
-/// delegation is parent-first (a loader asks its parent before itself),
-/// and the system loader's own parent is the platform loader, so a class
-/// defined only in the platform loader is reachable from *both* paths via
-/// ordinary delegation — a class defined in the system loader, as this
-/// function originally did, is not reachable from the shared
-/// `URLClassLoader` side (loader parents aren't searched by their
-/// children's siblings), which was a real bug this task found: any jar
-/// class using a shim type (e.g. a method parameter typed
-/// `emacs_jni.core.LispCallable`) threw `NoClassDefFoundError` wrapped in
-/// `InvocationTargetException` at the first `Method.invoke`, since the
-/// jar's own `URLClassLoader` could never resolve the shim classes that
-/// existed only over in the system loader. Called from
-/// `jvm::inbox::create_jvm`, right after the JVM is created, before
-/// anything else in this crate references those classes.
+/// Defines the `emacs_jni.core` shim classes in the attached JVM. Call once, right after the JVM
+/// is created, before anything looks up these classes.
 ///
-/// Idempotent: skips a class that's already defined rather than calling
-/// `Env::define_class` on it again, which would throw (duplicate class
-/// definition in the same classloader is a `LinkageError`). This matters
-/// because `create_jvm` can run more than once against the very same
-/// underlying JVM within one process — jni-rs 0.22.4 caches the raw
-/// `JavaVM` pointer in a process-global singleton (see `create_jvm`'s own
-/// comment on this), so restarting after `jvm-stop`/a crash, or (in this
-/// crate's own test suite) any second `cargo test` case that creates its
-/// own `JavaVM`, transparently reattaches to a JVM that may already have
-/// these classes defined from a previous `create_jvm` call.
+/// The classes go into the platform classloader. It is the parent of both the system loader
+/// (used by `FindClass` with no Java frames on the stack) and the shared jar loader
+/// (`jvm::inbox::create_shared_classloader`), so both can see the classes. A class in the system
+/// loader is not visible to jar classes, which then fail with `NoClassDefFoundError`.
+///
+/// Idempotent. jni 0.22.4 keeps one process-global `JavaVM`, so a restart (or a second test)
+/// reuses a JVM that already has these classes. Defining a class twice is a `LinkageError`.
 pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
-    // Serializes the whole function: `define_if_absent`'s "find_class,
-    // then maybe define_class" is a check-then-act pair, not atomic on its
-    // own. The shared JVM singleton (`JavaVM::new` re-attaches to one
-    // process-wide `JavaVM` -- see this function's own doc comment) means
-    // two threads can both reach `define_classes` at once (e.g. two
-    // `cargo test` cases, one via this module's own tests, another via a
-    // real `create_jvm` call elsewhere): both see "not yet defined" for
-    // the same class and both call `define_class`, and the loser gets a
-    // genuine `LinkageError` (duplicate class definition), surfacing here
-    // as an opaque JNI error. A single process-wide lock around the
-    // entire function turns "two concurrent first calls" into "one first
-    // call, then one call that finds everything already defined" --
-    // exactly the idempotent case this function already handles.
+    // `define_if_absent` checks, then defines. Two concurrent callers on the shared JVM could
+    // both define the same class, so serialize the whole function.
     static DEFINE_CLASSES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = DEFINE_CLASSES_LOCK.lock().unwrap();
 
-    // Matches `create_shared_classloader`'s reflective style in
-    // jvm_thread.rs (find_class + call_static_method) rather than the
-    // jni-rs 0.22.4 typed `JClassLoader::get_platform_class_loader(env)`
-    // convenience binding, to keep one JNI-calling style across the crate
-    // -- and reuses that same function's exact `getPlatformClassLoader`
-    // call, for the reason explained above.
     let class_loader_class = env.find_class(jni::jni_str!("java/lang/ClassLoader"))?;
     let platform_loader_obj = env
         .call_static_method(
@@ -112,10 +68,7 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
         .l()?;
     let platform_loader = env.cast_local::<JClassLoader>(platform_loader_obj)?;
 
-    // LispCallable must be defined before LispFunction (which implements
-    // it) for the JVM's verifier to resolve the interface reference.
-    // LispNonLocalExit and ReleaseNotifier have no such dependency and can
-    // go anywhere.
+    // LispFunction implements LispCallable, so LispCallable must be defined first.
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispCallable", LISP_CALLABLE_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispFunction", LISP_FUNCTION_CLASS)?;
     define_if_absent(
@@ -124,8 +77,7 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
         "emacs_jni/core/LispNonLocalExit",
         LISP_NON_LOCAL_EXIT_CLASS,
     )?;
-    // LispSignal/LispThrow extend LispNonLocalExit, so the base must already
-    // be defined -- same ordering reasoning as LispCallable/LispFunction.
+    // LispSignal and LispThrow extend LispNonLocalExit.
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispSignal", LISP_SIGNAL_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispThrow", LISP_THROW_CLASS)?;
     define_if_absent(
@@ -134,10 +86,6 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
         "emacs_jni/core/ReleaseNotifier",
         RELEASE_NOTIFIER_CLASS,
     )?;
-    // LispRefReleaseNotifier has no class-loading dependency on LispObject
-    // (LispObject's constructor only *references* it inside a method body,
-    // which the verifier resolves lazily) -- defined first anyway, out of
-    // the same caution as LispCallable/LispFunction's ordering above.
     define_if_absent(
         env,
         &platform_loader,
@@ -146,12 +94,9 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     )?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispObject", LISP_OBJECT_CLASS)?;
     define_if_absent(env, &platform_loader, "emacs_jni/core/Lisp", LISP_CLASS)?;
-    // Pure data carrier (no natives, no dependencies) -- the wire form for
-    // a symbol/keyword crossing to/from Clojure.
     define_if_absent(env, &platform_loader, "emacs_jni/core/LispSymbol", LISP_SYMBOL_CLASS)?;
 
-    // Sanity check: confirm find_class can see what was just defined, the
-    // same way every later task will look these classes up.
+    // Confirm that `find_class` sees the new classes.
     env.find_class(jni::jni_str!("emacs_jni/core/LispCallable"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
     env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
@@ -172,68 +117,26 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
     Ok(())
 }
 
-/// Registers the native implementation of `LispFunction.call` (Task 7's
-/// half of "the full JVM-calls-Lisp round trip" — see `lisp_function_call`'s
-/// own doc comment for what it actually does).
+/// Registers the native implementation of `LispFunction.call`.
 ///
-/// Uses jni-rs 0.22.4's `native_method!` macro (verified against the
-/// vendored `jni-macros-0.22.4` crate source and
-/// `jni-0.22.4/docs/macros/native_method.md`) to generate the ABI-correct
-/// `extern "system"` wrapper together with the `NativeMethod` descriptor,
-/// compile-time type-checked against `lisp_function_call`'s real
-/// signature. This plan's original sketch (a hand-rolled
-/// `extern "system" fn(env: jni::Env, ...) -> jni::sys::jobject` plus a
-/// `NativeMethod { name, sig, fn_ptr }` struct literal) does not match
-/// this crate version's actual API: `NativeMethod`'s fields are private,
-/// constructible only via the `unsafe fn from_raw_parts` associated
-/// function (not a struct literal), and a native method's real first
-/// parameter must be `jni::EnvUnowned<'local>` (an as-yet-unattached
-/// wrapper around the raw `JNIEnv` pointer the JVM hands a native method,
-/// upgraded to a real `Env` via `.with_env(...)`), not a plain
-/// `jni::Env<'local>` directly. `native_method!`'s non-`raw` mode builds
-/// exactly that `EnvUnowned`-taking wrapper for us, along with panic
-/// catching and `ThrowRuntimeExAndDefault` error handling (any
-/// `jni::errors::Error` `lisp_function_call` returns becomes a thrown
-/// `java.lang.RuntimeException`, synchronously, on the Java caller's own
-/// `call()` invocation -- appropriate here, since a failure at this stage
-/// means the round trip never even started, e.g. because posting to the
-/// channel failed, as opposed to a failure that happens after a Lisp
-/// callback runs, which instead completes the future exceptionally via
-/// `LispNonLocalExit`, see `jvm::inbox::handle_invoke_reply`).
+/// `native_method!` generates the `extern "system"` wrapper and checks the signature at compile
+/// time. Its error policy throws a `RuntimeException` for a returned `jni::errors::Error`. That
+/// happens only if the request cannot be sent; a failed Lisp callback completes the future
+/// exceptionally instead.
 fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
     const CALL_METHOD: jni::NativeMethod = jni::native_method! {
         name = "call",
         fn lisp_function_call(args: [java.lang.Object]) -> java.util.concurrent.CompletableFuture,
     };
-    // Safety: `native_method!` above compile-time-checks that
-    // `lisp_function_call`'s Rust signature matches the JNI signature it
-    // also encodes into `CALL_METHOD`, and `call` is a genuine non-static
-    // instance method on `LispFunction` (matching `register_native_methods`'s
-    // own extra safety requirement -- beyond what `NativeMethod` itself
-    // checks -- that the second parameter's static/instance-ness agrees
-    // with how the method is actually declared in Java; `native_method!`'s
-    // generated wrapper also runs a runtime ABI check confirming this on
-    // first call, so a mismatch here would fail loudly rather than
-    // corrupt memory).
+    // Safety: `native_method!` checks that `lisp_function_call` matches the JNI signature, and
+    // `call` is an instance method on `LispFunction`, as `register_native_methods` requires.
     unsafe { env.register_native_methods(&class, &[CALL_METHOD]) }
 }
 
-/// The actual implementation behind `LispFunction.call`: allocates a fresh
-/// correlation id, constructs a (still-incomplete) `CompletableFuture`,
-/// registers it in `jvm::inbox`, enqueues an `Inbound::Invoke` and wakes the
-/// main thread up, and returns the future immediately — the concrete
-/// realization of the design spec's "Java shim" section. Never blocks:
-/// everything here is either process-local bookkeeping or a non-blocking
-/// channel write; the actual Lisp call happens later, off this thread
-/// entirely (on Emacs's own main thread, via `lisp::inbox::
-/// service_inbound`'s `Invoke` arm, which calls the Elisp
-/// `jvm--resolve-invoke`), and its result arrives back asynchronously via
-/// `Cmd::InvokeReply` (`jvm::inbox::handle_invoke_reply`).
-///
-/// Registered (not called directly) via `register_lisp_function_native`
-/// above -- see that function's doc comment for the actual native-method
-/// ABI this must satisfy, which `native_method!` enforces at compile time.
+/// Implements `LispFunction.call`: registers a new `CompletableFuture`, enqueues an
+/// `Inbound::Invoke`, and returns the future. Does not block. Emacs runs the Lisp function later
+/// on its main thread, and the result arrives as `Cmd::InvokeReply`.
 fn lisp_function_call<'local>(
     env: &mut jni::Env<'local>,
     this: JObject<'local>,
@@ -253,41 +156,20 @@ fn lisp_function_call<'local>(
     Ok(future)
 }
 
-/// Registers the native implementation of `ReleaseNotifier.run` — the
-/// JVM-side mirror of `register_lisp_function_native` above, following the
-/// exact same `native_method!` pattern (see that function's doc comment for
-/// why this crate version needs the macro rather than a hand-rolled
-/// `extern "system" fn` + manual `RegisterNatives` call). `run` takes no
-/// arguments and returns `void`, per `Runnable#run`'s own signature.
+/// Registers the native implementation of `ReleaseNotifier.run`.
 fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
     const RUN_METHOD: jni::NativeMethod = jni::native_method! {
         name = "run",
         fn release_notifier_run() -> void,
     };
-    // Safety: same reasoning as `register_lisp_function_native`'s own
-    // safety comment -- `native_method!` compile-time-checks
-    // `release_notifier_run`'s signature against `RUN_METHOD`'s encoded
-    // JNI signature, and `run` is a genuine non-static instance method on
+    // Safety: as in `register_lisp_function_native`; `run` is an instance method on
     // `ReleaseNotifier`.
     unsafe { env.register_native_methods(&class, &[RUN_METHOD]) }
 }
 
-/// The actual implementation behind `ReleaseNotifier.run`: the opposite
-/// direction from `jvm::inbox`'s `Cmd::ReleaseRef` handling (Lisp's
-/// `user-ptr` GC'd -> tell Rust to drop a `GlobalRef`, over the Lisp-to-
-/// worker `Cmd` channel). Here, the JVM-side `LispFunction` proxy this
-/// notifier was registered against (via `jvm::convert::register_release_on_gc`)
-/// was collected, so Lisp needs telling -- via an `Inbound::Release` on the
-/// worker-to-Lisp queue, not a `Cmd` -- to drop its own function-table entry
-/// for the same handle. Runs on a `Cleaner`-managed background thread, not
-/// the worker thread, but that's fine: `get_handle_field` is plain JNI
-/// field access (needs only the `Env` this native call itself provides)
-/// and `lisp::inbox::submit` just writes to process-global state, which
-/// doesn't care which thread calls it.
-///
-/// Registered (not called directly) via `register_release_notifier_native`
-/// above.
+/// Implements `ReleaseNotifier.run`. The `LispFunction` this notifier watches was collected, so
+/// tell Lisp to drop HANDLE from its function table. Runs on a `Cleaner` thread.
 fn release_notifier_run<'local>(
     env: &mut jni::Env<'local>,
     this: JObject<'local>,
@@ -297,14 +179,8 @@ fn release_notifier_run<'local>(
     Ok(())
 }
 
-/// Reads a private `handle` field directly via JNI field access, which
-/// (unlike ordinary Java code) is not subject to Java-level access control
-/// -- native code reading a private field of the very class that declares
-/// the native method is exactly what JNI field access is for. Shared by
-/// both `lisp_function_call` (THIS is a `LispFunction`) and
-/// `release_notifier_run` (THIS is a `ReleaseNotifier`) -- both shim
-/// classes declare their handle field identically (`private final long
-/// handle`), so one reflective accessor covers both.
+/// Reads the private `long handle` field of a `LispFunction` or `ReleaseNotifier`. JNI field
+/// access ignores Java access control.
 fn get_handle_field(env: &mut jni::Env<'_>, this: &JObject<'_>) -> jni::errors::Result<u64> {
     let value = env.get_field(this, jni::jni_str!("handle"), jni::jni_sig!(long))?.j()?;
     Ok(value as u64)
@@ -316,20 +192,8 @@ fn define_if_absent(
     name: &str,
     bytecode: &[u8],
 ) -> jni::errors::Result<()> {
-    // `Env::define_class`'s real 0.22.4 signature takes `name: Option<N>
-    // where N: AsRef<JNIStr>` and `loader: L where L: AsRef<JClassLoader>`
-    // -- not the plain `name: &str, loader: &JObject` this task's brief
-    // guessed. `JNIString::from(&str)` satisfies `AsRef<JNIStr>` (and so
-    // does `&JNIString`, via std's blanket `AsRef<U> for &T where T:
-    // AsRef<U>` -- reused below for the existence check).
     let jni_name = jni::strings::JNIString::from(name);
-    // Skip re-defining a class the JVM already has -- see this function's
-    // caller's doc comment on why `define_classes` must be idempotent
-    // (the same underlying JVM can be reused across multiple `create_jvm`
-    // calls within one process). `find_class` cleanly maps "not found" to
-    // an `Err` without leaving a pending exception behind (verified
-    // against the vendored 0.22.4 source, `env.rs`'s `find_class`), so
-    // this is a safe existence probe.
+    // `find_class` returns `Err` for a missing class and leaves no pending exception.
     if env.find_class(&jni_name).is_ok() {
         return Ok(());
     }
@@ -337,23 +201,15 @@ fn define_if_absent(
     Ok(())
 }
 
-/// How long a synchronous Lisp-access native (`intern`, `typeOf`,
-/// `isNotNil`, `eq`, `LispObject.prin1ToString`) blocks its own reply
-/// future before giving up — see design spec, "Risks": "a sync op blocks
-/// its JVM thread until Emacs pumps... Mitigated by a JVM-side timeout."
+/// How long a synchronous Lisp-access native waits for its reply. Emacs may be busy.
 const LISP_REQUEST_TIMEOUT_SECS: i64 = 30;
 
-/// Registers the 5 static natives on `emacs_jni.core.Lisp` — the JVM-side entry
-/// points for Clojure to hold and manipulate Lisp values (design spec
-/// "Built-in Lisp access from Clojure"). Same `native_method!` pattern as
-/// `register_lisp_function_native`; batched into one
-/// `register_native_methods` call since they all belong to the same class.
+/// Registers the static natives on `emacs_jni.core.Lisp`, which Clojure uses to access Lisp
+/// values.
 fn register_lisp_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/Lisp"))?;
-    // Params/returns are `java.lang.Object`, not `LispObject`: a symbol or
-    // keyword crosses as a `LispSymbol` marker, a scalar as its boxed Java
-    // value, anything else as a `LispObject` -- one classifier
-    // (`jvm::convert::to_input`) handles all three.
+    // Parameters are `Object`: a value can be a `LispObject`, a `LispSymbol`, or a boxed scalar.
+    // `jvm::convert::to_input` classifies it.
     const INTERN_METHOD: jni::NativeMethod = jni::native_method! {
         name = "intern",
         static fn lisp_intern(name: java.lang.String) -> java.lang.Object,
@@ -392,8 +248,7 @@ fn register_lisp_object_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     unsafe { env.register_native_methods(&class, &[PRIN1_TO_STRING_METHOD]) }
 }
 
-/// Registers `LispRefReleaseNotifier.run`'s native implementation — the
-/// Lisp-access counterpart of `register_release_notifier_native`.
+/// Registers `LispRefReleaseNotifier.run`'s native implementation.
 fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
     const RUN_METHOD: jni::NativeMethod = jni::native_method! {
@@ -403,23 +258,14 @@ fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors:
     unsafe { env.register_native_methods(&class, &[RUN_METHOD]) }
 }
 
-/// Common plumbing for every synchronous Lisp-access native: allocates a
-/// correlation id, registers a fresh `CompletableFuture` in `jvm::inbox`,
-/// hands the request BUILD_REQUEST constructs (given that id) to
-/// `lisp::inbox::submit`, which enqueues it and wakes the main thread up,
-/// then blocks this JVM thread on the future's own `get(timeout, SECONDS)`
-/// — see design spec, "Request/reply flow", step 1's "sync variant:
-/// `future.get()` (blocks the JVM thread, with timeout)". Mirrors
-/// `lisp_function_call`'s future/`jvm::inbox`/`submit` setup, but waits in
-/// place instead of handing the future back to the Java caller.
+/// Sends a Lisp-access request built by BUILD_REQUEST and blocks this JVM thread on the reply,
+/// with a timeout.
 fn service_lisp_request_sync<'local>(
     env: &mut jni::Env<'local>,
     build_request: impl FnOnce(u64) -> crate::lisp::inbox::Inbound,
 ) -> jni::errors::Result<JObject<'local>> {
-    // Reentrant case: this native runs on the Emacs main thread, inside a
-    // `jvm--call-direct`. That thread is blocked in the JVM right now, so the
-    // async queue below can never be drained -- run the op directly on the
-    // enclosing frame's live `Env` instead. See `lisp::runtime` and the plan doc.
+    // Inside `jvm--call-direct` on the main thread, the queue cannot drain: this thread is the
+    // one that drains it. Run the request directly.
     if crate::lisp::runtime::in_scope() {
         return service_lisp_request_direct(env, build_request(0));
     }
@@ -434,11 +280,8 @@ fn service_lisp_request_sync<'local>(
     block_on_lisp_reply(env, &future)
 }
 
-/// Runs a synchronous Lisp-access REQUEST directly on the enclosing
-/// `jvm--call-direct` frame's `Env` (no queue, no future), for the reentrant
-/// case. Returns the built Java object, or throws the Lisp signal/throw as a
-/// `LispNonLocalExit` so it propagates up the Clojure stack — the direct-path
-/// equivalent of `block_on_lisp_reply`'s checked-exception rethrow.
+/// Runs a Lisp-access REQUEST on the `Env` of the enclosing `jvm--call-direct`. Returns the Java
+/// result, or throws the Lisp signal/throw as a `LispNonLocalExit`.
 fn service_lisp_request_direct<'local>(
     env: &mut jni::Env<'local>,
     request: crate::lisp::inbox::Inbound,
@@ -446,8 +289,7 @@ fn service_lisp_request_direct<'local>(
     let reply = crate::lisp::runtime::with_current_env(|lisp_env| {
         crate::lisp::inbox::compute_reply(lisp_env, &request)
     })
-    // `in_scope()` was true and this is the same thread, so the scope cannot
-    // have been popped between that check and here.
+    // `in_scope()` was true on this thread, so the scope is still pushed.
     .ok_or_else(|| crate::jvm::convert::marshal_error("reentrant Lisp call lost its Env scope"))?;
 
     match reply {
@@ -461,13 +303,7 @@ fn service_lisp_request_direct<'local>(
     }
 }
 
-/// Blocks on FUTURE's own `get(LISP_REQUEST_TIMEOUT_SECS, SECONDS)`,
-/// reflection-free (a direct `CompletableFuture` instance method call, not
-/// `Method.invoke`) — so unlike `describe_caught_java_exception`'s
-/// `InvocationTargetException` unwrapping in `jvm/invoke.rs`, a checked
-/// exception from `get()` (`ExecutionException`/`TimeoutException`/
-/// `InterruptedException`) is itself the JVM's pending exception, not
-/// wrapped a level deeper.
+/// Blocks on FUTURE's `get(LISP_REQUEST_TIMEOUT_SECS, SECONDS)`.
 fn block_on_lisp_reply<'local>(
     env: &mut jni::Env<'local>,
     future: &JObject<'local>,
@@ -492,21 +328,12 @@ fn block_on_lisp_reply<'local>(
     }
 }
 
-/// Unwraps and rethrows the pending exception left by a failed
-/// `CompletableFuture#get` call above: an `ExecutionException` wraps
-/// whatever `jvm::inbox::handle_lisp_reply` completed the future with
-/// exceptionally (a `LispNonLocalExit`) — the useful part is that cause, one
-/// `getCause()` hop down, same reasoning as
-/// `jvm::invoke::describe_caught_java_exception`. A `TimeoutException`/
-/// `InterruptedException` (from `get`'s own timeout/interruption, not a
-/// completed-exceptionally future) has no cause, so it's rethrown as-is.
+/// Rethrows the pending exception from a failed `CompletableFuture#get`. An `ExecutionException`
+/// is unwrapped to its cause (the `LispNonLocalExit`). `TimeoutException` and
+/// `InterruptedException` are rethrown as they are.
 ///
-/// Deliberately calls `env.throw` and returns its `Err(Error::JavaException)`
-/// rather than building a Rust-level error message: `ThrowRuntimeExAndDefault`
-/// (this crate's error policy for every native here) only throws a *new*
-/// `RuntimeException` when no exception is already pending, so leaving the
-/// real exception pending here is what lets it surface to the Java caller
-/// unchanged instead of being wrapped a second time.
+/// Returns `Err(Error::JavaException)` with the exception pending, so `native_method!` does not
+/// wrap it in a `RuntimeException`.
 fn rethrow_lisp_reply_exception(env: &mut jni::Env) -> jni::errors::Error {
     let caught = match env.exception_catch() {
         Err(e) => e,
@@ -538,8 +365,7 @@ fn rethrow_lisp_reply_exception(env: &mut jni::Env) -> jni::errors::Error {
     }
 }
 
-/// `Lisp.intern`'s native implementation: `env.intern(name)` on the main
-/// thread, via an `Inbound::Intern` round trip.
+/// `Lisp.intern`'s native implementation.
 fn lisp_intern<'local>(
     env: &mut jni::Env<'local>,
     _class: JClass<'local>,
@@ -584,9 +410,7 @@ fn lisp_eq<'local>(
     unbox_boolean(env, &result)
 }
 
-/// `Lisp.applyAsync`'s native implementation: unlike the sync natives
-/// above, never blocks -- enqueues the `Apply` request and returns the
-/// still-incomplete future immediately (mirrors `lisp_function_call`).
+/// `Lisp.applyAsync`'s native implementation. Returns the future without blocking.
 fn lisp_apply_async<'local>(
     env: &mut jni::Env<'local>,
     _class: JClass<'local>,
@@ -596,10 +420,7 @@ fn lisp_apply_async<'local>(
     let f = crate::jvm::convert::to_input(env, f)?;
     let request_args = crate::jvm::convert::jobject_array_to_lisp_request_args(env, &args)?;
 
-    // Reentrant case (same reasoning as `service_lisp_request_sync`): run the
-    // apply directly and hand back an *already-completed* future, so Clojure's
-    // `(deref (applyAsync ...))` returns at once without needing the blocked
-    // main thread to drain the queue.
+    // Inside `jvm--call-direct`, run the apply directly and return a completed future.
     if crate::lisp::runtime::in_scope() {
         let request = crate::lisp::inbox::Inbound::Apply { id: 0, f, args: request_args };
         let reply = crate::lisp::runtime::with_current_env(|lisp_env| {
@@ -634,10 +455,7 @@ fn lisp_object_prin1_to_string<'local>(
     env.cast_local::<JString>(result)
 }
 
-/// `LispRefReleaseNotifier.run`'s native implementation: enqueues a
-/// `FreeRef` for this notifier's own `ptr` and wakes the main thread up.
-/// No reply -- see `lisp::inbox::Inbound::FreeRef`'s own doc
-/// comment ("carries no `id` and produces no reply").
+/// `LispRefReleaseNotifier.run`'s native implementation: enqueues a `FreeRef` for THIS's `ptr`.
 fn lisp_ref_release_notifier_run<'local>(
     env: &mut jni::Env<'local>,
     this: JObject<'local>,
@@ -647,16 +465,12 @@ fn lisp_ref_release_notifier_run<'local>(
     Ok(())
 }
 
-/// Unboxes a `java.lang.Boolean` OBJ (as returned by a sync Lisp-access
-/// request's reply, built by `jvm::invoke::build_lisp_reply_object`) into a
-/// Rust `bool`.
+/// Unboxes a `java.lang.Boolean` to a `bool`.
 fn unbox_boolean(env: &mut jni::Env, obj: &JObject) -> jni::errors::Result<bool> {
     env.call_method(obj, jni::jni_str!("booleanValue"), jni::jni_sig!(() -> boolean), &[])?.z()
 }
 
-/// Reads THIS's private `ptr` field — the `LispObject` analogue of
-/// `get_handle_field`, same "native code reading its own declaring
-/// class's private field" JNI access-control exemption.
+/// Reads THIS's private `ptr` field. JNI field access ignores Java access control.
 pub(crate) fn get_ptr_field(
     env: &mut jni::Env<'_>,
     this: &JObject<'_>,
@@ -670,11 +484,7 @@ mod tests {
     use jni::vm::{InitArgsBuilder, JavaVM};
     use jni::JNIVersion;
 
-    /// Retries against jni-rs 0.22.4's racy check-then-create singleton --
-    /// this file now has two tests each creating a JVM, so it needs the
-    /// same retry loop `src/jvm/convert.rs` and `src/jvm/inbox.rs` already
-    /// use (see `src/jvm/convert.rs`'s `create_test_jvm` for the full
-    /// explanation).
+    /// Retries `JavaVM::new`; see `jvm::convert`'s `create_test_jvm`.
     fn create_test_jvm() -> JavaVM {
         let mut last_err = None;
         for _ in 0..20 {
@@ -691,18 +501,11 @@ mod tests {
     }
 
     #[test]
-    fn defines_all_seven_shim_classes_and_they_are_findable() {
+    fn defines_shim_classes_and_they_are_findable() {
         let vm = create_test_jvm();
         vm.attach_current_thread(|env| -> jni::errors::Result<()> {
-            // `define_classes` itself already `find_class`es all seven
-            // shim classes as its own internal sanity check, so this `?`
-            // alone would already fail the test if any one of them (or
-            // its native registration) were broken -- the extra
-            // assignability checks below go further, confirming actual
-            // interface relationships, not just "the class exists".
             define_classes(env)?;
-            // Confirm LispFunction really implements LispCallable, not
-            // just that both classes independently exist.
+            // LispFunction must implement LispCallable.
             let lisp_function_class =
                 env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
             let lisp_callable_class =
@@ -710,8 +513,7 @@ mod tests {
             let is_assignable =
                 env.is_assignable_from(&lisp_function_class, &lisp_callable_class)?;
             assert!(is_assignable, "LispFunction should implement LispCallable");
-            // Same shape of check for ReleaseNotifier/LispRefReleaseNotifier:
-            // confirm both really implement Runnable.
+            // Both release notifiers must implement Runnable.
             let runnable_class = env.find_class(jni::jni_str!("java/lang/Runnable"))?;
             let release_notifier_class =
                 env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
@@ -730,27 +532,13 @@ mod tests {
         .expect("defining shim classes into a fresh JVM should succeed");
     }
 
-    /// End-to-end proof that `intern`/`isNotNil`/`eq`/`typeOf`/`applyAsync`/
-    /// `prin1ToString` actually work against a *real* Lisp-like `Env` --
-    /// but this crate's unit tests have no real Emacs process to service
-    /// `(lisp-request)`, so this test instead drives `lisp::inbox::service_inbound`
-    /// directly against a throwaway in-process "Env" substitute... which
-    /// this crate cannot construct outside of a real Emacs module call
-    /// (`emacs::Env` has no public constructor). The Lisp-access round
-    /// trip is instead covered end-to-end by `test/jvm-clj-test.el`
-    /// (a real `emacs --batch` process), and the pointer-discipline/
-    /// FIFO-ordering pieces are covered in isolation by
-    /// `lisp::inbox`'s own unit tests. This comment documents that
-    /// omission rather than fake an assertion.
     #[test]
     fn get_ptr_field_reads_back_what_was_stored() {
         let vm = create_test_jvm();
         vm.attach_current_thread(|env| -> jni::errors::Result<()> {
             define_classes(env)?;
             let lisp_object_class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
-            // `LispObject`'s constructor is package-private, but JNI
-            // construction (unlike ordinary Java code) isn't subject to
-            // that -- same reasoning as `get_handle_field`'s doc comment.
+            // JNI ignores the package-private access of this constructor.
             let obj = env.new_object(
                 &lisp_object_class,
                 jni::jni_sig!((ptr: long) -> void),
