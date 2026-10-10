@@ -9,6 +9,18 @@
 (unless (featurep 'emacs-jni)
   (module-load jvm--module-path))
 
+;; Primitives defined by the native module.
+(declare-function jvm--init-channel "ext:emacs-jni" (process))
+(declare-function jvm--start "ext:emacs-jni" (classpath options))
+(declare-function jvm--pause "ext:emacs-jni" ())
+(declare-function jvm--stop "ext:emacs-jni" ())
+(declare-function jvm--load-jar "ext:emacs-jni" (path))
+(declare-function jvm--load-jar-direct "ext:emacs-jni" (path))
+(declare-function jvm--call "ext:emacs-jni" (target member args))
+(declare-function jvm--call-direct "ext:emacs-jni" (target member args))
+(declare-function jvm--service-inbound "ext:emacs-jni" (process data))
+(declare-function jvm--invoke-reply "ext:emacs-jni" (id ok value))
+
 (defvar jvm-classpath nil
   "List of paths added to the JVM's classpath when it starts.
 Ignored when `jvm-start' resumes from `paused': the JVM already exists.")
@@ -34,7 +46,15 @@ and SIGQUIT, and `C-g' can kill Emacs. See docs/explanation/architecture.md.")
   "Alist of request-id -> callback for in-flight `jvm-load-jar-async' calls.")
 
 (defvar jvm--pending-call nil
-  "Alist of request-id -> callback for in-flight `jvm-call-async'/`jvm-new-async' calls.")
+  "Alist of request-id -> callback for in-flight `jvm-call-async' calls.
+`jvm-new-async' calls are included.")
+
+(defvar jvm--lisp-callbacks (make-hash-table :test 'eql)
+  "Handle -> Lisp function, for functions passed to Java as `LispFunction'.
+`jvm--drop-callback' removes an entry when the Java proxy is collected.")
+
+(defvar jvm--next-callback-handle 1
+  "Monotonic counter for `jvm--lisp-callbacks' keys.")
 
 (defvar jvm--log-buffer-name "*jvm-log*"
   "Name of the buffer that accumulates JVM log and status-failure messages.")
@@ -123,7 +143,8 @@ before this call, so it doesn't get stuck at `starting'."
 (define-error 'jvm-timeout "Timed out waiting for the JVM")
 
 (defun jvm-start-await (&optional classpath options timeout)
-  "Like `jvm-start-async', but blocks until the JVM is ready or TIMEOUT (default 30s) elapses."
+  "Like `jvm-start-async', but block until the JVM is ready.
+Signal `jvm-timeout' after TIMEOUT seconds (default 30)."
   (jvm-start-async classpath options)
   (let ((deadline (+ (float-time) (or timeout 30))))
     (while (eq (jvm-status) 'starting)
@@ -137,7 +158,8 @@ before this call, so it doesn't get stuck at `starting'."
 the non-blocking form.")
 
 (defun jvm-pause-async ()
-  "Pause the JVM asynchronously (detaches the worker thread; JVM state is retained).
+  "Pause the JVM asynchronously.
+The worker thread detaches; the JVM state is kept.
 If the `jvm--pause' primitive signals an error (e.g. because the current
 status doesn't allow pausing), `jvm--status' is reverted to what it was
 before this call, so it doesn't get stuck at `pausing'."
@@ -152,7 +174,8 @@ before this call, so it doesn't get stuck at `pausing'."
        (signal (car err) (cdr err))))))
 
 (defun jvm-pause-await (&optional timeout)
-  "Like `jvm-pause-async', but blocks until paused or TIMEOUT (default 30s) elapses."
+  "Like `jvm-pause-async', but block until the JVM is paused.
+Signal `jvm-timeout' after TIMEOUT seconds (default 30)."
   (jvm-pause-async)
   (let ((deadline (+ (float-time) (or timeout 30))))
     (while (eq (jvm-status) 'pausing)
@@ -190,7 +213,8 @@ before this call, so it doesn't get stuck at `stopping'."
        (signal (car err) (cdr err))))))
 
 (defun jvm-stop-await (&optional timeout)
-  "Like `jvm-stop-async', but blocks until stopped/stop-failed or TIMEOUT (default 30s)."
+  "Like `jvm-stop-async', but block until `stopped' or `stop-failed'.
+Signal `jvm-timeout' after TIMEOUT seconds (default 30)."
   (jvm-stop-async)
   (let ((deadline (+ (float-time) (or timeout 30))))
     (while (eq (jvm-status) 'stopping)
@@ -301,13 +325,6 @@ worker-blocking form.")
 (defalias 'jvm-new 'jvm-new-direct
   "Canonical `jvm-new' is the direct (main-thread) variant. See `jvm-new-async'
 for the non-blocking form and `jvm-new-await' for the worker-blocking form.")
-
-(defvar jvm--lisp-callbacks (make-hash-table :test 'eql)
-  "Handle -> Lisp function, for functions passed to Java as `LispFunction'.
-`jvm--drop-callback' removes an entry when the Java proxy is collected.")
-
-(defvar jvm--next-callback-handle 1
-  "Monotonic counter for `jvm--lisp-callbacks' keys.")
 
 (defun jvm--register-callback (fn)
   "Register FN in `jvm--lisp-callbacks', returning its fresh handle."
