@@ -1,71 +1,68 @@
 # How to pass a Lisp function to Java
 
-This guide covers passing a Lisp function as a `jvm-call`/`jvm-new`
-argument, so Java can call it back. It assumes you can already call a
-plain method — see
-[How to call Java from Lisp](call-java-from-lisp.md).
+This guide passes a Lisp function as an argument, so that Java can call it. It assumes that you
+can call a Java method. See [How to call Java from Lisp](call-java-from-lisp.md).
 
-## Pass a lambda as an argument
+The examples use `Calc` from `test/fixtures/Calc.java`. Java receives the function as an
+`emacs_jni.core.LispCallable`. Its `call` method returns a `CompletableFuture`.
+
+## Pass a lambda
 
 ```elisp
-(jvm-call "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
+(jvm-call-await "Calc" "callWithArg" (list (lambda (n) (* n 10)) 4))
 ;; => 40
 ```
 
-Any argument that is a Lisp function — a `lambda`, or a symbol naming
-one — marshals automatically into a real, callable Java object. The
-Java-side method receives it as a normal object of the callback type
-declared in the shim classes (see
-[Interop design](../explanation/interop-design.md)). Calling it from
-Java runs the Lisp function and returns the result asynchronously.
+Use `jvm-call-await` or `jvm-call-async` if the Java method waits for the Lisp result. The Lisp
+function runs on the Emacs main thread. A bare `jvm-call` blocks that thread. The Java method then
+waits until its own timeout, and Emacs stays blocked. See
+[Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md#a-lispfunction-result-is-not-available-inside-a-direct-call).
 
-## Receive a real Java object as a callback argument
+## Pass a named function
 
-`my-calc` here is the object `(jvm-new "Calc" (list 100))` returned,
-already in scope:
+Pass the function object, not the symbol:
 
 ```elisp
-(jvm-call my-calc "callWithSelf"
-          (list (lambda (self) (jvm-call self "addToBase" (list 1)))))
+(defun my-times-ten (n) (* n 10))
+
+(jvm-call-await "Calc" "callWithArg" (list (symbol-function 'my-times-ten) 4))
+;; => 40
 ```
 
-When Java calls your Lisp function with a real object argument (not a
-primitive), that argument arrives already wrapped and ready to pass
-back into another `jvm-call`. You do not need to unwrap anything
-yourself.
+A symbol, such as `'my-times-ten` or `#'my-times-ten`, goes to Java as a `LispSymbol`. Java cannot
+call a `LispSymbol`. If the name is an alias made with `defalias`, use `indirect-function` instead
+of `symbol-function`.
 
-## Signal an error from inside a callback
+A lambda, closure, byte-compiled function, or built-in function (subr) goes to Java as a callable.
+
+## Receive a Java object in a callback
 
 ```elisp
-(jvm-call "Calc" "callWithArg"
-          (list (lambda (_n) (error "something went wrong")) 4))
+(let ((calc (jvm-new "Calc" (list 100))))
+  (jvm-call-await calc "callWithSelf"
+                  (list (lambda (self) (jvm-call self "addToBase" (list 1))))))
+;; => 101
 ```
 
-A Lisp error raised inside the callback propagates back to the Java
-caller as a real exception, not a silently dropped call: a
-`signal`/`error` as `emacs_jni.core.LispSignal`, a `throw` as
-`emacs_jni.core.LispThrow` (both extend `LispNonLocalExit`), which Java
-catches by type. See
-[How to handle errors and timeouts](handle-errors-and-timeouts.md).
+A Java object argument arrives as a wrapped JVM object. Pass it to `jvm-call` without change.
 
-## Know when the callback stops working
+## Signal an error from a callback
 
-Each wrapped Lisp function stays usable for as long as the Java-side
-proxy object that wraps it is reachable. Once that proxy is garbage
-collected on the JVM side, the Lisp-side bookkeeping for it is dropped
-too. If your Java code discards the proxy object right after the
-call — the common case, as in `Calc.callWithArg` — the wrapped function
-does not stay callable past that one call.
+```elisp
+(jvm-call-await "Calc" "describeCallbackError"
+                (list (lambda (_n) (error "Something went wrong")) 4))
+;; => "error"
+```
 
-## Avoid a callback-table leak
+A Lisp error completes the future exceptionally:
 
-If a `jvm-call`/`jvm-new` call that includes a Lisp-function argument
-fails before the Java-side proxy is actually constructed — for
-example, because the target class or method does not exist — the
-Lisp-side bookkeeping entry for that function is not cleaned up. Each
-attempt registers a new entry, even if you pass the same function
-value each time. This is a known, low-severity gap: bounded at
-prototype scale, and only hit on a failed call. See
+| Lisp exit | Java exception |
+|---|---|
+| `signal`, `error` | `emacs_jni.core.LispSignal` |
+| `throw` | `emacs_jni.core.LispThrow` |
+
+Both classes extend `emacs_jni.core.LispNonLocalExit`. `CompletableFuture.get` wraps the exception
+in an `ExecutionException`. Read it with `getCause`. `Calc.describeCallbackError` does this.
+
+For how long Java can call a function, see
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).
-Avoid retrying a failing call with a Lisp-function argument in a tight
-loop, since each retry adds one more entry that never clears.
