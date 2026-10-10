@@ -13,3 +13,7 @@ jni = { version = "0.22", features = ["invocation"] }
 
 [features]
 test-support = []
+
+[lints.clippy]
+# Every `unsafe {}` block needs a `// SAFETY:` comment (see .claude/rules/rust.md).
+undocumented_unsafe_blocks = "warn"

@@ -1,61 +1,54 @@
 # How to load a jar
 
 The JVM must be `ready` before you load a jar. See
-[Control the JVM lifecycle](control-the-jvm-lifecycle.md) if it is not.
+[How to control the JVM lifecycle](control-the-jvm-lifecycle.md).
 
-## Load one jar and wait for the result
+All jars go into one shared classloader. A class in one loaded jar can use classes in all other
+loaded jars. The load order does not matter.
+
+## Load a jar
 
 ```elisp
 (jvm-load-jar (expand-file-name "~/path/to/your.jar"))
-;; => nil          on success
-;; signals jvm-error, e.g. "jar file not found: ...", on failure
+;; => nil
 ```
 
-`jvm-load-jar` runs synchronously on the Emacs main thread. Use
-`expand-file-name` to turn a relative or `~`-prefixed path into an
-absolute one before passing it.
+`jvm-load-jar` returns `nil` on success. It signals `jvm-error` on failure, for example
+`jar/classpath entry not found: ...`. `jvm-load-jar` does not expand `~` or relative paths. Use
+`expand-file-name`.
 
-## Load a jar without blocking
+A directory of class files also works.
+
+## Load a jar without blocking Emacs
 
 ```elisp
-(jvm-load-jar-async "~/path/to/your.jar"
+(jvm-load-jar-async (expand-file-name "~/path/to/your.jar")
                     (lambda (ok err)
                       (if ok
                           (message "loaded")
                         (message "load failed: %s" err))))
 ```
 
-`jvm-load-jar-async` returns a request ID immediately. The callback runs
-later, once the JVM worker thread finishes the load.
+`jvm-load-jar-async` returns a request ID immediately. The callback runs after the worker thread
+loads the jar.
 
-## Load every jar in a directory
+## Load all jars in a directory
 
 ```elisp
 (dolist (jar (directory-files "/path/to/jar-dir" t "\\.jar\\'"))
   (jvm-load-jar jar))
 ```
 
-## Make classes from one jar visible to another
+## Set a timeout
 
-Do nothing extra. Every jar you load goes into the same shared
-classloader. A class in jar A can already see a class in jar B, as
-long as both are loaded, in either order.
-
-## Set a timeout longer than the default 30 seconds
-
-The bare `jvm-load-jar` has no timeout. To bound the wait, use the
-`-await` variant, which dispatches to the worker and takes a timeout:
+Use `jvm-load-jar-await`. The second argument is the timeout in seconds. The default is 30.
 
 ```elisp
-(jvm-load-jar-await "~/big.jar" 120)
+(jvm-load-jar-await (expand-file-name "~/big.jar") 120)
+;; => nil
 ```
 
-The second argument to `jvm-load-jar-await` is the timeout, in seconds.
-Past it, the call signals `jvm-timeout`; a load failure signals
-`jvm-error`; on success it returns nil.
+After the timeout, `jvm-load-jar-await` signals `jvm-timeout`. A failed load signals `jvm-error`.
 
-## Remove a jar
-
-There is no per-jar unload. To drop a jar, pause or stop the JVM, then
-start it again with that jar left out of your loading code — see
+You cannot unload a jar. See
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).

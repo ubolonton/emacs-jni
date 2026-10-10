@@ -1,115 +1,104 @@
-//! The payload types that cross the Lisp/JVM boundary — `CallTarget`,
-//! `BridgeValue`, `LispOutcome`, `LispInput`, and `Status` — shared by both
-//! the `lisp::` and `jvm::` sides instead of each side inventing its own
-//! shape for the same value.
+//! Types that cross the Lisp/JVM boundary, shared by [`crate::lisp`] and [`crate::jvm`].
 
 use crate::jvm::convert::JvmObject;
 
+/// The `kind` of a Lisp `signal` that crosses to the JVM. Mirrors Java `LispNonLocalExit.SIGNAL`.
+pub(crate) const NON_LOCAL_EXIT_SIGNAL: i32 = 0;
+/// The `kind` of a Lisp `throw` that crosses to the JVM. Mirrors Java `LispNonLocalExit.THROW`.
+pub(crate) const NON_LOCAL_EXIT_THROW: i32 = 1;
+
+/// The receiver of a `jvm-call`: a class for a static call or a constructor, or an object for an
+/// instance call.
 #[derive(Debug, Clone)]
 pub enum CallTarget {
-    /// Fully-qualified class name, for a static call or `member ==
-    /// "<init>"` construction.
+    /// Fully-qualified class name, for a static call or `<init>`.
     ClassName(String),
-    /// A previously wrapped JVM object, by its live shared reference.
+    /// A wrapped JVM object.
     Object(JvmObject),
 }
 
-/// A single marshalled argument or return value, in Rust form (not yet
-/// converted to a JNI `JValue` — that conversion happens in Task 4, which
-/// is also the task that will likely extend this enum with more variants
-/// as marshalling is implemented; keep this open to growth, don't treat
-/// this exact variant set as final).
+/// A marshalled argument or return value, before conversion to a JNI or Lisp value.
 #[derive(Debug, Clone)]
 pub enum BridgeValue {
     Nil,
     True,
     Int(i64),
     Float(f64),
-    /// Decimal-digit string form of a bignum too large for `i64` — see
-    /// spec "Value marshalling" > "Bignum mechanism".
+    /// Decimal digits of an integer too large for `i64`.
     BigInt(String),
     Str(String),
-    /// A wrapped JVM object, by its live shared reference (Item 6 — no
-    /// handle table).
+    /// A wrapped JVM object.
     Object(JvmObject),
-    /// A Lisp function, by its handle in the Lisp-side function table
-    /// (Task 6) — auto-wrapped as `LispFunction` when this crosses into
-    /// Java (Task 6).
+    /// A handle into Lisp's function table (`jvm--lisp-callbacks`). Becomes a `LispFunction` in
+    /// Java. Flows Lisp to Java only.
     Callback(u64),
-    /// An interned Lisp symbol or keyword, crossing as an
-    /// `emacs_jni.core.LispSymbol` marker (the same class the Clojure
-    /// Lisp-access path uses). `name` is the bare name (no leading `:`).
+    /// A symbol or keyword. Becomes an `emacs_jni.core.LispSymbol` in Java. `name` has no
+    /// leading `:`.
     Symbol {
         name: String,
         keyword: bool,
     },
 }
 
-/// The value a `Cmd::LispReply` or `Cmd::InvokeReply` completes a pending
-/// future with — built by `lisp::inbox::service_inbound`/`jvm--invoke-
-/// reply` (which run the actual `Env` op, or marshal `jvm--resolve-invoke`'s
-/// result) and consumed by `jvm::inbox::handle_lisp_reply`/
-/// `handle_invoke_reply` (which turn it into a real Java value, or a thrown
-/// `LispSignal`/`LispThrow`, on the worker's own JNI attachment) via the
-/// shared `complete_future_with_reply`. A single enum since a reply's
-/// success shape varies by request kind (a `LispObject` pointer, a
-/// `boolean`, a `String`, ...), and a failure carries the real Lisp signal
-/// symbol/data or throw tag/value, not a flattened message.
+/// The result of a Lisp-side operation requested by Java, carried by
+/// [`Cmd::LispReply`](crate::jvm::inbox::Cmd::LispReply) or
+/// [`Cmd::InvokeReply`](crate::jvm::inbox::Cmd::InvokeReply). A failure carries the original
+/// signal symbol/data or throw tag/value.
 #[derive(Debug)]
 pub enum LispOutcome {
-    /// A scalar or symbol result, reusing the generic bridge carrier — the
-    /// dedup'd overlap with `BridgeValue` (was `Nil`/`Int`/`Float`/`BigInt`/
-    /// `Str`/`Symbol`). `nil` is `BridgeValue::Nil`, the symbol `t` stays
-    /// `Bool(true)` below (a Lisp predicate result usable as a Clojure boolean).
+    /// A scalar or symbol. `nil` is [`BridgeValue::Nil`]; `t` is [`LispOutcome::Bool`]`(true)`.
     Value(BridgeValue),
-    /// A computed boolean from `eq`/`is-not-nil?`, or the Lisp symbol `t` —
-    /// always a real Java `Boolean`, never `nil`/null.
+    /// A boolean result (`eq`, `is-not-nil?`), or `t`. Always a Java `Boolean`, never null.
     Bool(bool),
-    /// A boxed `emacs::GlobalRef` pointer — an opaque Lisp `LispObject`.
+    /// A boxed `emacs::GlobalRef` pointer: an opaque `LispObject`.
     Ptr(i64),
-    /// A Lisp `signal`: completes exceptionally with a `LispSignal`.
+    /// A Lisp `signal`: completes the Java future exceptionally with a `LispSignal`.
     Signal { symbol: Box<LispOutcome>, data: Box<LispOutcome> },
-    /// A Lisp `throw`: completes exceptionally with a `LispThrow`.
+    /// A Lisp `throw`: completes the Java future exceptionally with a `LispThrow`.
     Throw { tag: Box<LispOutcome>, value: Box<LispOutcome> },
 }
 
-/// One value crossing Clojure → Lisp — an `apply` receiver or argument, or
-/// the operand of `typeOf`/`isNotNil`/`eq` — already classified on the JVM
-/// thread (`jvm::convert::to_input`). See spec "Argument
-/// conversion".
+/// One value crossing Clojure → Lisp: an `apply` function or argument, or the operand of
+/// `typeOf`/`isNotNil`/`eq`. Classified on the JVM thread by [`crate::jvm::convert::to_input`].
 #[derive(Debug)]
 pub enum LispInput {
-    /// A `LispObject`, carried by its `ptr` — bound to a `Value` on the
-    /// main thread, never freed here (see `borrow`).
+    /// A `LispObject`'s `ptr`. Borrowed, not freed (see [`crate::lisp::inbox::borrow`]).
     Obj(i64),
-    /// A Clojure symbol or keyword (an `emacs_jni.core.LispSymbol` marker) —
-    /// interned on the main thread. `name` is the bare name; a keyword is
-    /// interned with a leading `:`.
+    /// A `LispSymbol`, interned on the main thread. `name` has no leading `:`.
     Symbol { name: String, keyword: bool },
-    /// A scalar or other-JVM-object argument, already reduced to a
-    /// `BridgeValue` the same way an ordinary `jvm-call` argument would be
-    /// (reuses `jvm::convert::to_bridge`) — `BridgeValue::Callback`
-    /// never appears here (that variant is only ever produced from the
-    /// Lisp-to-Java direction in `lisp::convert::to_bridge`).
+    /// Any other value, converted like a `jvm-call` argument. Never [`BridgeValue::Callback`].
     Scalar(BridgeValue),
 }
 
+/// The JVM lifecycle state. Stored in [`crate::jvm::runtime::STATUS`] as a `u8`, and shown to Lisp
+/// as the symbol from [`Status::as_tag`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Status {
+    /// No start was requested in this process.
     NotStarted = 0,
+    /// The worker is creating the JVM, or resuming after a pause.
     Starting = 1,
+    /// The JVM accepts calls.
     Ready = 2,
+    /// The worker is detaching from the JVM.
     Pausing = 3,
+    /// The worker is detached. The JVM still exists, so a start resumes it.
     Paused = 4,
+    /// The worker is destroying the JVM.
     Stopping = 5,
+    /// The JVM was destroyed.
     Stopped = 6,
+    /// JVM creation or resume failed.
     StartFailed = 7,
+    /// JVM destruction failed.
     StopFailed = 8,
+    /// The worker thread panicked.
     Crashed = 9,
 }
 
 impl Status {
+    /// Converts a stored discriminant back to a [`Status`]. Only values from `as u8` are valid.
     pub(crate) fn from_u8(v: u8) -> Status {
         match v {
             0 => Status::NotStarted,
@@ -126,6 +115,7 @@ impl Status {
         }
     }
 
+    /// The Lisp symbol name for this state, e.g. `"start-failed"`. `jvm--status` holds it.
     pub fn as_tag(self) -> &'static str {
         match self {
             Status::NotStarted => "not-started",

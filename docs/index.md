@@ -1,8 +1,7 @@
 # emacs-jni documentation
 
-This documentation follows [Diátaxis](https://diataxis.fr/). Diátaxis
-splits documentation into four forms. Each form answers a different
-question. Pick the section that matches your question.
+This documentation follows [Diátaxis](https://diataxis.fr/). Diátaxis splits documentation into
+four forms. Each form answers a different question. Pick the section that matches your question.
 
 | Section | Question it answers | When to read it |
 |---|---|---|
@@ -46,10 +45,10 @@ Background and design reasoning.
 - [Architecture](explanation/architecture.md)
 - [Interop design](explanation/interop-design.md)
 - [Limitations and trade-offs](explanation/limitations-and-tradeoffs.md)
+- [Implementation](explanation/implementation.md) — for contributors: how the Rust side is built.
 
 ## Outside this documentation
 
-- [`README.md`](../README.md) — build instructions and prerequisites.
-- [`docs/superpowers/`](superpowers/) — the specs and plans written
-  during development. These are historical design records, not user
-  documentation.
+- [`README.md`](../README.md): prerequisites, build, and test commands.
+- [`docs/superpowers/`](superpowers/): specs and plans from development. These are historical
+  records, not user documentation. They can disagree with the current code.

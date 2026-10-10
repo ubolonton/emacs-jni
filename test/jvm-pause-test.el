@@ -9,12 +9,7 @@
   (should (eq (jvm-start-await) 'ready)))
 
 (ert-deftest emacs-jni-jvm-pause-test/status-not-stuck-after-illegal-transition ()
-  "An illegal `jvm-pause' while `paused' must not leave `jvm--status'
-stuck at `pausing' — it should revert to the prior status after the
-primitive signals `jvm-illegal-transition'.
-Forces the JVM to `ready' then `paused' first (rather than relying on
-another test file having already put it there), so this test is
-deterministic regardless of ERT's test ordering within this process."
+  "An illegal `jvm-pause' reverts `jvm--status' to the prior status."
   (unless (eq (jvm-status) 'ready)
     (should (eq (jvm-start-await) 'ready)))
   (should (eq (jvm-pause-await) 'paused))

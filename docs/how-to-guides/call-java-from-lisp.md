@@ -1,9 +1,7 @@
 # How to call Java from Lisp
 
-This guide covers `jvm-call`/`jvm-call-await` and `jvm-new`/
-`jvm-new-await`. It assumes the JVM is `ready` and the relevant jar or
-class is already loaded. See [How to load a jar](load-a-jar.md). Full
-marshalling rules are in the
+This guide uses `jvm-call` and `jvm-new`. It assumes that the JVM is `ready` and that the class
+is loaded. See [How to load a jar](load-a-jar.md). For all marshalling rules, see the
 [Lisp API reference](../reference/lisp-api.md#argument-and-return-value-marshalling).
 
 ## Call a static method
@@ -13,23 +11,19 @@ marshalling rules are in the
 ;; => 7
 ```
 
-`TARGET` is a class name string. `MEMBER` is the method name. `ARGS`
-is a list of Lisp values. `jvm-call` returns the result value directly
-and signals `jvm-error` on failure.
+`TARGET` is a class name. `MEMBER` is the method name. `ARGS` is a list of Lisp values.
+`jvm-call` returns the result. It signals `jvm-error` on failure.
 
 ## Call an instance method
 
-Construct an object first, then pass it as `TARGET`:
+Construct an object, then use it as `TARGET`:
 
 ```elisp
-(let ((obj (jvm-new "java.util.ArrayList" nil)))
-  (jvm-call obj "add" (list "hello"))
-  (jvm-call obj "size" nil))
+(let ((list-object (jvm-new "java.util.ArrayList" nil)))
+  (jvm-call list-object "add" (list "hello"))
+  (jvm-call list-object "size" nil))
 ;; => 1
 ```
-
-`jvm-new` returns the wrapped JVM object directly; pass it straight back
-as `TARGET`.
 
 ## Construct an object
 
@@ -38,9 +32,7 @@ as `TARGET`.
 ;; => #<user-ptr ...>
 ```
 
-`jvm-new` is `jvm-call` with `MEMBER` fixed to the constructor's
-internal name, `"<init>"`. Everything else about it, including argument
-marshalling and error handling, is identical.
+`jvm-new` returns a wrapped JVM object. It is `jvm-call` with `MEMBER` set to `"<init>"`.
 
 ## Pass a number
 
@@ -49,12 +41,10 @@ marshalling and error handling, is identical.
 ;; => 5
 ```
 
-An integer marshals to whichever numeric type the target parameter
-declares (`int`, `short`, `byte`, `long`, `float`, `double`, or a boxed
-`java.math.BigInteger`), and this module checks that the value fits —
-a value too large for the target type is a marshalling error, not a
-silent truncation. A float marshals to `float`, `double`, or a boxed
-`java.lang.Double`.
+An integer converts to the numeric type that the parameter declares: `int`, `short`, `byte`,
+`long`, `float`, `double`, or `BigInteger`. If a value does not fit an `int`, `short`, or `byte`
+parameter, the module skips that candidate. A Lisp float converts to `float`, `double`, or `Object` (as
+a `Double`). Boxed parameter types, such as `java.lang.Long`, do not accept Lisp numbers.
 
 ## Pass a boolean
 
@@ -66,38 +56,31 @@ silent truncation. A float marshals to `float`, `double`, or a boxed
 ;; => "no"
 ```
 
-`t` marshals to Java `true`. `nil` marshals to Java `false` when the
-target parameter is `boolean`, and to a Java `null` otherwise — the
-same Lisp value means two different things in Java, depending on what
-the method expects.
+`t` converts to `true`. `nil` converts to `false` for a `boolean` or `Boolean` parameter. For any
+other parameter type, `nil` converts to `null`.
 
 ## Pass a wrapped JVM object
 
-`obj` here is the object an earlier `jvm-call`/`jvm-new` returned, for
-example `(jvm-new "Calc" (list 100))`:
+Pass the object that an earlier `jvm-new` or `jvm-call` returned:
 
 ```elisp
-(jvm-call "Calc" "isLispCallable" (list obj))
+(let ((calc (jvm-new "Calc" (list 100))))
+  (jvm-call "Calc" "isLispCallable" (list calc)))
+;; => nil
 ```
 
-Pass the wrapped object exactly as it came back. It marshals to its
-real Java type.
+## Set a timeout
 
-## Set a timeout longer than the default 30 seconds
-
-The bare `jvm-call` runs on the Emacs main thread until the call returns
-or signals; it has no timeout. To bound the wait, use the `-await`
-variant, which dispatches to the worker and takes a timeout as its last
-argument:
+Use `jvm-call-await` or `jvm-new-await`. The last argument is the timeout in seconds. The default
+is 30.
 
 ```elisp
 (jvm-call-await "SlowClass" "slowMethod" nil 120)
 ```
 
-The fourth argument to `jvm-call-await` (third for `jvm-new-await`) is
-the timeout, in seconds. Past it, the call signals `jvm-timeout`.
+After the timeout, the call signals `jvm-timeout`. The bare `jvm-call` has no timeout.
 
-## Call without blocking
+## Call without blocking Emacs
 
 ```elisp
 (jvm-call-async "Calc" "addLong" (list 2 3)
@@ -107,19 +90,19 @@ the timeout, in seconds. Past it, the call signals `jvm-timeout`.
                     (message "call failed: %s" err))))
 ```
 
-`jvm-call-async`/`jvm-new-async` return a request ID immediately. The callback runs
-later, on the same Lisp thread that is running Emacs's event loop, once
-the JVM worker thread finishes the call.
+`jvm-call-async` and `jvm-new-async` return a request ID immediately. The callback runs on the
+Emacs main thread after the worker thread completes the call.
 
-## Choose between two overloaded methods
+## Select one of two overloaded methods
 
-Overload resolution picks the first same-arity candidate that accepts
-your argument types, falling through to the next one if marshalling that
-candidate's parameters fails or the call itself reports an argument-type
-mismatch. If two overloads share the same arity and both could accept
-your argument (for example, one takes `long` and the other takes
-`String`, and you are passing a number), the resolution is not
-guaranteed to pick the one you expect.
-If this matters, give the two overloads different arities, or route
-through a differently named method. See
+The module tries same-arity candidates in an unspecified order. It uses the first candidate that
+accepts the arguments. It does not select the most specific one. For example:
+
+```elisp
+(jvm-call "java.lang.String" "valueOf" '(42))
+;; => "42.0"
+```
+
+A `float` or `double` overload accepted `42` first. To select one overload, call a method with a
+unique name or arity. See
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).

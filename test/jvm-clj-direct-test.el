@@ -1,13 +1,9 @@
 ;;; jvm-clj-direct-test.el --- Reentrant Clojure->Lisp over jvm-call-direct -*- lexical-binding: t; -*-
 
-;; The direct (main-thread) counterpart of the reentrancy test in
-;; jvm-clj-test.el. Here the OUTER call is a synchronous `jvm-call-direct',
-;; so the main thread is blocked inside the JVM for its whole duration. The
-;; Clojure code calls back into Lisp *during* that call. The async queue
-;; cannot be drained by the blocked main thread, so this only works because
-;; the `Lisp.*' natives run the callback directly on the enclosing frame's
-;; Env (see src/reentry.rs, src/shim.rs). Without that fast path these tests
-;; would deadlock, not fail.
+;; Clojure calls back into Lisp during a `jvm-call-direct'. The main thread
+;; is blocked in the JVM, so it cannot drain the async queue; the `Lisp.*'
+;; natives run the request directly (`lisp::runtime'). If that breaks,
+;; these tests deadlock instead of failing.
 
 (require 'ert)
 (require 'jvm)
@@ -24,10 +20,7 @@
     (jvm-clj-start-await)))
 
 (defun jvm-clj-direct-test--eval (code)
-  "Evaluate CODE (Clojure source) with `jvm-call-direct' at every step, so
-the whole Lisp->Clojure call runs synchronously on this thread. Reads CODE
-via `clojure.java.api.Clojure/read' (edn), resolves `clojure.core/eval',
-and invokes it -- the direct-call equivalent of `jvm-clj-eval-string-await'."
+  "Evaluate CODE (Clojure source) with `jvm-call-direct' at every step."
   (let ((evalfn (jvm-call-direct "clojure.java.api.Clojure" "var"
                                  (list "clojure.core" "eval")))
         (form (jvm-call-direct "clojure.java.api.Clojure" "read" (list code))))
@@ -55,10 +48,8 @@ and invokes it -- the direct-call equivalent of `jvm-clj-eval-string-await'."
              6)))
 
 (ert-deftest emacs-jni-jvm-clj-direct-test/reentrant-lisp-signal-propagates-out ()
-  "A Lisp signal raised in a reentrant callback unwinds through Clojure as a
-LispNonLocalExit and is reconstructed at the direct-call boundary as the
-*original* signal -- symbol `error' with data (\"boom\") -- not a generic
-`jvm-error'."
+  "A Lisp signal in a reentrant callback is re-raised as itself,
+not as `jvm-error'."
   (jvm-clj-direct-test--ensure-ready)
   (let ((err (should-error (jvm-clj-direct-test--eval
                             "(emacs-jni.clj/apply (symbol \"error\") \"boom\")")

@@ -1,14 +1,17 @@
 package emacs_jni.core;
 
-// Registered as a java.lang.ref.Cleaner action on a LispObject (see
-// LispObject's constructor). When the LispObject becomes phantom-reachable,
-// the Cleaner runs this on a JVM-managed background thread; the native
-// run() enqueues a FreeRef request (Rust's lisp_requests queue) and wakes
-// the main thread up, so it frees the underlying GlobalRef exactly once --
-// the Lisp-access counterpart of ReleaseNotifier's role for LispFunction.
+/**
+ * The {@link java.lang.ref.Cleaner} action of a {@link LispObject}. After the object is collected,
+ * {@link #run} tells Emacs to free the {@code GlobalRef} behind {@code ptr}.
+ */
 final class LispRefReleaseNotifier implements Runnable {
     private final long ptr;
 
+    /**
+     * Watches one {@link LispObject}.
+     *
+     * @param ptr the {@code ptr} of the watched object
+     */
     LispRefReleaseNotifier(long ptr) {
         this.ptr = ptr;
     }

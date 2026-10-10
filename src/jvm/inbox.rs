@@ -1,14 +1,5 @@
-//! The worker thread's `Cmd` message envelope, its event loop and
-//! lifecycle, and the correlation-id table for in-flight replies.
-//!
-//! Merges the former `worker.rs` (the `Sender` handle: spawning/resuming
-//! the thread, submitting a `Cmd`), `pending.rs` (the table of
-//! `CompletableFuture`s awaiting a Lisp reply, keyed by correlation id),
-//! and the loop/lifecycle half of the former `jvm_thread.rs` (`run`'s
-//! dispatch loop, JVM creation, pause/stop/resume, jar loading, and
-//! completing pending replies). The reflection call machinery
-//! (`resolve_and_invoke`, `invoke_method`, `invoke_constructor`,
-//! `call_direct`, `handle_call`, ...) lives in `jvm::invoke`.
+//! The worker thread: its [`Cmd`] queue, event loop, JVM lifecycle, jar loading, and the table of
+//! futures waiting for a Lisp reply. Reflective calls are in [`crate::jvm::invoke`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,62 +16,48 @@ use crate::jvm::convert::JvmObject;
 use crate::jvm::runtime::STATUS;
 use crate::protocol::{BridgeValue, CallTarget, LispOutcome, Status};
 
+/// One message to the worker thread. Sent by [`submit`], except [`Cmd::Resume`].
 #[derive(Debug)]
 pub(crate) enum Cmd {
-    /// Sent to an already-running worker thread to resume from `paused`.
-    /// A first-time start never goes through this enum at all — see
-    /// `start_or_resume`, which spawns a fresh thread with
-    /// classpath/options as plain arguments instead.
+    /// Resumes a paused worker. A first start spawns a new thread instead ([`start_or_resume`]).
     Resume,
+    /// Detaches the worker from the JVM. Sent by `jvm--pause`.
     Pause,
+    /// Destroys the JVM and ends the worker. Sent by `jvm--stop`.
     Stop,
-    LoadJar {
-        id: u64,
-        path: String,
-    },
-    Call {
-        id: u64,
-        target: CallTarget,
-        member: String,
-        args: Vec<BridgeValue>,
-    },
-    /// Completes a pending `LispFunction.call` future (`jvm::entry::
-    /// lisp_function_call`) with the Lisp callback's outcome — sent by
-    /// `jvm--invoke-reply` once `jvm--resolve-invoke` (`elisp/jvm.el`) has
-    /// funcalled the callback and marshalled its return value or its real
-    /// `condition-case` signal into a `LispOutcome`. See
-    /// `handle_invoke_reply`.
-    InvokeReply {
-        id: u64,
-        outcome: LispOutcome,
-    },
-    /// A Lisp `user-ptr` wrapping a JVM object was GC'd; drop its reference
-    /// on the attached worker thread (see `jvm::convert::JvmHandle::Drop`).
-    ReleaseRef {
-        object: JvmObject,
-    },
-    /// Completes a pending Lisp-access native's reply future (`intern`,
-    /// `typeOf`, `isNotNil`, `eq`, `applyAsync`, `prin1ToString`) — sent by
-    /// `jvm--service-inbound` (`lisp::inbox::service_inbound`) after
-    /// running the corresponding `Env` op on the main thread. See
-    /// `handle_lisp_reply`.
-    LispReply {
-        id: u64,
-        value: LispOutcome,
-    },
+    /// Adds `path` to the shared classloader, then enqueues
+    /// [`Inbound::LoadJarDone`](crate::lisp::inbox::Inbound::LoadJarDone). Sent by `jvm--load-jar`.
+    LoadJar { id: u64, path: String },
+    /// Calls `target.member(args)` on a new thread, then enqueues
+    /// [`Inbound::CallDone`](crate::lisp::inbox::Inbound::CallDone). Sent by `jvm--call`.
+    Call { id: u64, target: CallTarget, member: String, args: Vec<BridgeValue> },
+    /// Completes a `LispFunction.call` future with the Lisp callback's outcome. Sent by
+    /// `jvm--invoke-reply`.
+    InvokeReply { id: u64, outcome: LispOutcome },
+    /// Drops a JVM reference whose Lisp `user-ptr` was collected. Sent by
+    /// [`JvmHandle::drop`](crate::jvm::convert::JvmHandle), so the delete runs on an attached
+    /// thread.
+    ReleaseRef { object: JvmObject },
+    /// Completes a Lisp-access native's future (`intern`, `applyAsync`, ...). Sent after the main
+    /// thread runs the request.
+    LispReply { id: u64, value: LispOutcome },
+    /// Panics the worker. Sent by `jvm--test-panic`.
     #[cfg(feature = "test-support")]
     TestPanic,
 }
 
+/// The worker's command channel, or `None` if no worker is running.
 static SENDER: Mutex<Option<Sender<Cmd>>> = Mutex::new(None);
+/// The counter behind [`next_request_id`].
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Allocates the id of a Lisp-initiated request (`jvm--call`, `jvm--load-jar`). Lisp keys its
+/// pending callbacks by this id. Separate from [`next_id`], which keys JVM-initiated futures.
 pub(crate) fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst)
 }
 
-/// Resumes the existing worker thread if one is alive (paused case), or
-/// spawns a brand new one (first start, or restart after stop/crash).
+/// Resumes the worker if it is alive (paused), or spawns a new one.
 pub(crate) fn start_or_resume(classpath: Vec<String>, options: Vec<String>) {
     let mut guard = SENDER.lock().unwrap();
     if let Some(sender) = guard.as_ref() {
@@ -92,9 +69,8 @@ pub(crate) fn start_or_resume(classpath: Vec<String>, options: Vec<String>) {
     }
 }
 
-/// Sends a non-Resume command to the live worker thread. Returns `Err(())`
-/// if there is no worker thread currently running (shouldn't happen if
-/// callers check `Status` first, but kept fallible rather than panicking).
+/// Sends a command other than [`Cmd::Resume`] to the worker. Returns `Err(())` if no worker is
+/// running.
 pub(crate) fn submit(cmd: Cmd) -> Result<(), ()> {
     let guard = SENDER.lock().unwrap();
     match guard.as_ref() {
@@ -103,22 +79,19 @@ pub(crate) fn submit(cmd: Cmd) -> Result<(), ()> {
     }
 }
 
-/// Called by the worker thread itself right before it exits for good
-/// (successful stop, or an unrecoverable panic), so the next `jvm-start`
-/// knows to spawn a fresh thread instead of trying to resume a dead one.
+/// Called by the worker just before it exits (stop or panic), so the next `jvm-start` spawns a
+/// new thread.
 pub(crate) fn clear_sender() {
     *SENDER.lock().unwrap() = None;
 }
 
+/// The counter behind [`next_id`].
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-// Entries here are bare `Global`s, not `Arc`-wrapped: a pending invocation's
-// `CompletableFuture` global ref has exactly one owner at a time (this
-// table, until `take` hands it off to `handle_invoke_reply`), never a
-// "resolve while still present" access pattern that would need cheap,
-// repeatable cloning -- so `Global`'s missing `Clone` impl (jni 0.22.4) is
-// a non-issue here.
+/// The `CompletableFuture`s that wait for a Lisp reply, by id. A future has one owner at a time
+/// (this table, then the caller of [`take`]), so no [`Arc`].
 static TABLE: Mutex<Option<HashMap<u64, Global<JObject<'static>>>>> = Mutex::new(None);
 
+/// Locks [`TABLE`], creating the map on first use.
 fn table() -> std::sync::MutexGuard<'static, Option<HashMap<u64, Global<JObject<'static>>>>> {
     let mut guard = TABLE.lock().unwrap();
     if guard.is_none() {
@@ -127,36 +100,29 @@ fn table() -> std::sync::MutexGuard<'static, Option<HashMap<u64, Global<JObject<
     guard
 }
 
-/// Allocates a fresh correlation id for a new `invoke` round trip. Separate
-/// from `register` (rather than folded into it) because
-/// `jvm::entry::lisp_function_call` needs the id before it has a `Global` to
-/// register -- the id goes out on the wire as part of `(invoke ID HANDLE
-/// ARGS)` before the `CompletableFuture` object even exists.
+/// Allocates the id of a JVM-initiated request (a `LispFunction.call` or a `Lisp.*` native), the
+/// key of its future in [`TABLE`]. Separate from [`next_request_id`].
 pub(crate) fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::SeqCst)
 }
 
-/// Registers FUTURE (a global ref to a `java.util.concurrent.CompletableFuture`)
-/// under ID, for later completion by `Cmd::InvokeReply`.
+/// Registers `future` (a global ref to a `java.util.concurrent.CompletableFuture`) under `id`, for
+/// later completion by [`Cmd::InvokeReply`] or [`Cmd::LispReply`].
 pub(crate) fn register(id: u64, future: Global<JObject<'static>>) {
     table().as_mut().unwrap().insert(id, future);
 }
 
-/// Removes and returns the pending future for ID, if any — a reply should
-/// only ever resolve a given id once, so this consumes the entry rather
-/// than just peeking.
+/// Removes and returns the pending future for `id`. Each id is completed once.
 fn take(id: u64) -> Option<Global<JObject<'static>>> {
     table().as_mut().unwrap().remove(&id)
 }
 
-/// Entry point for the JVM worker thread. Runs for the JVM's entire
-/// lifetime: creates the JVM once, then loops handling commands until a
-/// successful `Cmd::Stop` (or, from Task 8 on, an unrecoverable panic).
+/// Entry point for the worker thread. Creates the JVM, then handles commands until a
+/// [`Cmd::Stop`] or a panic.
 pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<String>) {
     let vm = match create_jvm(&classpath, &options) {
         Ok(vm) => {
-            // Publish the VM so the Emacs main thread can attach for a
-            // synchronous `jvm--call-direct` (see `jvm::runtime` and `call_direct`).
+            // Publish the VM for `call_direct` on the Emacs main thread.
             crate::jvm::runtime::set_vm(vm.clone());
             STATUS.finish(Status::Ready);
             crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
@@ -192,10 +158,7 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
                 false
             }
             Cmd::Call { id, target, member, args } => {
-                // Never handled inline here — see `handle_call`'s doc
-                // comment: an arbitrary Java call can take a long time for
-                // reasons unrelated to callbacks, and must not stall other
-                // pending commands on this dispatch loop.
+                // On its own thread: a Java call can be slow and must not block this loop.
                 let vm = vm.clone();
                 let loader = crate::jvm::runtime::loader();
                 std::thread::spawn(move || {
@@ -204,27 +167,16 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
                 false
             }
             Cmd::InvokeReply { id, outcome } => {
-                // Handled inline, unlike `Cmd::Call` — see `handle_invoke_reply`'s
-                // own doc comment for why completing an already-existing
-                // `CompletableFuture` doesn't need its own thread.
+                // Inline: completing a future is cheap.
                 handle_invoke_reply(&vm, id, outcome);
                 false
             }
-            // Handled inline, like `Cmd::InvokeReply` — dropping a
-            // `GlobalRef` is one cheap JNI call (`DeleteGlobalRef`), not an
-            // arbitrary user method (spec "Worker thread role"). Lisp's GC
-            // collected a `user-ptr` wrapping a JVM object; its `Drop`
-            // handed the shared reference here (its own `Drop` may run on a
-            // thread with no JNI attachment). Dropping this last `Arc` runs
-            // `Global::Drop`'s `DeleteGlobalRef` on this attached worker
-            // thread.
+            // Inline: dropping the last `Arc` here runs `DeleteGlobalRef` on an attached thread.
             Cmd::ReleaseRef { object } => {
                 std::mem::drop(object);
                 false
             }
-            // Handled inline, same reasoning as `Cmd::InvokeReply`: completing
-            // an already-existing `CompletableFuture` is one or two cheap JNI
-            // calls, not an arbitrary user method.
+            // Inline: completing a future is cheap.
             Cmd::LispReply { id, value } => {
                 handle_lisp_reply(&vm, id, value);
                 false
@@ -235,10 +187,7 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
 
         match outcome {
             Ok(true) => {
-                // Cmd::Stop: `vm` needs to move into handle_stop, which
-                // catch_unwind's closure can't do (AssertUnwindSafe wraps
-                // a Fn-like closure, not a one-shot move of `vm` itself).
-                // Call it here, outside the closure, then break.
+                // `handle_stop` takes `vm` by value, which the `catch_unwind` closure cannot.
                 handle_stop(vm);
                 break;
             }
@@ -257,60 +206,22 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
     }
 }
 
-// Restart-after-crash/-failure works even though `run` drops its `vm` above
-// and no handle is retained anywhere in this codebase: jni-rs 0.22.4 caches
-// the raw JavaVM pointer in a process-global `OnceLock` internally
-// (`JAVA_VM_SINGLETON` / `impl_with_libjvm` in `jni-0.22.4/src/vm/java_vm.rs`),
-// so a later `JavaVM::new()` call here transparently re-attaches to the same
-// underlying VM instead of re-bootstrapping it. There's no real "attach to
-// the retained `JavaVM` handle" hand-off happening, contrary to the design
-// spec's more literal wording — this comment is that clarification.
-// Tracks whether `create_jvm` has ever *reached the shim-loading step*
-// before in this process (regardless of whether shim loading itself then
-// succeeded or failed) — swapped right before that step, only once a live
-// `JavaVM` actually exists (see the swap's call site below), so the very
-// first call to reach that point sees `false` (and thus knows it's "the
-// first attempt") and every call after that — a restart following
-// `jvm-stop`/a crash, or a retry of `jvm-start` following an *earlier*,
-// shim-unrelated `create_jvm` failure — sees `true`. Used below to decide
-// whether a `jvm::entry::define_classes` failure should be fatal to `create_jvm`
-// or merely logged; see that call site's doc comment for why the
-// distinction matters.
-//
-// Deliberately swapped just before shim loading, not at `create_jvm`'s
-// entry: an earlier `create_jvm` call can fail before ever reaching a live
-// JVM (bad init args, `JavaVM::new` itself failing) for reasons that have
-// nothing to do with the shim, and `jvm-start` is an explicitly supported
-// retry target from `start-failed` (`status.rs`'s `begin_start` legal-from
-// list includes `Status::StartFailed`). If the flag were consumed at
-// `create_jvm`'s entry, that kind of failed-then-retried call would burn
-// the "first attempt" slot on a call that never even tried to load the
-// shim, so the *real* first successful boot (the retry) would be
-// misclassified as "subsequent" and a genuinely broken shim on it would
-// be silently swallowed instead of surfacing as `start-failed` --
-// reproducing the exact bug this flag exists to fix, just one retry later.
-// Swapping here instead means only calls that produce a live JVM (and
-// therefore actually attempt shim loading) ever consume the slot,
-// regardless of how many earlier calls failed for unrelated reasons.
-//
-// Worker threads never run `create_jvm` concurrently with each other (a
-// new one is only spawned after the previous one has fully torn down —
-// see `start_or_resume`/`clear_sender`), so a single `swap` right
-// before shim loading, with no separate check-then-set race window, is
-// sufficient.
+/// Whether a [`create_jvm`] call has reached [`define_classes`](crate::jvm::entry::define_classes)
+/// before in this process. Only the first such call treats a `define_classes` failure as fatal.
+///
+/// The flag is set just before `define_classes`, not at the start of [`create_jvm`]. A start can
+/// fail earlier (bad options) and be retried from `start-failed`; that retry is still the first
+/// real attempt. Worker threads never run [`create_jvm`] concurrently, so `swap` is enough.
 static JVM_CREATE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
-/// Returns whether this call is the first ever call against FLAG — `true`
-/// exactly once per flag, `false` on every call after that. Factored out
-/// of `create_jvm` as its own function (taking the flag as a parameter,
-/// rather than reading `JVM_CREATE_ATTEMPTED` directly) purely so the swap
-/// semantics it relies on are unit-testable in isolation, without needing
-/// a real `JavaVM` — see the test below. `create_jvm` itself always calls
-/// this with `&JVM_CREATE_ATTEMPTED`.
+/// Returns `true` on the first call for `flag`, `false` after. A function so that a test can use
+/// its own flag.
 fn is_first_attempt(flag: &AtomicBool) -> bool {
     !flag.swap(true, Ordering::SeqCst)
 }
 
+/// Creates the JVM with `classpath` and `options`, and defines the shim classes. See
+/// [`JVM_CREATE_ATTEMPTED`] for when a shim failure is fatal.
 fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String> {
     let mut builder = InitArgsBuilder::new().version(JNIVersion::V1_8);
     if !classpath.is_empty() {
@@ -322,60 +233,13 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     let init_args = builder.build().map_err(|e| e.to_string())?;
     let vm = JavaVM::new(init_args).map_err(|e| e.to_string())?;
 
-    // Defines the `emacs_jni.core.{LispCallable,LispFunction,LispNonLocalExit}` shim
-    // classes (Task 1) into this JVM, per `jvm::entry::define_classes`'s own doc
-    // comment: "must be called once, right after the JVM is created,
-    // before anything else in this crate references those classes." No
-    // caller actually did this at runtime before Task 6 (only
-    // `shim.rs`'s own unit test, against its own throwaway JVM) — Task 6
-    // is the first thing that references a shim class outside that test
-    // (`jvm::convert::from_bridge`'s `BridgeValue::Callback` arm calls
-    // `find_class(emacs_jni/core/LispFunction)` on every `jvm-call` argument
-    // that turns out to be a Lisp function), so without this, that
-    // `find_class` would throw `ClassNotFoundException` against a real
-    // JVM started via `jvm-start`.
+    // A `define_classes` failure on the first attempt means the shim is broken: fail the start
+    // (`start-failed`). On a later attempt (restart after `jvm-stop` or a crash) the classes are
+    // usually already defined, and the failure means the destroyed JVM is unusable; any JNI work
+    // fails the same way. Log it and report `ready`, as a restart always did.
     //
-    // Fatal on the first attempt to reach this point (a live JVM) in this
-    // process, but log-and-continue on any attempt after that — see
-    // `JVM_CREATE_ATTEMPTED`'s doc comment for how "first" is determined
-    // (deliberately *not* "the first call to `create_jvm`", which is a
-    // subtly different, wrong condition — see that comment).
-    // The two cases need different handling because they mean different
-    // things:
-    //
-    // - First attempt: this is a genuinely fresh JVM. `define_classes`
-    //   failing here means the shim itself is broken (missing/corrupt
-    //   `.class` bytes, a `javac`/JDK mismatch, etc.) — a real problem
-    //   that should surface immediately and clearly as `jvm-start`
-    //   reporting `start-failed`, not be swallowed only to resurface
-    //   later as a confusing `ClassNotFoundException`/marshal error deep
-    //   inside some unrelated `jvm-call` that happens to pass a Lisp
-    //   function argument, with no obvious link back to "the shim never
-    //   loaded".
-    // - Subsequent attempt: a *restart* after a real `jvm-stop`
-    //   (`JNI_DestroyJavaVM`) or a crash. The underlying VM can come back
-    //   as a non-functional "zombie" that accepts `JavaVM::new`/attach
-    //   calls but fails any subsequent real JNI work — a pre-existing,
-    //   already-documented risk (`jvm-stop`'s own doc comment: "relies on
-    //   JNI_DestroyJavaVM, which some JVM builds handle unreliably ...
-    //   jvm-start afterward is best-effort"), confirmed independently of
-    //   this change (a plain `jvm-load-jar`/`jvm-call` on such a VM
-    //   already fails the same way, with the same "JNI call failed"
-    //   message). Propagating a `define_classes` failure here through
-    //   `create_jvm` would make `jvm-start` itself report `start-failed`
-    //   in that scenario, where before this task it reported `ready`
-    //   (with only the *next* real operation failing instead) — a
-    //   behavior change with no upside, since the VM is equally unusable
-    //   either way, and (per `jvm::entry::define_classes`'s own idempotency
-    //   doc comment) the shim classes are typically already loaded from
-    //   the first successful boot regardless. Logging and returning the
-    //   VM as usual keeps `jvm-start`'s success/failure semantics exactly
-    //   what they were before this task in the zombie-VM case.
-    //
-    // The flag is swapped here, not at `create_jvm`'s entry, specifically
-    // so an earlier call that failed before ever reaching a live JVM (bad
-    // init args, etc.) doesn't consume the "first attempt" slot — see
-    // `JVM_CREATE_ATTEMPTED`'s doc comment.
+    // jni 0.22.4 caches the `JavaVM` in a process-global singleton, so a restart re-attaches to
+    // the same JVM. See `docs/explanation/limitations-and-tradeoffs.md`.
     let is_first_attempt = is_first_attempt(&JVM_CREATE_ATTEMPTED);
     let result: jni::errors::Result<()> =
         vm.attach_current_thread(crate::jvm::entry::define_classes);
@@ -393,6 +257,7 @@ fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String
     Ok(vm)
 }
 
+/// The message of a caught panic payload.
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
@@ -403,6 +268,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// Handles [`Cmd::Pause`]: detaches the worker and reports [`Status::Paused`].
 fn handle_pause(vm: &JavaVM) {
     match vm.detach_current_thread() {
         Ok(()) => {
@@ -413,11 +279,8 @@ fn handle_pause(vm: &JavaVM) {
             });
         }
         Err(e) => {
-            // Detach failing is unexpected; stay in `pausing` rather than
-            // claiming success we can't back up, and surface it as a log
-            // line rather than a status (there's no `pause-failed` state
-            // in the spec's state machine, so pausing simply never
-            // completes — the caller's `-sync` wrapper times out).
+            // Stay in `pausing` and log. There is no `pause-failed` state; the caller's `-await`
+            // wrapper times out.
             crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
                 level: "error".to_string(),
                 text: format!("jvm-pause: detach_current_thread failed: {e}"),
@@ -426,16 +289,13 @@ fn handle_pause(vm: &JavaVM) {
     }
 }
 
+/// Handles [`Cmd::Stop`]: destroys the JVM and reports [`Status::Stopped`] or
+/// [`Status::StopFailed`].
 fn handle_stop(vm: JavaVM) {
-    // Safety: `destroy` requires no Java methods on the calling thread's
-    // stack (true here — we're between command handlers) and that the
-    // JavaVM isn't used again afterward — nothing below touches `vm`.
+    // SAFETY: `destroy` requires no Java frames on this thread's stack (true between commands)
+    // and no later use of `vm`.
     let result = unsafe { vm.destroy() };
-    // Drop the shared handles the main thread reads for `call_direct`: the VM
-    // is gone now. The main thread already detached itself in the `jvm--stop`
-    // defun (before this `Cmd::Stop` was sent), so no main-thread attachment
-    // was left to block this `destroy`. `clear` also resets the
-    // main-attached flag so a restart re-attaches on the next direct call.
+    // The `jvm--stop` defun already detached the main thread, so it cannot block `destroy`.
     crate::jvm::runtime::clear();
     match result {
         Ok(()) => {
@@ -456,10 +316,9 @@ fn handle_stop(vm: JavaVM) {
     clear_sender();
 }
 
+/// Handles [`Cmd::Resume`]: re-attaches the worker and reports [`Status::Ready`].
 fn handle_resume(vm: &JavaVM) {
-    // Cheap: attach_current_thread is a fast thread-local check if the
-    // thread is already attached, and a real (re-)attach if `Cmd::Pause`
-    // (Task 5) had explicitly detached it.
+    // A no-op if attached; re-attaches if `Cmd::Pause` detached this thread.
     let result: jni::errors::Result<()> = vm.attach_current_thread(|_env| Ok(()));
     match result {
         Ok(()) => {
@@ -479,21 +338,13 @@ fn handle_resume(vm: &JavaVM) {
     }
 }
 
+/// Handles [`Cmd::LoadJar`]: adds `path` to the shared classloader, creating the loader on first
+/// use, then enqueues [`Inbound::LoadJarDone`](crate::lisp::inbox::Inbound::LoadJarDone).
 fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
-    // `URLClassLoader#addURL` is lazy: it just appends to the loader's
-    // internal URL list and never inspects the target until a class is
-    // actually looked up, so it does not itself fail for a nonexistent
-    // path (verified empirically -- see Task 7's report). Check existence
-    // up front so `jvm-load-jar`'s ok/err result actually reflects whether
-    // the jar is there, without touching the reflective addURL sequence
-    // below.
+    // `URLClassLoader#addURL` does not check the path, so check it here.
     //
-    // Accepts a directory too, not just a jar file: `add_jar_url` below
-    // goes through `File::toURI`, which already appends a trailing slash
-    // for a directory on its own -- exactly the URL form `URLClassLoader`
-    // needs to treat it as a classpath directory (rather than a jar) --
-    // so this primitive doubles as "add a classpath directory", used by
-    // `jvm-clj-start` to add `clojure-src/` alongside real jars.
+    // A directory also works: `File::toURI` adds the trailing `/` that `URLClassLoader` needs.
+    // `jvm-clj-start` uses this to add `clojure-src/`.
     if !std::path::Path::new(&path).exists() {
         crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::LoadJarDone {
             id,
@@ -525,22 +376,15 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     }
 }
 
-/// Synchronous main-thread counterpart of `handle_load_jar`: adds PATH to the
-/// shared classloader on *this* thread, sharing the one loader with the async
-/// path through `jvm::runtime::get_or_create_loader`. Returns an error string (a
-/// missing path, or a JNI failure) instead of enqueueing an
-/// `Inbound::LoadJarDone`, since the caller (`jvm--load-jar-direct`) returns
-/// or signals directly. See `call_direct` for the main-thread attach model.
+/// Synchronous counterpart of [`handle_load_jar`], for `jvm--load-jar-direct`. Uses the same
+/// shared classloader. Returns an error message instead of enqueueing
+/// [`Inbound::LoadJarDone`](crate::lisp::inbox::Inbound::LoadJarDone).
 pub(crate) fn load_jar_direct(vm: &JavaVM, path: &str) -> Result<(), String> {
-    // Same up-front existence check as `handle_load_jar`: `addURL` is lazy and
-    // never fails for a nonexistent path on its own.
+    // `addURL` does not check the path.
     if !std::path::Path::new(path).exists() {
         return Err(format!("jar/classpath entry not found: {path}"));
     }
-    // A *scoped* attach: a no-op on the permanently-attached main thread, an
-    // owning attach-and-detach on any other caller. Unlike `call_direct`, this
-    // never takes the permanent attach -- `addURL` needs no stable thread
-    // identity, so there is no reason to touch the main-attachment state.
+    // Scoped attach: `addURL` needs no stable thread identity.
     let result: jni::errors::Result<()> = vm.attach_current_thread_for_scope(|env| {
         let loader = crate::jvm::runtime::get_or_create_loader(|| {
             create_shared_classloader(env).map(Arc::new)
@@ -551,9 +395,8 @@ pub(crate) fn load_jar_direct(vm: &JavaVM, path: &str) -> Result<(), String> {
     result.map_err(|e| e.to_string())
 }
 
-/// Creates a `URLClassLoader` with an empty URL list, parented on the
-/// platform classloader (not the application classloader) so jars we load
-/// don't inherit whatever's already on this module's own classpath.
+/// Creates an empty `URLClassLoader` whose parent is the platform classloader, so loaded jars do
+/// not see this module's own classpath.
 fn create_shared_classloader<'local>(
     env: &mut jni::Env<'local>,
 ) -> jni::errors::Result<jni::refs::Global<jni::objects::JObject<'static>>> {
@@ -583,9 +426,8 @@ fn create_shared_classloader<'local>(
     env.new_global_ref(&loader)
 }
 
-/// Converts PATH to a `file:` URL and adds it to LOADER via the protected
-/// `URLClassLoader#addURL(URL)` method, called reflectively (Java gives no
-/// public API to extend an existing URLClassLoader's URL list).
+/// Adds `path` to `loader` as a `file:` URL. `URLClassLoader#addURL` is protected, so it is called
+/// reflectively.
 fn add_jar_url(
     env: &mut jni::Env<'_>,
     loader: &jni::objects::JObject<'_>,
@@ -642,21 +484,8 @@ fn add_jar_url(
     Ok(())
 }
 
-/// Resolves the pending `CompletableFuture` for ID — inline, cheaply, on
-/// the worker thread's own persistent JNI attachment, per spec "Worker
-/// thread role": unlike `Cmd::Call`, this never spawns a thread, since
-/// completing a future is not itself a slow operation (it's a single JNI
-/// call to `CompletableFuture#complete`/`#completeExceptionally`, not an
-/// arbitrary user method that might block for arbitrary reasons). This is
-/// the other half of the round trip `jvm::entry::lisp_function_call` starts: that
-/// function enqueues an `Inbound::Invoke` and returns immediately; this
-/// function runs once Lisp's `jvm--invoke-reply` sends back
-/// `Cmd::InvokeReply` with the Lisp callback's outcome — its real return
-/// value, or the real `condition-case` signal it raised, already marshalled
-/// to a `LispOutcome`. Identical shape to `handle_lisp_reply` below (both
-/// just hand their `LispOutcome` to `jvm::invoke::complete_future_with_reply`)
-/// — the callback round trip and the Clojure apply round trip complete their
-/// futures exactly the same way.
+/// Completes the future for `id` with a Lisp callback's `outcome`. Inline on the worker, because
+/// completing a future is cheap.
 fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutcome) {
     let Some(future) = take(id) else {
         crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
@@ -670,11 +499,8 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutco
         crate::jvm::invoke::complete_future_with_reply(env, &future_local, outcome)
     });
     if let Err(e) = result {
-        // The future is already removed from the pending table by this
-        // point (via `take` above) and there's no other channel to report
-        // this through -- the Java side just sees its future hang until
-        // its own wait times out. Logging here at least makes the failure
-        // visible in `*jvm-log*` rather than disappearing silently.
+        // The future is already out of the table, so the Java side waits until its timeout. Log
+        // it so the failure is visible in `*jvm-log*`.
         crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
             level: "error".to_string(),
             text: format!("invoke-reply for id {id}: failed to complete the pending future: {e}"),
@@ -682,14 +508,8 @@ fn handle_invoke_reply(vm: &JavaVM, id: u64, outcome: crate::protocol::LispOutco
     }
 }
 
-/// Resolves the pending `CompletableFuture` for ID with VALUE — the
-/// Lisp-access counterpart of `handle_invoke_reply` above, completing (or
-/// exceptionally completing) whatever future `jvm::entry`'s `Lisp.*` natives
-/// registered in the pending table (see design spec, "Request/reply flow",
-/// step 3: "Completion must route through the worker because only it is
-/// attached to the JVM"). Runs inline, like `handle_invoke_reply`, for the
-/// same reason: completing a future is one or two cheap JNI calls, not an
-/// arbitrary user method.
+/// Completes the future for `id` with a Lisp-access reply. Only the worker is attached, so the
+/// completion runs here.
 fn handle_lisp_reply(vm: &JavaVM, id: u64, value: crate::protocol::LispOutcome) {
     let Some(future) = take(id) else {
         crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Log {
@@ -716,16 +536,9 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
 
-    /// Covers the exact swap semantics `create_jvm` relies on to decide
-    /// whether a `jvm::entry::define_classes` failure is fatal (first attempt)
-    /// or merely logged (a restart) — see `JVM_CREATE_ATTEMPTED`'s and
-    /// `is_first_attempt`'s doc comments. Uses its own local flag rather
-    /// than the module's shared `JVM_CREATE_ATTEMPTED` static, since that
-    /// static is process-global and other tests in this binary (run with
-    /// `--test-threads=1`, so sharing one process) may have already
-    /// flipped it by the time this test runs -- this test is about the
-    /// swap mechanism itself, not about `JVM_CREATE_ATTEMPTED`'s
-    /// particular state at some point in the suite.
+    use crate::jvm::test_support::create_test_jvm;
+
+    /// Uses a local flag: other tests may already have set `JVM_CREATE_ATTEMPTED`.
     #[test]
     fn is_first_attempt_is_true_exactly_once() {
         let flag = AtomicBool::new(false);
@@ -734,11 +547,8 @@ mod tests {
         assert!(!is_first_attempt(&flag), "every call after that must keep reporting false");
     }
 
-    /// Compiles and jars up `test/fixtures/Greeter.java` into
-    /// `target/test-fixtures/greeter.jar`, mirroring what
-    /// `test/run-ert-tests.sh` does for the ERT suite. Doing it here too
-    /// keeps this test self-sufficient under a plain `cargo test`, with no
-    /// dependency on the shell script having run first.
+    /// Builds `test/fixtures/Greeter.java` into `target/test-fixtures/greeter.jar`, so a plain
+    /// `cargo test` does not depend on `test/run-ert-tests.sh`.
     fn build_greeter_jar() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let out_dir = manifest_dir.join("target/test-fixtures");
@@ -767,14 +577,7 @@ mod tests {
         jar_path
     }
 
-    /// This is the load-bearing proof for Task 7: it doesn't just check that
-    /// `add_jar_url` returns `Ok(())` (which `addURL` would do even for a
-    /// path that isn't a real jar, since `URLClassLoader` only inspects a
-    /// URL's contents lazily on first class load) -- it reflectively loads
-    /// `Greeter` through the very `URLClassLoader` `add_jar_url` extended,
-    /// then calls `Greeter.greet()` and checks the actual returned string.
-    /// That's only possible if the shared classloader's URL list genuinely
-    /// now includes the fixture jar.
+    /// `addURL` succeeds for any path, so load `Greeter` through the loader and call it.
     #[test]
     fn add_jar_url_makes_the_jars_class_loadable_and_callable() {
         let jar_path = build_greeter_jar();
@@ -812,27 +615,6 @@ mod tests {
 
         assert_eq!(greeting, "hello from Greeter");
     }
-
-    /// Retries against jni-rs 0.22.4's racy check-then-create singleton --
-    /// see `src/jvm/convert.rs`'s `create_test_jvm` for the full
-    /// explanation. This test used to create its JVM directly; with more
-    /// JVM-creating tests now running in this same binary (`src/jvm/entry.rs`), the
-    /// race became reliably hit rather than a rare fluke.
-    fn create_test_jvm() -> JavaVM {
-        let mut last_err = None;
-        for _ in 0..20 {
-            let init_args = InitArgsBuilder::new().version(JNIVersion::V1_8).build().unwrap();
-            match JavaVM::new(init_args) {
-                Ok(vm) => return vm,
-                Err(e) => {
-                    last_err = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-        }
-        panic!("failed to create/attach a test JVM after retries: {last_err:?}");
-    }
-
     #[test]
     fn register_then_take_returns_once() {
         let vm = create_test_jvm();

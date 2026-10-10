@@ -1,20 +1,27 @@
 (ns emacs-jni.clj
   "Hold and manipulate Emacs Lisp values from Clojure.
 
-  Scalars and strings (numbers, strings, nil, t) come back as Clojure
-  values. Lisp symbols and keywords map to Clojure symbols and keywords,
-  both directions. Every other Lisp value stays an opaque LispObject:
-  inspect it via prin1-to-string, type-of, eq, and is-not-nil?.
+  Lisp numbers, strings, `nil`, and `t` come back as Clojure values (`t`
+  becomes `true`). Lisp symbols and keywords map to Clojure symbols and
+  keywords, in both directions. Every other Lisp value stays an opaque
+  `LispObject`. Inspect it with `.toString` (Lisp `prin1-to-string`),
+  [[type-of]], [[eq]], and [[is-not-nil?]].
 
-  See design spec
-  docs/superpowers/specs/2026-09-08-clojure-lisp-access-design.md."
-  (:import [emacs_jni.core Lisp LispObject LispSymbol LispNonLocalExit LispSignal LispThrow]
+  [[intern]], [[type-of]], [[is-not-nil?]], and [[eq]] block until Emacs
+  replies. If Emacs does not reply in 30 seconds, they throw
+  `java.util.concurrent.TimeoutException`.
+
+  See `docs/how-to-guides/access-lisp-from-clojure.md`."
+  (:refer-clojure :exclude [intern apply])
+  (:import [emacs_jni.core Lisp LispSymbol LispNonLocalExit]
            [java.util.function BiFunction]))
 
 (defn- ->lisp
-  "Marshal a value heading into Lisp: a Clojure symbol or keyword becomes
-  a LispSymbol marker the native side interns; everything else (scalars,
-  LispObjects, other objects) passes through unchanged."
+  "Converts `x` for a call into Lisp.
+
+  A Clojure symbol or keyword becomes a `LispSymbol`, which the native side
+  interns. Other values (scalars, `LispObject`s, other objects) pass through
+  unchanged."
   [x]
   (cond
     (keyword? x) (LispSymbol. (subs (str x) 1) true)
@@ -22,87 +29,99 @@
     :else x))
 
 (defn ->clj
-  "Convert a marshalled Lisp value (a LispSymbol marker, LispObject, or
-  boxed scalar) to its Clojure form: a marker becomes a symbol/keyword,
-  everything else passes through."
+  "Converts `x`, a value from Lisp, to its Clojure form.
+
+  A `LispSymbol` becomes a Clojure symbol or keyword. Other values (a
+  `LispObject` or a boxed scalar) pass through unchanged."
   [x]
   (if (instance? LispSymbol x)
     (if (.-keyword x) (keyword (.-name x)) (symbol (.-name x)))
     x))
 
 (defn- apply*
-  "Raw native applyAsync with args marshalled into Lisp. Returns a
-  CompletableFuture of the still-unconverted result."
+  "Calls `Lisp/applyAsync` with `f` and `args` converted by [[->lisp]].
+
+  Returns a `CompletableFuture` of the result before [[->clj]] conversion."
   [f args]
   (Lisp/applyAsync (->lisp f) (object-array (map ->lisp args))))
 
 (defn intern
-  "Intern S (a string) as a Lisp symbol/keyword and return it as a Clojure
-  symbol/keyword. A leading \":\" makes it a keyword."
+  "Interns the string `s` in Lisp and returns it as a Clojure symbol.
+
+  A leading `:` makes a keyword. Blocks until Emacs replies, and throws
+  `java.util.concurrent.TimeoutException` after 30 seconds."
   [s]
   (->clj (Lisp/intern s)))
 
 (defn eval-for-lisp
-  "Read CODE (a string of Clojure source) with the full Clojure reader, eval
-  it, and marshal the result toward Lisp: a keyword or symbol result becomes a
-  LispSymbol marker the generic bridge interns back into a Lisp keyword/symbol;
-  every other value passes through the ordinary jvm-call return marshalling.
-  Backs `jvm-clj-eval-string'.
+  "Evaluates the Clojure source string `code` and converts the result for Lisp.
 
-  Uses `load-string`, which reads with the full Clojure reader (reader macros
-  `'`, backtick, `~`, `@`, `#()`, `#\"re\"` all work) and evaluates every
-  top-level form, returning the last one's value. This is why CODE is passed as
-  a raw string rather than pre-read: `clojure.java.api.Clojure/read` reads
-  EDN-only and would reject the reader macros."
+  Backs the Elisp `jvm-clj-eval-string`. A keyword or symbol result becomes
+  a `LispSymbol`.
+
+  [[clojure.core/load-string]] uses the full reader, evaluates every
+  top-level form, and returns the last value. `code` stays a string because
+  `clojure.java.api.Clojure/read` reads only EDN and rejects reader macros."
   [code]
   (->lisp (load-string code)))
 
 (defn- throw-lisp-exit
-  "Given a completion throwable (a bare LispNonLocalExit from .handle, or one
-  wrapped in an ExecutionException from deref), rethrow the underlying
-  LispSignal/LispThrow so a caller can `catch' it by type. Anything else is
-  rethrown unchanged."
+  "Rethrows the `LispSignal` or `LispThrow` in `t`, so a caller can `catch` it.
+
+  `t` is a bare `LispNonLocalExit` (from `.handle`) or one wrapped in an
+  `ExecutionException` (from `deref`). Any other throwable is rethrown
+  unchanged."
   [t]
   (let [cause (if (instance? java.util.concurrent.ExecutionException t) (.getCause t) t)]
     (throw (if (instance? LispNonLocalExit cause) cause t))))
 
 (defn apply-async
-  "Apply F to ARGS asynchronously. Returns a CompletableFuture of the
-  converted result. A Lisp non-local exit surfaces as a LispSignal/LispThrow."
+  "Applies the Lisp function `f` to `args` without blocking.
+
+  Returns a `CompletableFuture` of the converted result. A Lisp `signal` or
+  `throw` completes the future exceptionally with a `LispSignal` or
+  `LispThrow`."
   [f & args]
   (.handle (apply* f args)
     (reify BiFunction
       (apply [_ v t] (if t (throw-lisp-exit t) (->clj v))))))
 
 (defn apply
-  "Apply F to ARGS, blocking for the result. A Lisp non-local exit surfaces
-  as a LispSignal/LispThrow."
+  "Applies the Lisp function `f` to `args` and returns the converted result.
+
+  Blocks with no time limit. A Lisp `signal` or `throw` is thrown as a
+  `LispSignal` or `LispThrow`. See [[apply-async]] for the non-blocking form."
   [f & args]
   (try
     (->clj (deref (apply* f args)))
     (catch Throwable t (throw-lisp-exit t))))
 
 (defn- sym->lisp-name
-  "The Lisp symbol name for SYM (a Clojure symbol, keyword, or string),
-  preserving a namespace segment as a `foo/bar` Lisp name."
+  "Returns the Lisp symbol name for `sym`, a Clojure symbol, keyword, or string.
+
+  A namespace segment stays in the name, so `foo/bar` becomes the Lisp name
+  `foo/bar`."
   [sym]
   (if-let [ns (and (or (symbol? sym) (keyword? sym)) (namespace sym))]
     (str ns "/" (name sym))
     (name sym)))
 
 (defn- run-lisp
-  "Apply RECEIVER (a LispSymbol marker or a function LispObject) to ARGS
-  (a seq), blocking for the converted result; a non-local exit surfaces as
-  a LispSignal/LispThrow, same as `apply`."
+  "Applies `receiver` to the seq `args` and returns the converted result.
+
+  `receiver` is a `LispSymbol` or a function `LispObject`. Behaves as
+  [[apply]]: blocks with no time limit, and throws a `LispSignal` or
+  `LispThrow`."
   [receiver args]
   (try
     (->clj (deref (apply* receiver args)))
     (catch Throwable t (throw-lisp-exit t))))
 
 (defmacro ^:private def-lisp-callable
-  "Define a deftype NAME wrapping a `receiver`, applying it to its call
-  args through `run-lisp`. Covers direct arities 0-5 plus applyTo (for
-  `clojure.core/apply` and higher arities)."
+  "Defines a `deftype` `name` that applies its `receiver` with [[run-lisp]].
+
+  Implements arities 0-5 directly. `applyTo` covers [[clojure.core/apply]]
+  and higher arities."
   [name]
   `(deftype ~name [~'receiver]
      clojure.lang.IFn
@@ -114,53 +133,66 @@
      (invoke [_# a# b# c# d# e#] (run-lisp ~'receiver [a# b# c# d# e#]))
      (applyTo [_# args#] (run-lisp ~'receiver (seq args#)))))
 
-;; Late binding: wraps a symbol-name marker; each call re-funcalls the
-;; symbol, so a later redefinition is picked up.
+;; Late binding: wraps a `LispSymbol`. Each call `funcall`s the symbol, so a
+;; later redefinition takes effect.
 (def-lisp-callable LispSymbolFn)
 
-;; Early binding: wraps the resolved function object; each call applies
-;; that same object.
+;; Early binding: wraps the resolved function object. Each call applies that
+;; same object.
 (def-lisp-callable LispFunctionFn)
 
 (defn require-symbol
-  "Import Lisp symbol SYM as a callable value (late binding, like
-  `emacs::use_symbols!`). Returns a LispSymbolFn: call it to funcall SYM."
+  "Returns a `LispSymbolFn` that calls the Lisp function named `sym`.
+
+  Late binding, as `emacs::use_symbols!` in Rust: each call `funcall`s the
+  symbol, so a later redefinition takes effect."
   [sym]
   (->LispSymbolFn (LispSymbol. (sym->lisp-name sym) false)))
 
 (defmacro refer-symbols
-  "Define a var per SYM in the current namespace, each the LispSymbolFn
-  from `require-symbol`. So `(refer-symbols message)` makes
-  `(message \"hi\")` call Lisp `message`."
+  "Defines one var per symbol in `syms`, bound to [[require-symbol]] of it.
+
+  For example, `(refer-symbols message)` makes `(message \"hi\")` call the
+  Lisp `message`."
   [& syms]
   `(do ~@(map (fn [s] `(def ~s (require-symbol '~s))) syms)))
 
 (defn require-function
-  "Import Lisp function SYM as a callable value (early binding, like
-  `emacs::use_functions!`). Resolves `indirect-function` now and holds the
-  function object; a later redefinition of SYM does not affect it."
+  "Returns a `LispFunctionFn` that calls the current Lisp function of `sym`.
+
+  Early binding, as `emacs::use_functions!` in Rust: resolves
+  `indirect-function` now and keeps the function object. A later
+  redefinition of `sym` has no effect."
   [sym]
   (let [f (apply (LispSymbol. "indirect-function" false)
                  (LispSymbol. (sym->lisp-name sym) false))]
     (->LispFunctionFn f)))
 
 (defmacro refer-functions
-  "Define a var per SYM in the current namespace, each the LispFunctionFn
-  from `require-function`."
+  "Defines one var per symbol in `syms`, bound to [[require-function]] of it."
   [& syms]
   `(do ~@(map (fn [s] `(def ~s (require-function '~s))) syms)))
 
 (defn type-of
-  "Return V's Lisp type as a Clojure symbol (e.g. symbol, string, cons)."
+  "Returns the Lisp type of `v` as a Clojure symbol, e.g. `cons` or `string`.
+
+  Blocks until Emacs replies, and throws
+  `java.util.concurrent.TimeoutException` after 30 seconds."
   [v]
   (->clj (Lisp/typeOf (->lisp v))))
 
 (defn is-not-nil?
-  "True unless V is the Lisp value nil."
+  "Returns true unless `v` is the Lisp value `nil`.
+
+  Blocks until Emacs replies, and throws
+  `java.util.concurrent.TimeoutException` after 30 seconds."
   [v]
   (Lisp/isNotNil (->lisp v)))
 
 (defn eq
-  "True if A and B are the same Lisp object (Lisp's own eq)."
+  "Returns true if `a` and `b` are the same Lisp object, by Lisp `eq`.
+
+  Blocks until Emacs replies, and throws
+  `java.util.concurrent.TimeoutException` after 30 seconds."
   [a b]
   (Lisp/eq (->lisp a) (->lisp b)))

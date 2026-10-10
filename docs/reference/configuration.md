@@ -4,47 +4,45 @@
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `EMACS_JNI_MODULE_PATH` | `elisp/jvm.el`, at `require` time. | Overrides the path to the built `.so` module. Without it, the path defaults to a location relative to `elisp/jvm.el` itself (`../target/debug/libemacs_jni.so`). |
-| `EMACS_JNI_CLOJURE_JARS_DIR` | `test/run-ert-tests.sh`, `test/jvm-clj-eval-test.el`, and `test/fetch-clojure-jars.sh`'s printed usage line. Not read by the module itself. | Points the test suite at a directory of Clojure/nREPL jars. Application code that wants the same convention reads it with `getenv`, as the tutorials do — the module does not read it automatically. |
-| `EMACS_JNI_TEST_FEATURES` | `test/run-ert-tests.sh`. | Set to `test-support` to build the module with its `test-support` Cargo feature, which enables the crash-recovery test in `test/jvm-crash-test.el`. |
-| `JAVA_HOME` | The `jni` crate's `invocation` feature, at runtime. | Locates `libjvm.so`. If unset, `jni` falls back to finding `java` on `PATH`. |
+| `EMACS_JNI_MODULE_PATH` | `elisp/jvm.el`, at load time | Path of the dynamic module. Default: `../target/debug/libemacs_jni.so`, relative to `jvm.el`. `test/run-ert-tests.sh` sets it. |
+| `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. `test/run-ert-tests.sh` sets it from `mise where java` if it is unset and `mise` is available. |
+| `EMACS_JNI_CLOJURE_JARS_DIR` | the Clojure tests (`test/jvm-clj-*.el`, `test/jvm-symbol-marshal-test.el`) | Directory of Clojure and nREPL jars. If unset, these tests skip. The module and `jvm-clj.el` do not read it. The tutorials and how-to guides read it with `getenv`. |
+| `EMACS_JNI_TEST_FEATURES` | `test/run-ert-tests.sh` | Cargo features for the test build. `test-support` enables `test/jvm-crash-test.el`. Without it, the script skips that file. |
+| `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `test/run-ert-tests.sh` sets it. |
+
+## Configuration variables
+
+`jvm-classpath`, `jvm-options`, `jvm-status-hook`, `jvm--module-path`, and `jvm-clj-classpath`:
+see [Lisp API reference](lisp-api.md#variables).
 
 ## Build outputs
 
 | Path | Produced by | Contents |
 |---|---|---|
-| `target/debug/libemacs_jni.so` | `cargo build` | The dynamic module `elisp/jvm.el` loads. |
-| `target/emacs-jni-shim-classes/` | `cargo build`, through `build.rs` | Compiled Java shim classes, under `emacs_jni.core` — `LispCallable`, `LispFunction`, `LispNonLocalExit` and its `LispSignal`/`LispThrow` subclasses, `ReleaseNotifier`, and (for Clojure Lisp access) `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Java code needs these on its classpath to reference the types directly, as `test/fixtures/Calc.java` does. |
-| `target/clojure-jars/` | `test/fetch-clojure-jars.sh` | The four jars listed under [Prerequisites for Clojure](#prerequisites-for-clojure) below. Gitignored, never bundled or committed. |
+| `target/debug/libemacs_jni.so` | `cargo build` | The dynamic module that `elisp/jvm.el` loads. |
+| `target/emacs-jni-shim-classes/` | `cargo build` (`build.rs` runs `javac`) | Compiled classes of package `emacs_jni.core`: `LispCallable`, `LispFunction`, `LispNonLocalExit`, `LispSignal`, `LispThrow`, `ReleaseNotifier`, `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Add this directory to the `javac` classpath to compile Java code that uses these types, as for `test/fixtures/Calc.java`. |
+| `target/test-fixtures/` | `test/run-ert-tests.sh` | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
+| `target/clojure-jars/` | `test/fetch-clojure-jars.sh` | The jars in [Prerequisites for Clojure](#prerequisites-for-clojure). The script takes an optional output directory argument. |
 
-## Configuration variables
-
-`jvm-classpath`, `jvm-options`, `jvm-status-hook`, and (from
-`jvm-clj.el`) `jvm-clj-classpath` are documented in the
-[Lisp API reference](lisp-api.md#variables).
-
-`jvm-clj-start` also loads this package's `clojure-src/` source
-directory, which holds the `emacs-jni.clj` namespace, onto the
-JVM classpath. It is part of the repository, not a build output.
+`clojure-src/` holds the `emacs-jni.clj` namespace. It is source, not a build output.
+`jvm-clj-start` adds it to the classpath.
 
 ## Prerequisites
 
-| Requirement | Detail |
+| Requirement | Version |
 |---|---|
-| Emacs | 28 or later. This module needs `Env::open_channel`, added in Emacs 28. Exercised against Emacs 30.1. |
-| Rust | A stable toolchain. `cargo build` uses whatever is on `PATH`. |
-| A JDK | Located via `JAVA_HOME`, or `java` on `PATH`, at runtime. This repository pins JDK 26 through [mise](https://mise.jdx.dev/) (`mise.toml`/`mise.lock`). Both files are currently untracked in this repository's git history — nobody has decided whether to commit them, so check with the maintainer before adding them. |
-| Operating system | Linux only. macOS and Windows are out of scope. |
-| `jni` crate version | Pinned to 0.22.4 in `Cargo.toml`. |
+| Operating system | Linux. macOS and Windows are not supported. |
+| Emacs | 28 or later, with dynamic module support. Tested with 30.1. |
+| Rust | Stable toolchain. |
+| JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `.config/mise/config.toml` pins Java 26. `.config/mise/mise.lock` locks 26.0.2.1. |
 
 ## Prerequisites for Clojure
 
-Fetched by `test/fetch-clojure-jars.sh`, from the sources below. Not
-bundled with this repository.
+`test/fetch-clojure-jars.sh` downloads these jars. The repository does not include them.
 
 | Jar | Version | Source |
 |---|---|---|
 | `clojure-1.12.0.jar` | 1.12.0 | Maven Central |
 | `spec.alpha-0.5.238.jar` | 0.5.238 | Maven Central |
 | `core.specs.alpha-0.4.74.jar` | 0.4.74 | Maven Central |
-| `nrepl-1.7.0.jar` | 1.7.0 | Clojars (not published to Maven Central) |
+| `nrepl-1.7.0.jar` | 1.7.0 | Clojars |

@@ -1,17 +1,23 @@
+//! The module's Lisp entry points: `init`, the `jvm--*` defuns, and the `jvm-*` error symbols.
+//!
+//! `///` comments on a `#[defun]` become the Lisp docstring, so they follow Emacs conventions
+//! (UPPERCASE arguments, `` `foo' `` quoting, 80 columns). Notes for Rust readers go in `//`
+//! comments inside the body.
+
 use emacs::{defun, Env, Result, Value};
 
 emacs::plugin_is_GPL_compatible!();
 
 #[emacs::module(defun_prefix = "", separator = "")]
 fn init(env: &Env) -> Result<Value<'_>> {
-    // Module load runs on the Emacs main thread; record it so `jvm--call-direct`
-    // permanently attaches only this thread to the JVM (stable thread identity),
-    // and lets any other caller fall back to a transient scoped attach.
+    // Module load runs on the Emacs main thread. Only this thread attaches to the JVM
+    // permanently, in `jvm--call-direct`.
     crate::jvm::runtime::set_main_thread();
     let feature = env.intern("emacs-jni")?;
     env.call("provide", (feature,))
 }
 
+/// Return t.  Use this to check that the module is loaded.
 #[defun(mod_in_name = false, name = "jvm-ping")]
 fn jvm_ping() -> Result<bool> {
     Ok(true)
@@ -23,11 +29,17 @@ emacs::define_errors! {
     jvm_error "JVM call failed"
 }
 
+/// Open the JVM-to-Emacs wakeup channel on pipe PROCESS.
+/// JVM threads write to it to make Emacs run `jvm--service-inbound'.
 #[defun(mod_in_name = false, name = "jvm--init-channel")]
 fn jvm_init_channel(env: &Env, process: Value) -> Result<()> {
     crate::lisp::inbox::init(env, process)
 }
 
+/// Start the JVM with CLASSPATH and OPTIONS, or resume a paused one.
+/// CLASSPATH and OPTIONS are lists of strings.  A resume ignores them.
+/// Return immediately; the new status arrives through `jvm--apply-status'.
+/// Signal `jvm-illegal-transition' if the current status does not allow a start.
 #[defun(mod_in_name = false, name = "jvm--start")]
 fn jvm_start(env: &Env, classpath: Value, options: Value) -> Result<()> {
     match crate::jvm::runtime::STATUS.begin_start() {
@@ -39,6 +51,9 @@ fn jvm_start(env: &Env, classpath: Value, options: Value) -> Result<()> {
     }
 }
 
+/// Detach the worker thread from the JVM, and keep the JVM.
+/// Return immediately; the new status arrives through `jvm--apply-status'.
+/// Signal `jvm-illegal-transition' if the JVM is not `ready'.
 #[defun(mod_in_name = false, name = "jvm--pause")]
 fn jvm_pause(env: &Env) -> Result<()> {
     match crate::jvm::runtime::STATUS.begin_pause() {
@@ -50,17 +65,15 @@ fn jvm_pause(env: &Env) -> Result<()> {
     }
 }
 
+/// Destroy the JVM.
+/// Return immediately; the new status arrives through `jvm--apply-status'.
+/// Signal `jvm-illegal-transition' if the JVM is not `ready' or `paused'.
 #[defun(mod_in_name = false, name = "jvm--stop")]
 fn jvm_stop(env: &Env) -> Result<()> {
     match crate::jvm::runtime::STATUS.begin_stop() {
         Ok(()) => {
-            // This defun runs on the main thread — the one `call_direct` may
-            // have permanently attached. Detach it here (best-effort, and a
-            // no-op if it was never attached) so the worker's `destroy` does
-            // not block waiting for it (`destroy` waits only for *other*
-            // non-daemon threads; the worker itself is the caller, exempt).
-            // Reset the flag so a later restart re-attaches on its next
-            // direct call.
+            // `call_direct` may have attached this (main) thread. Detach it, or the worker's
+            // `destroy` blocks waiting for it.
             if let Some(vm) = crate::jvm::runtime::vm() {
                 let _ = vm.detach_current_thread();
             }
@@ -74,6 +87,9 @@ fn jvm_stop(env: &Env) -> Result<()> {
     }
 }
 
+/// Add the jar or directory at PATH to the shared classloader, on the worker.
+/// Return a request id.  The result arrives through `jvm--resolve-load-jar'.
+/// Signal `jvm-illegal-transition' if the JVM is not `ready'.
 #[defun(mod_in_name = false, name = "jvm--load-jar")]
 fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
     if crate::jvm::runtime::STATUS.get() != crate::protocol::Status::Ready {
@@ -86,12 +102,9 @@ fn jvm_load_jar(env: &Env, path: String) -> Result<u64> {
     }
 }
 
-/// Synchronous counterpart of `jvm--load-jar`: adds PATH to the shared
-/// classloader on *this* (the Emacs main) thread and returns `nil`, instead of
-/// a request id. Signals `jvm-error` on failure (missing path, or a JNI error).
-/// Shares the one classloader with the async `jvm--load-jar` path through a
-/// single get-or-create in `runtime`, so whichever path loads the first jar
-/// wins and both see every later jar (see `jvm::inbox::load_jar_direct`).
+/// Add the jar or directory at PATH to the shared classloader, on this thread.
+/// This is the synchronous counterpart of `jvm--load-jar'.  Both use one
+/// classloader.  Signal `jvm-error' on failure.
 #[defun(mod_in_name = false, name = "jvm--load-jar-direct")]
 fn jvm_load_jar_direct(env: &Env, path: String) -> Result<()> {
     if crate::jvm::runtime::STATUS.get() != crate::protocol::Status::Ready {
@@ -106,6 +119,11 @@ fn jvm_load_jar_direct(env: &Env, path: String) -> Result<()> {
     }
 }
 
+/// Call TARGET.MEMBER with the list ARGS, on a new worker-side thread.
+/// TARGET is a class name string or a wrapped JVM object.  Return a request
+/// id.  The result arrives through `jvm--resolve-call'.  Signal
+/// `jvm-illegal-transition' if the JVM is not `ready'.  See `jvm-call-async'
+/// and `jvm-new-async'.
 #[defun(mod_in_name = false, name = "jvm--call")]
 fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64> {
     if crate::jvm::runtime::STATUS.get() != crate::protocol::Status::Ready {
@@ -120,15 +138,9 @@ fn jvm_call(env: &Env, target: Value, member: String, args: Value) -> Result<u64
     }
 }
 
-/// Interprets a `jvm-call`/`jvm-call-direct` TARGET argument: a string is a
-/// fully-qualified class name (for a static call or `<init>`); anything else
-/// must be a `JvmHandle` `user-ptr` naming a live JVM object.
-///
-/// `JvmHandle` only has a `FromLisp` impl for `&JvmHandle` (the `emacs`
-/// crate's blanket `user-ptr` impl is `impl<'e, T: Transfer> FromLisp<'e> for
-/// &'e T`, not for a bare `T` — verified against the vendored emacs-0.21.0
-/// source, `src/types/user_ptr.rs`), so this asks for a reference, not an
-/// owned value.
+/// Interprets the `target` of a `jvm-call`/`jvm-call-direct`: a string is a class name (for a
+/// static call or `<init>`); anything else must be a [`JvmHandle`](crate::jvm::convert::JvmHandle)
+/// `user-ptr`.
 fn parse_call_target(target: Value) -> Result<crate::protocol::CallTarget> {
     if let Ok(class_name) = target.into_rust::<String>() {
         Ok(crate::protocol::CallTarget::ClassName(class_name))
@@ -138,20 +150,13 @@ fn parse_call_target(target: Value) -> Result<crate::protocol::CallTarget> {
     }
 }
 
-/// Synchronous counterpart of `jvm--call`: resolves and invokes
-/// TARGET.MEMBER with ARGS on *this* (the Emacs main) thread, and returns the
-/// result value directly instead of a request id. The main thread stays
-/// permanently attached to the running JVM across calls (stable thread
-/// identity + persistent thread-locals); see `jvm::invoke::call_direct`. A
-/// failed call signals `jvm-error`.
+/// Call TARGET.MEMBER with the list ARGS on this thread, and return the result.
+/// This is the synchronous counterpart of `jvm--call'.  It blocks Emacs for
+/// the whole call.  `jvm-call-await' is different: it waits on the async path.
 ///
-/// Distinct from `jvm-call-sync` (`elisp/jvm.el`), which is the *async*
-/// `jvm--call` plus a blocking wait on the worker's `call-done` reply. This
-/// primitive never touches the worker thread or the channel: it is the
-/// experimental "attach, execute, return" path (see plan
-/// `docs/superpowers/plans/2026-09-13-sync-lisp-clojure-plan.md`). A long call
-/// blocks Emacs's main loop for its whole duration — the caller must keep
-/// heavy/blocking work on the Clojure side's own threads.
+/// The main thread stays attached to the JVM across calls.  A Lisp signal or
+/// throw from a Lisp callback inside the call propagates as itself.  Signal
+/// `jvm-error' on any other failure.
 #[defun(mod_in_name = false, name = "jvm--call-direct")]
 fn jvm_call_direct<'e>(
     env: &'e Env,
@@ -159,6 +164,7 @@ fn jvm_call_direct<'e>(
     member: String,
     args: Value,
 ) -> Result<Value<'e>> {
+    // See `crate::jvm::invoke::call_direct` for the permanent attach.
     if crate::jvm::runtime::STATUS.get() != crate::protocol::Status::Ready {
         return env.signal(jvm_illegal_transition, (crate::jvm::runtime::STATUS.get().as_tag(),));
     }
@@ -168,23 +174,17 @@ fn jvm_call_direct<'e>(
     let target = parse_call_target(target)?;
     let args = lisp_list_to_args(args)?;
     let loader = crate::jvm::runtime::loader();
-    // Record this frame's `Env` so any Clojure -> Lisp callback made *during*
-    // the call runs directly on it (`lisp::runtime`/`jvm::entry`), rather than
-    // deadlocking on the async queue this blocked main thread cannot drain.
-    // Dropped when the call returns or unwinds.
+    // A Clojure-to-Lisp callback during the call must run on this `Env`. The async queue would
+    // deadlock, because this thread is the one that drains it.
     let _scope = crate::lisp::runtime::enter(env);
     match crate::jvm::invoke::call_direct(&vm, &loader, &target, &member, &args) {
         Ok(arg) => crate::lisp::convert::from_bridge(env, &arg),
-        // A Lisp signal/throw raised in a reentrant callback, unwound back up
-        // through Clojure: rebind its symbol/data (or tag/value) to this
-        // frame's `Env` and re-raise the *original* non-local exit, so the
-        // round trip is transparent to the Lisp caller. `signal`/`throw` always
-        // return `Err` (the non-local exit), which the defun trampoline turns
-        // back into a real Emacs signal/throw.
+        // A Lisp signal or throw from a reentrant callback. Re-raise the original non-local exit
+        // so the round trip is transparent to the Lisp caller.
         Err(crate::jvm::invoke::DirectError::NonLocalExit { kind, a, b }) => {
             let a = crate::lisp::convert::from_input(env, &a)?;
             let b = crate::lisp::convert::from_input(env, &b)?;
-            if kind == 0 {
+            if kind == crate::protocol::NON_LOCAL_EXIT_SIGNAL {
                 env.call("signal", (a, b))
             } else {
                 env.call("throw", (a, b))
@@ -194,51 +194,25 @@ fn jvm_call_direct<'e>(
     }
 }
 
-/// Drains the inbound queue (`lisp::inbox`) and runs each message's `Env`
-/// op on this (the main) thread — the module-primitive half of both the
-/// built-in-Lisp-access design (see design spec, "Request/reply flow") and
-/// every other JVM→Emacs message (`call-done`/`load-jar-done`/`invoke`/
-/// `release`/`status`/`log`). Set as the pipe process's `:filter`
-/// (`jvm--ensure-pipe-process`, `elisp/jvm.el`), so Emacs calls it directly
-/// as `(process output-string)`; both args are ignored — the raw wakeup
-/// byte (`lisp::inbox::submit`'s poke) carries no payload, since the actual
-/// message rides the Rust-side queue, not the wire.
+/// Run the messages that JVM threads queued for Emacs.
+/// This is the `:filter' of the wakeup pipe process.  Both arguments are
+/// ignored: the wakeup byte has no payload.
 #[defun(mod_in_name = false, name = "jvm--service-inbound")]
 fn jvm_service_inbound(env: &Env, _process: Value, _data: Value) -> Result<()> {
+    // The queue is `crate::lisp::inbox`.
     crate::lisp::inbox::service_inbound(env)
 }
 
-/// Replies to a pending JVM-initiated `invoke` request. VALUE is either the
-/// Lisp callback's return value (OK is `t`) or the real `(SYMBOL . DATA)`
-/// error cons `condition-case` caught (OK is `nil`), per `jvm--resolve-
-/// invoke`'s two call sites in `elisp/jvm.el`. Marshals either shape into a
-/// `LispOutcome` — a plain return value the same way an ordinary callback
-/// result always has (`lisp::convert::to_bridge`), or the real signal symbol/data
-/// via `lisp::convert::to_outcome` (the same classifier the Clojure
-/// apply path's `error_to_reply` uses) — and sends `Cmd::InvokeReply` to the
-/// worker thread, which resolves (or exceptionally completes, with a real
-/// `LispSignal`) the `CompletableFuture` `jvm::entry::lisp_function_call` handed
-/// back to Java — the reverse direction of `jvm--call`. Silently drops the
-/// reply (like every other `jvm::inbox::submit` caller in this file) if
-/// there's no running worker thread to receive it; there is nothing
-/// sensible to signal back to Java in that case, since the Java side is
-/// only ever blocked on its own future, not on this call succeeding.
+/// Reply to the JVM-initiated callback call ID.
+/// If OK is non-nil, VALUE is the callback's return value.  Otherwise VALUE
+/// is the (SYMBOL . DATA) that `condition-case' caught; it reaches Java as a
+/// `LispSignal'.
 #[defun(mod_in_name = false, name = "jvm--invoke-reply")]
 fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
-    // The `emacs` crate (0.21.0) has no `FromLisp` impl for `bool` (Emacs
-    // Lisp has no dedicated boolean type -- see `lisp::convert::to_bridge`'s
-    // own note on this same point), so OK is received as a raw `Value` and
-    // checked for Lisp truthiness directly, matching `jvm--invoke-reply`'s
-    // two call sites in `elisp/jvm.el`, which always pass literally
-    // `t` or `nil`.
+    // If no worker is running, the reply is dropped: the Java side waits only on its own future.
     let outcome = if ok.is_not_nil() {
         crate::protocol::LispOutcome::Value(crate::lisp::convert::to_bridge(value)?)
     } else {
-        // VALUE is the real `(SYMBOL . DATA)' condition-case caught --
-        // classify each half through the same `to_outcome' the
-        // Lisp-access apply path's `error_to_reply' uses, so a callback
-        // signal surfaces to Java as a real `LispSignal' carrying the
-        // actual symbol/data, not a fabricated `error'/stringified message.
         let symbol = value.car()?;
         let data = value.cdr()?;
         crate::protocol::LispOutcome::Signal {
@@ -250,11 +224,7 @@ fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
     Ok(())
 }
 
-/// Walks a Lisp list of arguments (as raw `Value`s, same pattern as the
-/// existing `string_list` helper) converting each to a `BridgeValue` by
-/// runtime type — see `lisp::convert::to_bridge`'s doc comment for what each
-/// Lisp type maps to, and what happens to a value this bridge doesn't
-/// recognize.
+/// Converts a Lisp list of arguments to [`BridgeValue`](crate::protocol::BridgeValue)s.
 fn lisp_list_to_args(mut list: Value) -> Result<Vec<crate::protocol::BridgeValue>> {
     let mut out = Vec::new();
     while list.is_not_nil() {
@@ -265,6 +235,7 @@ fn lisp_list_to_args(mut list: Value) -> Result<Vec<crate::protocol::BridgeValue
     Ok(out)
 }
 
+/// Make the worker thread panic.  Only for crash-handling tests.
 #[cfg(feature = "test-support")]
 #[defun(mod_in_name = false, name = "jvm--test-panic")]
 fn jvm_test_panic(env: &Env) -> Result<()> {
@@ -274,13 +245,8 @@ fn jvm_test_panic(env: &Env) -> Result<()> {
     }
 }
 
-/// Converts a Lisp list of strings into a `Vec<String>` by walking its cons
-/// cells. `emacs` 0.21 has no `FromLisp` impl for `Vec<T>` (`#[defun]`
-/// parameters must be scalar `FromLisp` types, `&Env`, or `Value`/its
-/// sub-types like `Vector` — verified against the compiler's own error and
-/// the crate source, which lists only scalar/`Value`/`Vector`/`GlobalRef`
-/// impls), so `classpath`/`options` are received as raw `Value` and
-/// converted here instead of directly as `Vec<String>` parameters.
+/// Converts a Lisp list of strings to a [`Vec<String>`]. `emacs` 0.21 has no
+/// [`FromLisp`](emacs::FromLisp) for [`Vec<T>`].
 fn string_list(mut list: Value) -> Result<Vec<String>> {
     let mut out = Vec::new();
     while list.is_not_nil() {

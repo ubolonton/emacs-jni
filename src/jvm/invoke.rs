@@ -1,30 +1,23 @@
-//! The reflection call machinery shared by the async worker call path and
-//! the synchronous `jvm--call-direct` reentrant path: resolving and
-//! invoking a method or constructor, and turning the outcome into a Java
-//! value or a thrown `LispSignal`/`LispThrow`.
+//! Reflective method and constructor calls, shared by the async worker path and the synchronous
+//! `jvm--call-direct` path. Also converts Lisp replies to Java values or thrown
+//! `LispSignal`/`LispThrow`.
 
 use std::sync::Arc;
 
 use jni::vm::JavaVM;
 
 use crate::jvm::convert::marshal_error;
+use crate::protocol::{NON_LOCAL_EXIT_SIGNAL, NON_LOCAL_EXIT_THROW};
 
-/// Builds the actual Java value a successful `LispOutcome` becomes —
-/// factored out of `handle_lisp_reply` since the `LispOutcome::Signal`/
-/// `Throw` cases (handled by that function's caller) never reach here.
-///
-/// `pub(crate)` because the reentrant direct path (`jvm::entry`) builds the same
-/// Java object on its own thread, from the `LispOutcome`
-/// `lisp::inbox::compute_reply` returns, instead of over the channel.
+/// Builds the Java value for a successful [`LispOutcome`](crate::protocol::LispOutcome). Panics on
+/// `Signal`/`Throw`: callers handle them first.
 pub(crate) fn build_lisp_reply_object<'local>(
     env: &mut jni::Env<'local>,
     value: crate::protocol::LispOutcome,
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
     match value {
         crate::protocol::LispOutcome::Value(bridge) => {
-            // Reuse the one Lisp->JVM marshaller against java.lang.Object,
-            // then box any primitive — identical to how handle_invoke_reply
-            // completes a callback's return value.
+            // Same conversion as a callback return value in `handle_invoke_reply`.
             let object_class = env.find_class(jni::jni_str!("java/lang/Object"))?;
             let jvalue = crate::jvm::convert::from_bridge(env, &bridge, &object_class)?;
             crate::jvm::convert::box_if_primitive(env, jvalue)
@@ -57,14 +50,9 @@ pub(crate) fn build_lisp_reply_object<'local>(
     }
 }
 
-/// Turns one `LispOutcome` into a Java result: a `Signal`/`Throw`
-/// completes FUTURE exceptionally with the matching `LispNonLocalExit`, and
-/// anything else completes it normally with its built object.
-///
-/// Shared by the async worker (`handle_lisp_reply`, completing a registered
-/// future) and the reentrant direct path (`jvm::entry`'s `applyAsync` fast path,
-/// completing a fresh, immediately-returned future) — Clojure's `apply`
-/// derefs that future either way, so both must produce the identical shape.
+/// Completes `future` with `value`: exceptionally with a `LispNonLocalExit` for `Signal`/`Throw`,
+/// normally otherwise. Used by both the async and the direct path, so Clojure's `apply` sees the
+/// same result.
 pub(crate) fn complete_future_with_reply<'local>(
     env: &mut jni::Env<'local>,
     future: &jni::objects::JObject<'local>,
@@ -72,7 +60,7 @@ pub(crate) fn complete_future_with_reply<'local>(
 ) -> jni::errors::Result<()> {
     match value {
         crate::protocol::LispOutcome::Signal { symbol, data } => {
-            let ex = build_non_local_exit(env, 0, *symbol, *data)?;
+            let ex = build_non_local_exit(env, NON_LOCAL_EXIT_SIGNAL, *symbol, *data)?;
             env.call_method(
                 future,
                 jni::jni_str!("completeExceptionally"),
@@ -81,7 +69,7 @@ pub(crate) fn complete_future_with_reply<'local>(
             )?;
         }
         crate::protocol::LispOutcome::Throw { tag, value } => {
-            let ex = build_non_local_exit(env, 1, *tag, *value)?;
+            let ex = build_non_local_exit(env, NON_LOCAL_EXIT_THROW, *tag, *value)?;
             env.call_method(
                 future,
                 jni::jni_str!("completeExceptionally"),
@@ -102,11 +90,8 @@ pub(crate) fn complete_future_with_reply<'local>(
     Ok(())
 }
 
-/// Builds an `emacs_jni.core.LispSignal(a, b)` (`kind == 0`) or
-/// `LispThrow(a, b)` (`kind == 1`) from two already-classified reply
-/// values — both still a `LispNonLocalExit`/`Throwable`, so the existing
-/// catch/rethrow sites (`describe_caught_java_exception`,
-/// `extract_non_local_exit`) keep matching by the shared base.
+/// Builds a `LispSignal` ([`NON_LOCAL_EXIT_SIGNAL`]) or `LispThrow` ([`NON_LOCAL_EXIT_THROW`])
+/// from two classified values: symbol/data or tag/value.
 fn build_non_local_exit<'local>(
     env: &mut jni::Env<'local>,
     kind: i32,
@@ -115,7 +100,7 @@ fn build_non_local_exit<'local>(
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
     let a_obj = build_lisp_reply_object(env, a)?;
     let b_obj = build_lisp_reply_object(env, b)?;
-    let class = if kind == 0 {
+    let class = if kind == NON_LOCAL_EXIT_SIGNAL {
         env.find_class(jni::jni_str!("emacs_jni/core/LispSignal"))?
     } else {
         env.find_class(jni::jni_str!("emacs_jni/core/LispThrow"))?
@@ -127,12 +112,10 @@ fn build_non_local_exit<'local>(
     )
 }
 
-/// Throws a `LispNonLocalExit` for a Lisp signal/throw raised in a reentrant
-/// direct-path native (`jvm::entry`'s synchronous natives), so it propagates up
-/// the Clojure stack exactly like the checked exception `block_on_lisp_reply`
-/// rethrows on the async path. Returns the `Error::JavaException` the caller
-/// hands back so the `native_method!` policy leaves this pending exception in
-/// place (rather than throwing a fresh `RuntimeException` over it).
+/// Throws a `LispNonLocalExit` from a direct-path native, so it propagates up the Clojure stack
+/// as on the async path. Returns [`Error::JavaException`](jni::errors::Error::JavaException), so
+/// that `native_method!` keeps this pending exception instead of throwing a `RuntimeException`
+/// over it.
 pub(crate) fn throw_non_local_exit(
     env: &mut jni::Env,
     kind: i32,
@@ -148,12 +131,9 @@ pub(crate) fn throw_non_local_exit(
     }
 }
 
-/// Handles a `Cmd::Call`: resolves TARGET.MEMBER reflectively and invokes
-/// it with ARGS, then enqueues an `Inbound::CallDone` with the result. Runs
-/// on its own short-lived thread (spawned by `jvm::inbox::run`'s `Cmd::Call`
-/// arm) — never inline on the worker's dispatch loop, per spec "Worker
-/// thread role": an arbitrary Java call can take a long time for reasons
-/// unrelated to callbacks, and must not stall other pending commands.
+/// Handles a [`Cmd::Call`](crate::jvm::inbox::Cmd::Call): invokes `target.member(args)`, then
+/// enqueues [`Inbound::CallDone`](crate::lisp::inbox::Inbound::CallDone). Runs on its own thread,
+/// so a slow Java call does not block the worker.
 pub(crate) fn handle_call(
     vm: &JavaVM,
     loader: Option<Arc<jni::refs::Global<jni::objects::JObject<'static>>>>,
@@ -185,14 +165,8 @@ pub(crate) fn handle_call(
     }
 }
 
-/// Resolves TARGET.MEMBER against the shared classloader and invokes it with
-/// ARGS on an already-attached thread, returning the marshalled result.
-///
-/// Shared by the async worker (`handle_call`, on a spawned thread) and the
-/// synchronous main-thread path (`call_direct`). Identical behaviour in both:
-/// the only differences are which thread runs it and what the caller does
-/// with the `BridgeValue` afterward (an `Inbound::CallDone` enqueue vs. a
-/// direct `Value`).
+/// Resolves `target.member` against the shared classloader and invokes it with `args`. The thread
+/// must be attached. Used by both [`handle_call`] and [`call_direct`].
 pub(crate) fn resolve_and_invoke(
     env: &mut jni::Env,
     loader: &Option<crate::jvm::runtime::SharedLoader>,
@@ -200,18 +174,9 @@ pub(crate) fn resolve_and_invoke(
     member: &str,
     args: &[crate::protocol::BridgeValue],
 ) -> jni::errors::Result<crate::protocol::BridgeValue> {
-    // A freshly attached thread's context classloader is null. Plain
-    // JNI class resolution (find_class/loadClass, used just below)
-    // doesn't need it, but Clojure's own namespace loader
-    // (clojure.lang.RT, used internally by `require`) does: it loads
-    // .clj source files as classpath *resources*, not classes, and
-    // that resolution path falls back through
-    // Thread.currentThread().getContextClassLoader(). Left null, the
-    // first touch of Clojure's runtime throws
-    // ExceptionInInitializerError before clojure.core even finishes
-    // loading — verified empirically during Phase 3's design spike
-    // (see docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md,
-    // "Feasibility"). Harmless for calls that never touch Clojure.
+    // Clojure's `RT` loads `.clj` files as resources through the context classloader, which is
+    // null on a newly attached thread. Without this, the first use of Clojure throws
+    // `ExceptionInInitializerError`.
     if let Some(global) = loader {
         let loader_local = env.new_local_ref(global.as_obj())?;
         let thread_class = env.find_class(jni::jni_str!("java/lang/Thread"))?;
@@ -234,23 +199,12 @@ pub(crate) fn resolve_and_invoke(
     let (class, instance): (jni::objects::JClass, Option<jni::objects::JObject>) = match target {
         crate::protocol::CallTarget::ClassName(name) => {
             let class = match loader {
-                // A jar has been loaded at least once: classes it
-                // provides only live in *this* classloader's URL list,
-                // not on the default `FindClass` search path (verified
-                // empirically in Task 7 — see `add_jar_url`'s own test,
-                // which resolves `Greeter` the same way, via
-                // `loadClass`, not `find_class`). Routing every
-                // class-name lookup through the shared loader once it
-                // exists still finds plain JDK classes too, since
-                // `URLClassLoader#loadClass` delegates to its parent
-                // (the platform loader) before consulting its own URLs.
+                // Jar classes are visible only through the shared loader, not `FindClass`. The
+                // loader delegates to its parent first, so JDK classes still resolve.
                 Some(global) => {
                     let loader_local = env.new_local_ref(global.as_obj())?;
                     resolve_class_via_loader(env, &loader_local, name)?
                 }
-                // No jar ever loaded: fall back to a plain `FindClass`,
-                // which covers plain JDK classes (e.g. "java.lang.Math")
-                // without needing a classloader object at all.
                 None => {
                     let internal_name = name.replace('.', "/");
                     env.find_class(jni::strings::JNIString::from(internal_name))?
@@ -272,48 +226,28 @@ pub(crate) fn resolve_and_invoke(
 }
 
 thread_local! {
-    /// Nesting depth of in-flight `call_direct` frames on this thread. Used
-    /// only to gate the reentrant-boundary outbound path
-    /// (`describe_caught_java_exception` classifies a `LispNonLocalExit` into
-    /// `PENDING_NLE` only when `> 0`, i.e. inside a direct call — never on the
-    /// async worker thread). It no longer drives detaching: the main thread
-    /// stays permanently attached, and non-main callers rely on the scoped
-    /// attach in `call_direct` to detach on return.
+    /// Nesting depth of [`call_direct`] frames on this thread. While it is `> 0`,
+    /// [`describe_caught_java_exception`] stores a `LispNonLocalExit` in [`PENDING_NLE`].
     static ATTACH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 
-    /// Side channel from `describe_caught_java_exception` back to
-    /// `call_direct`, for the outbound half of the reentrant boundary: a Lisp
-    /// signal/throw raised in a callback unwinds up through Clojure as a
-    /// `LispNonLocalExit`; when it reaches the top of a direct call
-    /// (`ATTACH_DEPTH > 0`) `describe` classifies its fields into this slot so
-    /// `call_direct` can re-raise the *original* signal/throw instead of a
-    /// generic `jvm-error`. A plain error can't carry them — `describe`'s
-    /// return type is fixed `jni::errors::Error`. Filled at the invoke error
-    /// site, taken (once) by the enclosing `call_direct`. Never touched on the
-    /// async worker thread (its `ATTACH_DEPTH` stays 0), so `handle_call` is
-    /// unchanged.
+    /// A `LispNonLocalExit` that reached the top of a [`call_direct`], so that [`call_direct`] can
+    /// re-raise the original signal/throw instead of `jvm-error`. Set by
+    /// [`describe_caught_java_exception`], which can only return a [`jni::errors::Error`].
     static PENDING_NLE: std::cell::RefCell<Option<DirectError>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Failure of a `call_direct`.
+/// Failure of a [`call_direct`].
 pub(crate) enum DirectError {
-    /// A Lisp non-local exit that unwound up through Clojure as a
-    /// `LispNonLocalExit`. `kind` is 0 (signal) or 1 (throw); `a`/`b` are the
-    /// already-classified symbol/data or tag/value, ready to rebind to the
-    /// caller's `Env` and re-raise via `(signal …)`/`(throw …)`.
+    /// A Lisp signal/throw that unwound through Clojure. `kind` is [`NON_LOCAL_EXIT_SIGNAL`] or
+    /// [`NON_LOCAL_EXIT_THROW`]; `a`/`b` are symbol/data or tag/value.
     NonLocalExit { kind: i32, a: crate::protocol::LispInput, b: crate::protocol::LispInput },
-    /// Any other JVM-side failure — surfaced as `jvm-error` with this message.
+    /// Any other failure. Signalled as `jvm-error`.
     Jni(jni::errors::Error),
 }
 
-/// Runs a synchronous TARGET.MEMBER call on the current (Emacs main) thread:
-/// attach to the shared JVM, resolve + invoke via `resolve_and_invoke`,
-/// return the marshalled result. The main thread stays permanently attached
-/// (for a stable thread identity); the per-call attach is scoped, so on any
-/// *other* thread it detaches on return (see the attach comments in the body).
-/// Called by the `jvm--call-direct` defun, which converts the `BridgeValue` to a
-/// real `Value` on the same thread's live `Env`.
+/// Runs `target.member(args)` synchronously on the current thread. The Emacs main thread attaches
+/// to the JVM permanently; other threads attach for this call only.
 pub(crate) fn call_direct(
     vm: &JavaVM,
     loader: &Option<crate::jvm::runtime::SharedLoader>,
@@ -322,21 +256,13 @@ pub(crate) fn call_direct(
     args: &[crate::protocol::BridgeValue],
 ) -> Result<crate::protocol::BridgeValue, DirectError> {
     ATTACH_DEPTH.with(|d| d.set(d.get() + 1));
-    // Clear any stale slot before this frame's invoke, so a `Some` seen after
-    // it can only be this frame's (each frame fills and takes its own).
+    // Clear a stale value, so a value after the invoke belongs to this frame.
     PENDING_NLE.with(|s| *s.borrow_mut() = None);
 
-    // Attach the Emacs main thread to the JVM *permanently*, once. A permanent
-    // attach installs a thread-local guard that keeps the thread attached
-    // until it terminates (or `jvm--stop` detaches it), so its
-    // `java.lang.Thread` peer — hence `Thread.currentThread()` identity and any
-    // thread-locals (Clojure dynamic bindings, `*ns*`) — stays stable across
-    // calls. The scoped attach below is then a cheap no-op on it (it does not
-    // own the attachment, so it never detaches on return). Only the main
-    // thread gets this: a direct call from any other thread (e.g. a
-    // `make-thread` Lisp thread) is never recorded as main, so its scoped
-    // attach owns the attachment and detaches on return — transient, no leaked
-    // attachment to block a later `destroy`.
+    // A permanent attach keeps the main thread's `java.lang.Thread` stable across calls, so
+    // `Thread.currentThread()` and thread-locals (Clojure dynamic bindings, `*ns*`) persist.
+    // Other threads (e.g. `make-thread`) are not attached here, so the scoped attach below
+    // detaches them on return, and `destroy` is not blocked.
     if crate::jvm::runtime::on_main_thread()
         && !crate::jvm::runtime::main_attached()
         && vm.attach_current_thread(|_env| Ok::<(), jni::errors::Error>(())).is_ok()
@@ -344,9 +270,6 @@ pub(crate) fn call_direct(
         crate::jvm::runtime::set_main_attached(true);
     }
 
-    // The actual invoke always goes through a *scoped* attach: a no-op on the
-    // permanently-attached main thread, an owning attach-and-detach on any
-    // other thread.
     let result = vm.attach_current_thread_for_scope(|env| {
         resolve_and_invoke(env, loader, target, member, args)
     });
@@ -354,17 +277,12 @@ pub(crate) fn call_direct(
     ATTACH_DEPTH.with(|d| d.set(d.get() - 1));
     match result {
         Ok(arg) => Ok(arg),
-        // A `LispNonLocalExit` reconstructed by `describe_caught_java_exception`
-        // takes precedence over its flattened message: re-raise the original
-        // signal/throw. Otherwise it's a genuine JVM failure → `jvm-error`.
+        // Re-raise a Lisp signal/throw as itself. Anything else is `jvm-error`.
         Err(e) => Err(PENDING_NLE.with(|s| s.borrow_mut().take()).unwrap_or(DirectError::Jni(e))),
     }
 }
 
-/// Resolves NAME (a dotted binary class name, e.g. `"java.lang.String"` or
-/// `"Calc"`) to a `Class` object via LOADER's public `loadClass` method —
-/// the same approach `add_jar_url`'s own test already uses to prove a
-/// jar-loaded class is reachable through this loader.
+/// Resolves `name`, a binary class name (e.g. `"java.lang.String"`), with `loader.loadClass`.
 fn resolve_class_via_loader<'local>(
     env: &mut jni::Env<'local>,
     loader: &jni::objects::JObject<'_>,
@@ -382,52 +300,26 @@ fn resolve_class_via_loader<'local>(
     env.cast_local::<jni::objects::JClass>(class_obj)
 }
 
-/// Renders an already-caught Java exception (the caller must `exception_catch()`
-/// it first — see below) as a readable message that includes the whole
-/// `getCause()` chain, not just the outermost exception.
+/// Describes a caught Java exception, including its whole `getCause()` chain.
 ///
-/// This matters specifically for `Method.invoke`/`Constructor.newInstance`:
-/// both always wrap whatever the *target* code actually threw in an
-/// `InvocationTargetException`, whose own `getMessage()` is normally
-/// `null` and whose own stack trace is just the two reflection frames
-/// where it was constructed — the actually useful information (e.g. a
-/// `LispNonLocalExit`'s message, for Task 7's callback round trip: `Calc.
-/// callWithArg`'s `future.get(...)` throws `ExecutionException`, itself
-/// wrapping the `LispNonLocalExit` `handle_invoke_reply` built) is one or more
-/// `getCause()` hops further down. Left to `JavaVM::attach_current_thread`'s
-/// own default exception handling (which auto-converts a still-pending
-/// exception into `Error::CaughtJavaException` using exactly that shallow
-/// info, once the whole `attach_current_thread` closure returns without
-/// having cleared it), the caller only ever sees something like `"<NULL>
-/// \nStack trace:\n0: ...DirectMethodHandleAccessor.invoke...\n1: ...
-/// Method.invoke...\n"` — true, but useless for diagnosing what actually
-/// went wrong (found empirically running this task's own ERT test: see
-/// task-7-report.md). Describing the exception here, immediately after the
-/// failing reflective call and before it can escape this function, lets the
-/// message include the real cause.
+/// `Method.invoke` and `Constructor.newInstance` wrap the target's exception in an
+/// `InvocationTargetException` with a null message. The default description shows only that
+/// wrapper, so the real cause is lost.
 ///
-/// Takes an already-caught exception rather than catching it itself: callers
-/// at the invoke sites (`invoke_method`/`invoke_constructor`) need to inspect
-/// the caught exception first (`is_overload_arg_mismatch`) to decide whether
-/// to fall through to the next overload candidate or describe-and-return, so
-/// the catch has to happen before this is called.
+/// The caller catches the exception, because it must first check [`is_overload_arg_mismatch`].
+///
+/// Inside [`call_direct`], also stores a `LispNonLocalExit` in the cause chain in
+/// [`PENDING_NLE`].
 fn describe_caught_java_exception(
     env: &mut jni::Env,
     caught: jni::errors::Error,
 ) -> jni::errors::Error {
     let jni::errors::Error::CaughtJavaException { name, msg, exception, .. } = caught else {
-        // `exception_catch` itself failed in some unexpected way (e.g.
-        // couldn't query the throwable's class/message) -- surface that
-        // failure as-is rather than losing it.
         return caught;
     };
 
-    // Outbound half of the reentrant boundary: only inside a direct call
-    // (`ATTACH_DEPTH > 0`, i.e. never on the async worker thread). If this
-    // exception is, or wraps, a `LispNonLocalExit`, stash its classified
-    // fields so the enclosing `call_direct` re-raises the original Lisp
-    // signal/throw. Best-effort — any failure here just falls through to the
-    // flattened message below (a `jvm-error`).
+    // Inside a direct call, keep a `LispNonLocalExit` so `call_direct` can re-raise it. On
+    // failure, fall through to the message.
     if ATTACH_DEPTH.with(|d| d.get()) > 0 {
         if let Ok(local) = env.new_local_ref(exception.as_obj()) {
             if let Ok(throwable) = env.cast_local::<jni::objects::JThrowable>(local) {
@@ -441,11 +333,7 @@ fn describe_caught_java_exception(
     let mut lines = vec![format!("{name}: {msg}")];
     if let Ok(local) = env.new_local_ref(exception.as_obj()) {
         if let Ok(mut current) = env.cast_local::<jni::objects::JThrowable>(local) {
-            // Bounded, not unconditional: ordinary `Throwable` construction
-            // can't produce a `getCause()` cycle (`initCause` rejects
-            // `cause == this`), but nothing guarantees some hostile/
-            // reflective subclass can't -- this is diagnostic code, not
-            // worth an unbounded loop over.
+            // Bounded: a hostile `Throwable` subclass could make a cause cycle.
             for _ in 0..10 {
                 let cause = match current.get_cause(env) {
                     Ok(c) => c,
@@ -471,14 +359,10 @@ fn describe_caught_java_exception(
     marshal_error(&lines.join("\n"))
 }
 
-/// True when CAUGHT is a bare `IllegalArgumentException` straight off
-/// `Method.invoke`/`Constructor.newInstance` — the JDK's own signal that ARGS
-/// didn't fit the candidate's declared parameter types (e.g. a `Str` argument
-/// marshalled fine as a `String` but the candidate actually wanted a `long`).
-/// A real exception thrown by the invoked method/constructor body always
-/// arrives wrapped in `InvocationTargetException` instead, so this can't
-/// mistake a genuine `IllegalArgumentException` thrown *by user code* for an
-/// overload mismatch — that one comes through with a different `name`.
+/// True if `caught` is a bare `IllegalArgumentException` from `Method.invoke` or
+/// `Constructor.newInstance`: the arguments do not fit the candidate's parameter types. An
+/// exception from the invoked code arrives as `InvocationTargetException`, so this does not match
+/// it.
 fn is_overload_arg_mismatch(caught: &jni::errors::Error) -> bool {
     matches!(
         caught,
@@ -487,21 +371,15 @@ fn is_overload_arg_mismatch(caught: &jni::errors::Error) -> bool {
     )
 }
 
-/// Walks THROWABLE's `getCause()` chain for an `emacs_jni.core.LispNonLocalExit`
-/// and, if found, classifies its `kind`/`symbolOrTag`/`dataOrValue` back into a
-/// `DirectError::NonLocalExit`. The two fields run through the same
-/// `jvm::convert::to_input` classifier the inbound direction built
-/// them with (`build_lisp_reply_object`), so the round trip is symmetric.
-/// `None` if no `LispNonLocalExit` is in the chain (a genuine Java/Clojure
-/// exception).
+/// Finds a `LispNonLocalExit` in the cause chain of `throwable` and converts it to
+/// [`DirectError::NonLocalExit`]. Returns `None` for any other exception.
 fn extract_non_local_exit<'local>(
     env: &mut jni::Env<'local>,
     throwable: jni::objects::JThrowable<'local>,
 ) -> jni::errors::Result<Option<DirectError>> {
     let nle_class = env.find_class(jni::jni_str!("emacs_jni/core/LispNonLocalExit"))?;
     let mut current = throwable;
-    // Bounded like `describe_caught_java_exception`'s own walk: a normal cause
-    // chain can't cycle, but this is recovery code, not worth an unbounded loop.
+    // Bounded, as in `describe_caught_java_exception`.
     for _ in 0..10 {
         if current.is_null() {
             break;
@@ -523,18 +401,11 @@ fn extract_non_local_exit<'local>(
     Ok(None)
 }
 
-/// Finds an overload of METHOD_NAME on CLASS whose parameter count matches
-/// ARGS, invokes it, and marshals the result. Ambiguous overloads (same
-/// name, same arg count, multiple candidates) are tried in whatever order
-/// `getMethods()` returns them: if marshalling ARGS against a candidate's
-/// declared parameter types fails (e.g. `foo(int)` and `foo(String)` both
-/// match on name and arity, but the actual argument is a string), that
-/// candidate is skipped and the next same-name/arity candidate is tried,
-/// rather than giving up immediately — see Finding 2 of the Phase 2
-/// whole-branch review. This is a fall-through, not a real overload-
-/// resolution algorithm (no assignability-based scoring of which candidate
-/// is the *best* fit) — acceptable for a prototype; a real algorithm is
-/// future work if this proves too coarse in practice.
+/// Invokes the first public `method_name` on `class` that accepts `args`, and marshals the result.
+/// `instance` is the receiver, or `None` for a static method. Candidates with the correct arity
+/// are tried in `getMethods()` order. A candidate is skipped when `args` do not marshal to its
+/// parameter types, or when `invoke` rejects them. There is no best-fit scoring; see
+/// `docs/explanation/limitations-and-tradeoffs.md`.
 fn invoke_method(
     env: &mut jni::Env<'_>,
     class: &jni::objects::JClass,
@@ -556,10 +427,7 @@ fn invoke_method(
     let null_receiver = jni::objects::JObject::null();
     let receiver = instance.unwrap_or(&null_receiver);
 
-    // Remembers the most recent invoke-time argument mismatch (a bare
-    // `IllegalArgumentException`, per `is_overload_arg_mismatch`) so the
-    // final "no method found" error can describe *why* the closest same-
-    // name/arity candidate didn't work, instead of a bare "not found".
+    // The last argument mismatch, for the "no method found" error.
     let mut last_arg_mismatch: Option<jni::errors::Error> = None;
 
     for i in 0..count {
@@ -589,12 +457,7 @@ fn invoke_method(
             continue;
         }
 
-        // A same-name/arity candidate whose declared parameter types ARGS
-        // doesn't actually fit (e.g. `foo(int)` vs. `foo(String)`) isn't a
-        // hard failure yet — another overload further down `getMethods()`'s
-        // list might still match. Move on to it instead of giving up here;
-        // only exhausting every same-name/arity candidate (the loop falling
-        // through below) is a real "no method found".
+        // `args` do not fit this candidate. Try the next one.
         let invoke_args = match build_invoke_args(env, &param_types, args) {
             Ok(a) => a,
             Err(_) => continue,
@@ -607,15 +470,8 @@ fn invoke_method(
             &[jni::objects::JValue::Object(receiver), jni::objects::JValue::Object(&invoke_args)],
         ) {
             Ok(v) => v.l()?,
-            // A bare `IllegalArgumentException` here means ARGS didn't fit
-            // THIS candidate's declared parameter types (marshalling alone
-            // can't catch every mismatch, e.g. `Str` fits any reference
-            // parameter type) — fall through to the next same-name/arity
-            // candidate instead of giving up. Anything else is a real
-            // failure (or the invoked method's own exception, always
-            // wrapped in `InvocationTargetException` — see
-            // `describe_caught_java_exception`'s doc comment): describe and
-            // return it.
+            // `args` do not fit this candidate. Try the next one. Any other exception is a real
+            // failure.
             Err(jni::errors::Error::JavaException) => match env.exception_catch() {
                 Ok(()) => {
                     return Err(marshal_error(
@@ -639,6 +495,8 @@ fn invoke_method(
     ))
 }
 
+/// Invokes the first public constructor of `class` that accepts `args`. Overloads are tried as
+/// in [`invoke_method`].
 fn invoke_constructor(
     env: &mut jni::Env<'_>,
     class: &jni::objects::JClass,
@@ -655,9 +513,7 @@ fn invoke_constructor(
     let constructors = env.cast_local::<jni::objects::JObjectArray>(constructors)?;
     let count = constructors.len(env)?;
 
-    // See `invoke_method`'s matching field: remembers the most recent
-    // invoke-time argument mismatch so the final "no constructor found"
-    // error can describe why, instead of a bare "not found".
+    // The last argument mismatch, for the "no constructor found" error.
     let mut last_arg_mismatch: Option<jni::errors::Error> = None;
 
     for i in 0..count {
@@ -675,9 +531,7 @@ fn invoke_constructor(
             continue;
         }
 
-        // See `invoke_method`'s matching comment: try the next same-arity
-        // constructor overload rather than giving up on the first one whose
-        // declared parameter types ARGS doesn't actually fit.
+        // `args` do not fit this candidate. Try the next one.
         let invoke_args = match build_invoke_args(env, &param_types, args) {
             Ok(a) => a,
             Err(_) => continue,
@@ -690,10 +544,8 @@ fn invoke_constructor(
             &[jni::objects::JValue::Object(&invoke_args)],
         ) {
             Ok(v) => v.l()?,
-            // See `invoke_method`'s matching arm: a bare
-            // `IllegalArgumentException` here means ARGS didn't fit THIS
-            // candidate's declared parameter types, so fall through to the
-            // next same-arity constructor instead of giving up.
+            // `args` do not fit this candidate. Try the next one. Any other exception is a real
+            // failure.
             Err(jni::errors::Error::JavaException) => match env.exception_catch() {
                 Ok(()) => {
                     return Err(marshal_error(
@@ -717,10 +569,8 @@ fn invoke_constructor(
     ))
 }
 
-/// Shared by `invoke_method`/`invoke_constructor`: marshals ARGS against
-/// PARAM_TYPES's declared types (in that order — `from_bridge` is
-/// type-directed) and boxes any primitive result, since `Method.invoke`/
-/// `Constructor.newInstance` both take a plain `Object[]`.
+/// Marshals `args` to `param_types` and boxes primitives, for `Method.invoke` and
+/// `Constructor.newInstance`.
 fn build_invoke_args<'local>(
     env: &mut jni::Env<'local>,
     param_types: &jni::objects::JObjectArray<'local>,

@@ -1,17 +1,25 @@
 package emacs_jni.core;
 
-// Wire form for a Lisp symbol or keyword crossing to/from Clojure. The real
-// clojure.lang.Symbol/Keyword live in the child URLClassLoader, unreachable
-// from a native method's or the worker thread's find_class, so this
-// platform-loader shim carries just the name plus a keyword flag; the
-// dev.ublt.emacs.clj namespace does the final (symbol name)/(keyword name)
-// construction and destructuring. `name` is the bare name -- no leading
-// ":" for a keyword. Constructed from Rust (jvm_thread::build_lisp_reply_object)
-// and from the namespace's arg marshalling; a pure data carrier, no natives.
+/**
+ * A Lisp symbol or keyword that crosses to or from Clojure.
+ *
+ * <p>{@code clojure.lang.Symbol} and {@code Keyword} are in the jar classloader, which Rust cannot
+ * reach. So this platform-loader class carries the name and a keyword flag, and the
+ * {@code emacs-jni.clj} namespace converts it.
+ */
 public final class LispSymbol {
+    /** The symbol name. A keyword name has no leading {@code :}. */
     public final String name;
+
+    /** {@code true} for a keyword. */
     public final boolean keyword;
 
+    /**
+     * Creates a symbol or keyword.
+     *
+     * @param name the name, with no leading {@code :}
+     * @param keyword {@code true} for a keyword
+     */
     public LispSymbol(String name, boolean keyword) {
         this.name = name;
         this.keyword = keyword;

@@ -1,207 +1,128 @@
 # Interop design
 
-This page discusses why `jvm-call`/`jvm-new` work the way they do. For
-argument and return-value facts, see the
-[Lisp API reference](../reference/lisp-api.md#argument-and-return-value-marshalling).
-For steps, see
-[How to call Java from Lisp](../how-to-guides/call-java-from-lisp.md).
+This page explains why values cross between Lisp and Java the way they do. For the marshalling
+rules, see the
+[Lisp API reference](../reference/lisp-api.md#argument-and-return-value-marshalling). For steps,
+see [How to call Java from Lisp](../how-to-guides/call-java-from-lisp.md).
 
 ## Why reflection, not generated bindings
 
-A common way to bridge two languages is to generate typed bindings
-ahead of time, from a schema, an IDL, or a scan of the target classes.
-emacs-jni does not do this. `jvm-call`/`jvm-new` dispatch entirely
-through Java reflection, at call time, on a class name and member name
-supplied as plain strings.
+Many language bridges generate typed bindings ahead of time, from a schema or a scan of the
+target classes. emacs-jni does not. `jvm-call` and `jvm-new` use Java reflection at call time.
+The class name and member name are plain strings.
 
-This choice trades compile-time safety for reach. There is no build
-step that needs to know your classpath ahead of time, no generated
-file to keep in sync, and no limit on which classes are callable — any
-class on the shared classloader is reachable the moment it is loaded.
-The cost is that a typo in a class or method name, or a mismatched
-argument type, only surfaces at call time, as a returned error rather
-than a compile failure. For a module meant to reach into whatever jar
-a user points it at — including Clojure and nREPL jars nobody
-generated bindings for — reach mattered more than compile-time
-checking.
+This trades compile-time checks for reach. No build step needs to know your classpath. No
+generated file can go out of date. Any class becomes callable as soon as its jar is loaded. This
+includes Clojure and nREPL, which have no bindings.
+
+The cost is that errors appear only at call time. A wrong class name, method name, or argument
+type signals `jvm-error`. A compiler does not catch it.
 
 ## Why marshalling is type-directed, not value-directed
 
-A Lisp integer can become a Java `int`, `long`, `float`, `double`, or a
-boxed `BigInteger`, depending on what the target parameter declares —
-see the reference's marshalling table. The alternative would be
-picking one fixed Java type per Lisp type (for example, every Lisp
-integer always becomes a `long`), and relying on Java's own numeric
-widening or autoboxing to bridge the rest.
+A Lisp integer can become a Java `int`, `short`, `byte`, `long`, `float`, `double`, or
+`BigInteger`. The declared type of the target parameter selects the Java type. An `Object`
+parameter gets a `Long`. The other design gives
+each Lisp type one fixed Java type, for example `long` for every integer. It then relies on Java
+widening and boxing for the rest.
 
-Type-directed marshalling was chosen because reflection already
-exposes the target parameter's declared type before the call happens,
-so consulting it costs nothing extra, and it lets a single Lisp
-integer literal call `addLong(long, long)` and `addBig(BigInteger,
-BigInteger)` without the caller doing anything different. The range
-check on `int`/`short`/`byte` targets — a value too large signals a
-marshalling error rather than silently truncating — follows the same
-reasoning as the type-directed design generally: catch a mismatch
-before it reaches Java as a wrong value, since a wrong value that
-compiles and runs is far harder to notice than a call that returns an
-error.
+emacs-jni uses the declared type for two reasons:
 
-Not every argument type gets the same treatment. Strings, wrapped JVM
-objects, and Lisp functions marshal to their one obvious Java shape
-regardless of the target parameter's declared type — there is no
-equivalent range check for them, since there is no equivalent question
-of which numeric width to pick. This is also why
-[overload resolution](limitations-and-tradeoffs.md#overload-resolution-only-partly-considers-argument-types)
-can behave differently for numeric arguments than for string or object
-arguments — the marshalling rules it depends on are not symmetric.
+- Reflection gives the declared parameter types before the call. So the lookup costs nothing
+  extra.
+- One Lisp integer can call both `addLong(long, long)` and `addBig(BigInteger, BigInteger)`. The
+  caller writes the same code for both.
 
-## Where a value converts, and why there is a middle form
+`int`, `short`, and `byte` targets get a range check. A value out of range fails marshalling. It
+does not wrap to a wrong value. A wrong value that runs is harder to find than an error.
 
-A value crossing between Lisp and the JVM passes through two converters,
-not one: a Lisp-side half that speaks a live `emacs::Value` and needs
-the main-thread `Env`, and a JVM-side half that speaks a JNI
-`jvalue`/`JObject`. Between them sits an owned, `Env`-free,
-JNI-frame-free carrier — `commands::BridgeValue` — that both halves
-understand. Four converters cover the base directions; a `jvm-call`'s
-arguments and a callback's return reuse the Lisp-to-JVM pair, and a
-`jvm-call`'s return and a callback's arguments reuse the JVM-to-Lisp
-pair:
+Only primitive types, `Object`, and `BigInteger` match a Lisp number. A boxed-number parameter,
+such as `java.lang.Long`, `Integer`, or `Double`, does not accept a Lisp number.
 
-- Lisp to JVM: `lisp_value_to_arg` reads the Lisp value, then
-  `lisp_arg_to_jvalue` builds the Java value.
-- JVM to Lisp: `jvm_value_to_lisp_arg` reads the Java value, then
-  `bridge_value_to_value` builds the Lisp value.
+Other Lisp types have one obvious Java form. Strings, wrapped JVM objects, symbols, and Lisp
+functions marshal the same way for any parameter type. So numeric arguments and other arguments
+behave differently in
+[overload resolution](limitations-and-tradeoffs.md#overload-resolution-only-partly-considers-argument-types).
 
-The Clojure layer adds a thin JVM-side wrapper on the same edge —
-`->lisp`/`->clj` in `emacs-jni.clj` map a Clojure symbol or keyword to
-and from a `LispSymbol` marker — and two direction-named enums,
-`LispInput` (into Lisp) and `LispOutcome` (out of Lisp), that compose
-`BridgeValue` rather than restate its scalar cases.
+## Why a Lisp function becomes a Java object
 
-The middle form is not decoration. The async path runs the JVM-side
-work on a different OS thread from Lisp, and a `JValueOwned` or
-`emacs::Value` cannot cross a thread — each is bound to a JNI local
-frame or to the main-thread `Env`. `BridgeValue` is the owned snapshot
-that can sit in the command queue between the two threads; objects
-reduce to a token there (see below), scalars inline.
+A Lisp function passed to `jvm-call` becomes a `LispFunction`. This Java class implements the
+`LispCallable` interface. Its `call` method returns a `CompletableFuture`, which completes when
+the Lisp function returns.
 
-The synchronous direct path (`jvm-call-direct`, and the Clojure calls
-it drives) is the exception. It runs on the main thread, where both the
-`Env` and an attached JNI env are live at once, so nothing crosses a
-thread. There the middle `BridgeValue` is a code-reuse choice — the
-same two converters serve both paths — not a requirement: a fused
-Lisp-value-to-`jvalue` conversion would also work, trading the saved
-intermediate for a second copy of the type-directed rules.
+Underneath, Lisp keeps the function in a table (`jvm--lisp-callbacks`), and Java gets an integer
+key. A bare integer would work, but Java code would then need a custom calling convention. The
+`LispFunction` class hides the key. So a Java method can declare a `LispCallable` parameter, for
+example `callWithArg(LispCallable fn, long n)`. It does not need an `Object` parameter and a
+cast.
 
-## Why a Lisp function becomes a real Java object
+Only a non-symbol function becomes a `LispFunction`: a lambda, closure, byte-code function, or
+built-in function. A symbol becomes a `LispSymbol`, even when it has a function definition. A
+symbol is data first. Clojure code opts in to calling a symbol with `require-symbol`.
 
-Passing a Lisp function into `jvm-call` wraps it as an instance of a
-small Java shim class (`LispCallable`, backing `LispFunction`),
-compiled once at build time and injected into the running JVM with
-`DefineClass` at `jvm-start`. Calling it from Java returns a
-`CompletableFuture`, which resolves once the Lisp side replies. Java
-code holds and calls this object exactly like any other Java object of
-that type — it does not need to know it is backed by Lisp.
-
-The alternative — handing Java a bare integer handle and a
-side-channel convention for "calling" it — was available, and is in
-fact roughly what happens underneath (`elisp/jvm.el`'s
-`jvm--lisp-callbacks` table, keyed by handle). The shim class exists to
-make that handle behave like a normal, type-correct Java object from
-the Java caller's point of view, so a method like
-`Calc.callWithArg(LispCallable fn, long n)` can declare its parameter
-type honestly, instead of taking `Object` and downcasting.
-
-`LispNonLocalExit` exists for the same reason, in the other direction:
-a Lisp `error` (or `throw`) signaled inside a callback needs to become
-something Java code can catch as a real exception, not a string it has
-to pattern-match. It is a plain `RuntimeException` carrying the
-signal/throw's symbol-or-tag and data-or-value, marshaled to Java the
-same way any other returned value is — a `LispSymbol` marker, a
-`LispObject`, or a boxed scalar. Its `LispSignal`/`LispThrow` subclasses
-add the typed `symbol`/`data` and `tag`/`value` fields. Plain Java (and
-`emacs-jni.clj`) code catches the subclass by type, or the base
-`LispNonLocalExit` for either; see
+`LispNonLocalExit` serves the other direction. A Lisp `signal` or `throw` in a callback must
+reach Java as an exception that Java code can catch by type. It must not be a string that Java
+code parses. `LispSignal` carries the signal symbol and data. `LispThrow` carries the catch tag
+and value. Both extend `LispNonLocalExit`. Their fields hold a `LispSymbol`, a `LispObject`, or a
+boxed scalar. They are not Clojure values. Use `emacs-jni.clj/->clj` to convert them. See
 [How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md#handle-a-lisp-error).
 
 ## Why a Lisp value becomes an opaque Java object
 
-The `emacs-jni.clj` namespace splits an `apply` result by type. A
-scalar or string — number, string, `t`, `nil` — converts to the
-matching Clojure value, the same way `jvm-call` marshals a Java scalar
-into a Lisp scalar. An interned Lisp symbol or keyword converts to a
-Clojure symbol or keyword. Every remaining value — a cons, a vector, a
-hash table, a buffer, an uninterned symbol — becomes a Java
-`LispObject`, an opaque handle.
+`emacs-jni.clj` sorts each Lisp value that it gets back by type:
 
-Marshalling those remaining values into Clojure data was a non-goal.
-Lisp's type universe (keymaps, buffers, markers, overlays, closures)
-does not map onto Clojure data in any single obvious way, and most of
-it is only meaningful back in Lisp anyway. So a `LispObject` stays
-opaque: you inspect it with `type-of`, `is-not-nil?`, `eq`, and
-`LispObject.prin1ToString`, and you pass it back into `apply` — you do
-not pull it apart on the Clojure side. Arguments going the other way
-follow the same split: a Clojure symbol or keyword interns to a Lisp
-symbol/keyword, a plain scalar converts to the matching Lisp value, and
-a `LispObject` passes through by reference — so `(apply '+ 1 2)` needs
-no manual wrapping. Converting in both directions means a Lisp
-predicate's `t`/`nil` lands as Clojure `true`/`nil`, and a returned
-symbol as a real Clojure symbol, both usable directly.
+- A number, string, `t`, or `nil` becomes the matching Clojure value. `t` becomes `true`.
+- An interned symbol or keyword becomes a Clojure symbol or keyword.
+- Any other value becomes a `LispObject`. Examples are a cons, vector, hash table, buffer, and
+  uninterned symbol.
 
-Symbols convert only when interned. Emacs symbol identity (`eq`) is by
-interning, so an interned symbol round-trips `eq`-stably — a Clojure
-symbol interns to the one Lisp symbol of that name, and back again —
-while an uninterned symbol (`make-symbol`/`gensym`) would lose its
-identity if flattened to a name, so it stays an opaque `LispObject`
-whose `GlobalRef` holds that exact symbol. Clojure symbols have no
-interned form of their own (only Clojure keywords are cached), so there
-is no matching case in the other direction.
+Rich marshalling of those other values was a non-goal. Lisp types such as keymaps, buffers,
+markers, and closures have no single obvious Clojure form. Most of them are useful only in Lisp.
+So a `LispObject` stays opaque. You inspect it with `type-of`, `is-not-nil?`, `eq`, and
+`prin1ToString`, and you pass it back to `apply`. You do not take it apart in Clojure.
 
-Underneath, a `LispObject` owns an `emacs::GlobalRef` — the `emacs`
-crate's mechanism for a Lisp value that outlives a single module call.
-The Java object holds a `long`, the boxed pointer to that `GlobalRef`,
-rather than the reference itself. This is not a threading shortcut: a
-Java field can hold only a primitive, and a `GlobalRef` can be
-dereferenced or freed only on the Emacs main thread with a live `Env`.
-Handing the Rust reference to Java directly is therefore impossible —
-Java has nothing to hold it in, and could not use it off the main
-thread if it did. The `long` is a token Java parks and hands back to a
-main-thread native, which is why every `LispObject` operation is
-serviced on the Emacs main thread (see
-[Architecture](architecture.md#why-clojure-calls-into-lisp-run-on-the-emacs-main-thread)).
-This mirrors the other object direction — a JVM object returned to Lisp,
-which Lisp holds as an opaque `user-ptr` wrapping an `Arc`-shared `Global`
-reference only the JVM side can use. Neither direction keeps a Rust-side
-lookup table: each token owns its reference directly. They differ only in
-what the token holds — a boxed `GlobalRef` pointer for a `LispObject`, an
-`Arc<Global>` for a JVM object — and which thread frees it: the Emacs main
-thread for a `LispObject`, the JVM worker thread for a JVM object.
+Arguments to `apply` follow the same rules in reverse. A Clojure symbol or keyword becomes a Lisp
+symbol or keyword. A scalar becomes the matching Lisp value. A `LispObject` passes through as the
+same Lisp value. So `(apply '+ 1 2)` needs no wrapping. A Lisp predicate's result works directly
+in a Clojure conditional.
 
-There is no Rust-side handle table for a `LispObject`: the pointer is
-the reference's sole owner, so its lifetime ends when the one Java
-object is collected. Correctness depends on exactly one `LispObject`
-holding a given pointer. `LispObject` is a `final` class with a `final
-ptr` and a package-private constructor, is neither `Cloneable` nor
-`Serializable`, and is built only from Rust — each crossing mints a
-fresh `GlobalRef`. So no two instances can share a pointer, and the
-free, driven by one `Cleaner` per instance, runs exactly once. A copy
-path or a reused pointer would double-free; those guardrails are
-load-bearing.
+### Symbols convert only when interned
+
+Lisp compares symbols with `eq`, and an interned symbol is the one symbol with its name. So an
+interned symbol can travel as its name and keep its identity. An uninterned symbol, from
+`make-symbol` or `gensym`, would lose its identity as a name. So it stays a `LispObject`, which
+holds that exact symbol.
+
+The reverse direction has no matching case. Clojure symbols are not interned, so every Clojure
+symbol converts by name.
+
+### Why a `LispObject` holds a number
+
+A Lisp value that outlives one module call needs a global reference in Emacs. Emacs allows code to
+read or free that reference only on the main thread. A JVM thread cannot use it.
+
+So the `LispObject` does not hold the Lisp value. It holds a `long` that identifies the global
+reference. Java only stores this number and gives it back to the module. The module turns it
+back into the Lisp value on the main thread. This is why every `LispObject` operation runs on the
+main thread. See
+[Architecture](architecture.md#why-clojure-calls-into-lisp-run-on-the-emacs-main-thread).
+
+Each `LispObject` owns its reference. When the JVM collects the `LispObject`, Emacs frees the
+reference once. Two `LispObject`s must never share one number, because the second free would
+corrupt memory. So `LispObject` is `final`, has no public constructor, and cannot be cloned or
+serialized. Only the module creates one, with a new reference each time.
+
+A wrapped JVM object is the mirror case. Lisp holds it, but only the JVM side can use the
+reference inside. The worker thread deletes that reference after Emacs collects the wrapper.
 
 ## The no-cycles assumption
 
-The bidirectional GC notification described in
-[Architecture](architecture.md#why-lisp-functions-and-jvm-objects-need-bidirectional-gc-notification)
-assumes the cross-runtime object graph has no cycles: a Lisp closure
-that captures a JVM object is fine, and a JVM object that holds a
-`LispCallable` or a `LispObject` is fine, but a cycle spanning both
-runtimes — where each side's collector can only see the other side as
-"still referenced" — would keep both objects alive forever, since
-neither garbage collector can trace through the other's heap.
+[Bidirectional GC notification](architecture.md#why-lisp-functions-and-jvm-objects-need-bidirectional-gc-notification)
+assumes that no reference cycle spans both runtimes. A Lisp closure that holds a JVM object is
+safe. A JVM object that holds a `LispCallable` or a `LispObject` is safe. A cycle through both
+heaps is not safe. Each collector sees the other side as a live reference, and neither collector
+can trace through the other heap. So neither object is ever freed.
 
-This is a deliberate scope boundary, not an oversight. Detecting or
-breaking cross-runtime cycles needs a distributed garbage collection
-scheme, which is a substantially larger design problem than this
-module set out to solve. In practice, most interop code calls into the
-other runtime and gets a result back, without building a permanent
-mutual reference — the kind of usage this module is built for.
+Cycle detection across two runtimes needs a distributed garbage collector. That is outside the
+scope of this module. Most interop code calls the other runtime and gets a result back. It does
+not build permanent references in both directions.

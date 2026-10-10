@@ -1,162 +1,151 @@
 # Architecture
 
-This page discusses how emacs-jni fits a JVM inside an Emacs process,
-and why it is built this way. For what each function does, see the
-[Lisp API reference](../reference/lisp-api.md). For steps, see the
-how-to guides.
+This page explains how emacs-jni puts a JVM inside the Emacs process, and why it has this
+shape. For what each function does, see the [Lisp API reference](../reference/lisp-api.md).
+For the Rust-level design, see [Implementation](implementation.md).
 
-## One worker thread owns the JVM
+## Two paths into the JVM
 
-A JVM, once created inside a process, expects a fairly stable
-relationship with the OS threads that touch it. Emacs's own Lisp
-execution model — mostly single-threaded, cooperative, with an event
-loop — does not fit a JVM well if every Lisp call has to reach into the
-JVM directly.
+emacs-jni gives Lisp two paths into the JVM: the direct path and the worker path. Bare names
+(`jvm-call`, `jvm-new`, `jvm-load-jar`, all `jvm-clj-*` functions) use the direct path.
 
-emacs-jni resolves this by giving the JVM to one dedicated OS thread,
-for the JVM's whole lifetime. That thread is created once, at
-`jvm-start`, and is the only thread that ever calls `JNI_CreateJavaVM`
-or the corresponding attach/detach calls for the JVM's main
-association. Lisp never touches the JVM directly. Instead, Lisp sends
-a command, and the worker thread does the JVM-side work.
+The **direct path** (`-direct`) runs the call on the main thread. The main thread attaches to
+the JVM on its first direct call and stays attached. So `Thread.currentThread()` stays the same
+across direct calls, and Java `ThreadLocal` values persist. Clojure's `*ns*` does not persist,
+because each eval binds it for that eval only. A direct call from another Lisp thread attaches for
+that call only.
 
-This buys a JVM lifecycle that is independent of Emacs's own threading
-quirks, at the cost of every operation needing a round trip through a
-channel instead of a direct function call. `jvm-status` is the one
-exception — it reads a local Lisp variable, not the worker thread, so
-it needs no round trip.
+A direct call has no thread hop and no queue, so it is the fastest path. Its cost is that it
+blocks Emacs until it returns. It holds the Emacs global lock, so it also blocks every other Lisp
+thread.
 
-## Two channels, two directions
+The **worker path** serves `-await` and `-async`. Lisp sends a command to the worker thread and
+returns at once. `-async` gives the result to a callback. `-await` waits for the result in an
+`accept-process-output` loop, with a timeout.
 
-Lisp talks to the worker thread through an `mpsc` command channel, on
-the Rust side. Each Lisp-facing primitive (`jvm--start`, `jvm--pause`,
-`jvm--call`, and so on) sends one command and returns immediately —
-this is why the plain (non-`-sync`) functions are async by default,
-not a fetched-in-later design choice.
+Both paths exist because they solve different problems. The direct path gives low latency and a
+stable JVM thread. The worker path keeps long Java work from freezing Emacs.
 
-The worker thread talks back through a typed inbound queue plus an
-Emacs pipe process. Every JVM-to-Emacs message — a finished call, a
-callback into a Lisp function, a `LispObject` free, a log line, a
-status transition, a Clojure `apply`/`intern`/`eq` request — is pushed
-onto the queue (`lisp_requests::Inbound`) as a typed Rust value. The
-pipe, backed by `Env::open_channel`, then carries one wakeup byte, with
-no payload. Its filter, the `jvm--service-inbound` module function,
-ignores the byte and drains the whole queue on the Emacs main thread,
-converting each message with a live `Env`.
+The worker thread also owns the JVM lifecycle. It creates the JVM at `jvm-start`, detaches from
+it at `jvm-pause`, and destroys it at `jvm-stop`. These lifecycle commands have no `-direct`
+form. Their bare names use `-await`.
 
-Two separate channels, rather than one bidirectional one, follows from
-which side can block. The worker thread can block on the `mpsc`
-channel between commands, with no ill effect. Lisp cannot block
-waiting on the JVM without freezing Emacs — so the worker-to-Lisp
-direction has to arrive as an event the existing Emacs process filter
-mechanism already knows how to schedule, not as a blocking read. The
-queue carries the data; the pipe only schedules the drain, so coalesced
-wakeups are harmless — each drain empties the queue.
+## How results return on the worker path
+
+Lisp cannot block on a read from the JVM, because a blocking read freezes Emacs. So results come
+back as an event that Emacs already knows how to schedule: output from a pipe process.
+
+Every message from the JVM side goes into one typed queue in the module. Examples are a finished
+call, a call into a Lisp function, a log line, a status change, and a Clojure request for a Lisp
+value. After each push, the sender writes one wakeup byte to the pipe. The byte has no payload.
+The pipe's process filter runs on the main thread and empties the whole queue.
+
+The queue carries the data, and the pipe only schedules the drain. So two wakeups that arrive
+together cause no problem, because one drain empties the queue. The filter runs when Emacs is
+idle, or inside the `accept-process-output` loop of an `-await` function.
 
 ## A call gets its own thread, not the worker thread
 
-Once the JVM exists, `jvm-call`/`jvm-new` do not run on the worker
-thread itself. Each call spawns a fresh OS thread, attaches it to the
-JVM, does the reflective call, and lets the thread finish. This keeps
-one slow or blocked call from stalling every other call in flight —
-the tradeoff is that each call needs its own JNI attach, and anything
-that depends on JVM-side thread-local state does not carry over from
-one call to the next.
+On the worker path, a `-async` or `-await` call does not run on the worker thread. The worker
+starts a new OS thread for each call. That thread attaches to the JVM, makes the reflective call,
+queues the result, and exits. So one slow call does not stop other calls, or lifecycle commands.
 
-That tradeoff is exactly what causes Clojure's `*ns*` to reset between
-separate `jvm-clj-eval-string-await` calls, and it is why the
-context-classloader fix (below) had to apply per spawned thread, not
-once at JVM start. See
-[Limitations and trade-offs](limitations-and-tradeoffs.md) for the
-practical consequence.
+This has three costs:
+
+- Each call pays for a thread start and a JNI attach.
+- Java `ThreadLocal` values do not persist from one call to the next.
+- A Rust panic in that thread is not caught. The `-await` caller gets `jvm-timeout`, with no
+  other diagnostic.
+
+See [Limitations and trade-offs](limitations-and-tradeoffs.md) for the consequences.
 
 ## Why jar loading goes through reflection
 
-JNI's `FindClass` resolves a class using the calling thread's defining
-classloader, not the JVM's system classloader. A class loaded from a
-jar added after JVM start is invisible to `FindClass` from an
-arbitrary attached thread. emacs-jni works around this with one shared
-`URLClassLoader`, and reaches every class — jar-loaded or not — through
-that loader's `loadClass` method, called reflectively, instead of
-`FindClass`. Every loaded jar shares this one loader, which is also
-why classes across separately loaded jars can already see each other.
+JNI's `FindClass` resolves a class through the classloader of the calling code. On a thread
+that JNI attached, that is the system classloader. A jar added after JVM start is not on the
+system classpath, so `FindClass` cannot see its classes.
 
-## Why a freshly spawned thread needed a context classloader fix
+So emacs-jni puts every loaded jar in one shared `URLClassLoader`. It adds each jar with
+`addURL`, through reflection, because that method is protected. It resolves class names with the
+loader's `loadClass` method, not `FindClass`. The loader asks its parent first, so JDK classes
+also resolve.
 
-A freshly attached JNI thread has a `null` context classloader.
-Ordinary reflective class resolution, as `jvm-call` already used
-everywhere, does not consult it. Clojure's own namespace loader does:
-loading a `.clj` source file happens through classpath *resource*
-resolution, which falls back through
-`Thread.currentThread().getContextClassLoader()`. Left `null`, the
-first Clojure `require` call failed with
-`ExceptionInInitializerError` before `clojure.core` itself finished
-loading.
+Both paths use the same loader. A class loaded through a direct call is the same class on the
+worker path. Because all jars share one loader, classes in one jar can see classes in another
+jar.
 
-The fix sets each spawned call-thread's context classloader to the
-shared `URLClassLoader`, once, right after attaching and before any
-reflective work. It is a cheap, one-time JNI call, and a no-op for
-calls that never touch Clojure. This was found empirically, during a
-pre-planning spike, not predicted from reading the JNI specification —
-see `docs/superpowers/specs/2026-09-02-clojure-nrepl-design.md`'s
-"Feasibility" section for how it was diagnosed.
+## Why each call sets the context classloader
+
+A thread that JNI attached has a `null` context classloader. Reflection through the shared loader
+does not need it. Clojure does: it loads `.clj` source files as classpath resources through the
+context classloader. With a `null` context classloader, the first use of Clojure fails with
+`ExceptionInInitializerError`.
+
+So, after the first jar load, each call sets the current thread's context classloader to the
+shared loader before it does reflective work. This applies on both paths. The cost is one extra
+JNI call per call.
 
 ## Why `-Xrs` is the default JVM option
 
-A JVM normally installs its own handlers for `SIGINT`, `SIGTERM`,
-`SIGHUP`, and `SIGQUIT`, to support `Runtime.addShutdownHook` and a
-`SIGQUIT` thread dump. Because the JVM lives inside Emacs's own
-process, those handlers would compete with Emacs's own signal
-handling — in particular, `C-g` could terminate Emacs outright instead
-of just interrupting the current command. `-Xrs` stops the JVM from
-installing those handlers at all. `jvm-stop` still runs shutdown hooks
-correctly with `-Xrs` set, because it tears the JVM down through the
-JNI API directly, not through a signal.
+A JVM usually installs handlers for `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT`. Inside
+the Emacs process, these handlers compete with the handlers of Emacs. For example, `C-g` can
+kill Emacs instead of stopping the current command. `-Xrs` stops the JVM from installing these
+handlers.
+
+The cost is that the JVM's signal features do not work, for example a thread dump on `SIGQUIT`.
+Remove `-Xrs` from `jvm-options` only if you need them.
 
 ## Why Clojure calls into Lisp run on the Emacs main thread
 
-When Clojure holds a Lisp value (via `emacs-jni.clj`, see
-[Interop design](interop-design.md#why-a-lisp-value-becomes-an-opaque-java-object)),
-every operation on it — `intern`, `apply`, `type-of`, `eq`,
-`prin1-to-string` — is an Emacs `Env` call. An `Env` is only valid on
-the Emacs main thread, during a module call. The JVM thread the Clojure
-code runs on has no `Env`.
+Clojure code can hold and use Lisp values through `emacs-jni.clj`. The operations are `apply`,
+`intern`, `type-of`, `eq`, `is-not-nil?`, and `LispObject.prin1ToString`. Each one reads or
+creates Lisp values. Emacs allows that only on the main thread, during a module call. A JVM
+thread cannot do it.
 
-So those operations do not run on the JVM thread. The JVM thread
-enqueues the request on the same inbound queue every JVM-to-Emacs
-message uses, pokes the worker-to-Lisp pipe with a wakeup byte, and
-blocks. Emacs services the queue on its main thread — one
-`jvm--service-inbound` drain handles this request together with any
-other queued message — the next time it pumps that pipe, either while
-idle, or inside an `-await` wrapper's own `accept-process-output` loop. That
-second case is what makes these calls reentrant: a Clojure call that
-reaches back into Lisp from inside a `jvm-clj-eval-string-await` is
-serviced by the very `accept-process-output` loop that is already
-blocked waiting for that `eval` to finish.
+What happens depends on the thread that runs the Clojure code:
 
-The cost is that a synchronous Clojure-to-Lisp call cannot complete
-while Emacs is busy in a long, uninterrupted Lisp computation — it
-waits until Emacs is free again. A per-call timeout bounds that wait.
-See [Limitations and trade-offs](limitations-and-tradeoffs.md#a-synchronous-clojure-to-lisp-call-waits-for-emacs-to-be-free).
+- **Inside a direct call.** The Clojure code runs on the main thread, inside the module call of
+  `jvm-call-direct`. The request runs at once, on that thread. It uses no queue, so it cannot
+  deadlock.
+- **On any other thread.** Examples are an `-await` call thread, an nREPL thread, or a thread that
+  Clojure starts. The request goes into the queue, and the JVM thread waits. Emacs runs the
+  request when it next drains the queue: when idle, or inside an `-await` wait loop.
+
+The queue cannot serve a direct call. During a direct call, the main thread runs the Java code,
+so it cannot drain the queue. A queued request would wait for a drain that cannot happen. So the
+direct path runs the request at once, inside the direct call.
+
+A queued request waits until Emacs is free. `intern`, `type-of`, `eq`, `is-not-nil?`, and
+`prin1ToString` wait up to 30 seconds. `apply` and the callables from `require-symbol`,
+`require-function`, `refer-symbols`, and `refer-functions` wait with no timeout. See
+[Limitations and trade-offs](limitations-and-tradeoffs.md).
+
+A call to a `LispFunction` (a Lisp function passed to Java) follows the same rules. It returns a
+`CompletableFuture`. On the main thread inside a direct call, the Lisp function runs at once, and
+the future is already complete. On any other thread, the call goes through the queue. If a direct
+call waits for that thread, the wait ends only at the Java timeout, or never if it has none.
+
+A Lisp `signal` or `throw` in such a request reaches Java as a `LispSignal` or `LispThrow`. If it
+unwinds back out of a `jvm-call-direct`, Lisp gets the original signal or throw again.
 
 ## Why Lisp functions and JVM objects need bidirectional GC notification
 
-A Lisp function passed into a `jvm-call` becomes a real Java object (a
-`LispCallable`/`LispFunction` proxy, from the shim classes described in
-[Interop design](interop-design.md)). A JVM object returned to Lisp
-becomes a wrapped Lisp value (a `user-ptr`). A Lisp value held by
-Clojure becomes a third kind of wrapper — a Java `LispObject`, backed
-by an `emacs::GlobalRef` the JVM object owns. Each of these is a live
-reference the other runtime's garbage collector cannot see on its own.
+Three kinds of object cross between the two runtimes:
 
-Every direction notifies the other side on collection. A JVM-side
-`Cleaner` sends a `release` message when a `LispFunction` proxy is
-collected. Emacs's own GC, running on a `JvmHandle` user-ptr, sends a
-release the other way. And a `Cleaner` on a collected `LispObject`
-enqueues a request to free its `GlobalRef` — which, like every other
-`GlobalRef` operation, happens back on the Emacs main thread. Without
-this, the object graph on either side would keep the other side's
-memory alive indefinitely, or would only release it when the whole JVM
-stops. This design assumes the cross-runtime object graph has no
-cycles — see [Interop design](interop-design.md) for what that
-assumption costs.
+- A Lisp function passed to Java becomes a `LispFunction`.
+- A JVM object returned to Lisp becomes a wrapped JVM object.
+- A Lisp value held by Clojure becomes a `LispObject`.
+
+Each one keeps an object alive in the other runtime. Neither garbage collector can see into the
+other heap. So each wrapper tells the other side when its collector frees it:
+
+- When the JVM collects a `LispFunction`, a `Cleaner` tells Emacs to remove the Lisp function from
+  its callback table.
+- When Emacs collects a wrapped JVM object, the module deletes its JVM reference on the worker
+  thread.
+- When the JVM collects a `LispObject`, a `Cleaner` queues a request to free the Lisp value. The
+  main thread frees it, because only the main thread can.
+
+Without these notifications, each side would keep the other side's objects alive until the JVM
+stops. This design assumes that no reference cycle spans both runtimes. See
+[Interop design](interop-design.md#the-no-cycles-assumption).

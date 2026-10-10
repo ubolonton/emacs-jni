@@ -1,235 +1,298 @@
 # Limitations and trade-offs
 
-This page discusses why emacs-jni's known limitations exist, and what
-each one costs. For the bare facts, see the
-[Lisp API reference](../reference/lisp-api.md). For workarounds, see
-the relevant how-to guide.
+This page is the single list of known limitations. Each entry states what happens, why, and the
+workaround. For signatures and defaults, see the [Lisp API reference](../reference/lisp-api.md).
+For the design behind the call paths, see [Architecture](architecture.md).
 
-## `jvm-stop` is best-effort, and restart-in-process is unsupported
+## JVM lifecycle
 
-`jvm-stop` tears the JVM down through `JNI_DestroyJavaVM`. Some JVM
-builds handle this call unreliably — a JVM is not designed with the
-expectation that an embedding host will ask it to shut down and then
-keep running itself. Rather than have `jvm-stop` hang indefinitely
-waiting for a guarantee the JVM specification does not make, both
-`stopped` and `stop-failed` count as "the operation finished." So a
-caller has to treat `jvm-stop` as a best-effort request, not a promise.
+### One JVM per Emacs process
 
-Restarting after a stop, in the same process, is **not supported**. The
-JVM does not support re-initialization once a process has destroyed one.
-After a `jvm-stop`, a later `jvm-start` typically hands back a
-non-functional "zombie" VM: it accepts the create/attach calls but fails
-any real JNI work — the first `jvm-load-jar` or `jvm-call` on it errors
-with `"JNI call failed"`. This is a JVM/JNI limitation, independent of
-which thread runs the teardown; no arrangement in this module works
-around it. A fresh Emacs process is the only reliable reset. To release
-JVM resources temporarily and resume later in the same session, use
-`jvm-pause` instead of `jvm-stop`.
+An Emacs process can embed one JVM. All Lisp packages in that process share it, and they share
+one classloader.
 
-## One JVM per Emacs process
+Why: JNI and the HotSpot JVM support one JVM per process.
 
-This is a JNI-level constraint, not a choice this project made. A
-process can create one `JavaVM` through `JNI_CreateJavaVM` in the
-straightforward case this module relies on. Running two independent
-embedded JVMs inside one Emacs process is not something emacs-jni
-chose not to support — it is not something JNI supports.
+Workaround: to get a second, independent JVM, run a second Emacs process.
 
-## No per-jar unload
+### A stopped JVM cannot restart in the same process
 
-Every jar you load goes into one shared `URLClassLoader` — see
-[Architecture](architecture.md#why-jar-loading-goes-through-reflection).
-A `URLClassLoader` has no operation to selectively unload one jar
-while leaving others loaded. Giving each jar its own classloader would
-make unloading possible, at the cost of jars no longer transparently
-seeing each other's classes, and of every reflective call needing to
-pick the right classloader instead of always using the one shared one.
-This project chose the simpler, single-classloader model, and accepted
-losing per-jar unload as a consequence.
+`jvm-stop` destroys the JVM. Its status becomes `stopped` or `stop-failed`. Both values mean
+that the operation finished. A later `jvm-start` gives a JVM that does not work. It typically
+reports `ready`, and then the first `jvm-load-jar` or `jvm-call` fails with `JNI call failed`.
 
-## A restart after a crash or stop does not fully recreate the JVM
+Why: the JVM cannot initialize again in a process that destroyed one. Also, see the
+[next entry](#a-restart-after-a-crash-or-stop-does-not-fully-recreate-the-jvm).
 
-The `jni` crate, at the version this project pins (0.22.4), caches the
-`JavaVM` pointer internally in a process-global `OnceLock`, once
-`JNI_CreateJavaVM` has succeeded once. A `jvm-start` after a crash or a
-`jvm-stop` transparently reuses that same cached pointer rather than
-performing a genuine reattachment or recreation. This was discovered
-by reading `jni`'s implementation, not predicted from its public
-API — see the comment above `create_jvm` in `src/jvm_thread.rs`. The
-same root cause makes `cargo test --lib`'s default parallel test mode
-flaky, when two test modules race to be the first to call
-`JavaVM::new()`. Running with `--test-threads=1` avoids the race.
+Workaround: to pause the JVM and resume it later in the same process, use `jvm-pause`, not
+`jvm-stop`. To reset the JVM, start a new Emacs process.
 
-## Overload resolution only partly considers argument types
+### A restart after a crash or stop does not fully recreate the JVM
 
-When two Java methods share a name and an argument count, `jvm-call`
-picks the first same-arity candidate reflection returns that both
-marshals and invokes without an argument mismatch. It falls through to
-the next candidate on either failure: marshalling the parameters fails,
-*or* `Method.invoke`/`Constructor.newInstance` throws a bare
-`IllegalArgumentException` — the JDK's own signal that the marshalled
-arguments did not fit the declared parameter types (for example a
-string that marshalled fine as `Object` but the candidate wanted
-`long`). A real exception from the method body always arrives wrapped
-in `InvocationTargetException`, so genuine user-code errors are not
-mistaken for a mismatch and do not trigger fall-through.
+The `jni` crate keeps the first JVM it creates for the life of the process. A later `jvm-start`
+gets that same JVM again. It does not create a new one.
 
-This is still not the algorithm the Java compiler uses at compile time,
-which considers assignability and specificity across the whole
-candidate set at once. When more than one same-arity overload would
-accept the arguments, `jvm-call` takes whichever `getMethods()` returns
-first, not the most specific one. Implementing full resolution against
-a method set known only at call time through reflection is a
-substantially bigger piece of work than this module currently does. See
-[Interop design](interop-design.md#why-marshalling-is-type-directed-not-value-directed)
-for why the numeric and non-numeric marshalling cases are not
-symmetric to begin with.
+- After a crash (status `crashed`), the JVM is still alive. `jvm-start` starts a new worker
+  thread on it. Classes, loaded jars, and Java objects from before the crash remain.
+- After `jvm-stop`, the JVM is destroyed. `jvm-start` gets the destroyed JVM. See
+  [the entry above](#a-stopped-jvm-cannot-restart-in-the-same-process).
+- In both cases, the JVM ignores new values of `jvm-classpath` and `jvm-options`.
 
-## A panic inside a call's spawned thread vanishes silently
+Why: this is how the `jni` crate stores the JVM. The module has no other way to reach the JVM.
 
-Each `jvm-call`/`jvm-new` runs on its own freshly spawned OS thread —
-see [Architecture](architecture.md#a-call-gets-its-own-thread-not-the-worker-thread).
-That thread is spawned with no `catch_unwind` and is never joined. A
-panic inside it prints Rust's default panic message to stderr and
-otherwise disappears — the corresponding `-sync` caller in Lisp simply
-hangs until its timeout, with no more specific diagnostic. Unlike the
-limitations above, this one is not a considered trade-off. It is a
-known gap this project has not yet closed.
+Workaround: to change JVM options or get a clean JVM, start a new Emacs process.
 
-## A failed callback registration can leak
+### No per-jar unload
 
-Passing a Lisp function into `jvm-call` registers it in a Lisp-side
-table before the corresponding Java-side proxy object is confirmed to
-exist — registration has to happen first, since the handle it produces
-is what gets sent to Java as part of the call. If the call then fails
-before that proxy is actually constructed (for example, because the
-target class does not exist), the registration is never cleaned up,
-since the cleanup path is the proxy's own eventual garbage collection,
-and a proxy that was never constructed is never collected. Reordering
-this — confirming success before registering — would need the Java
-side to hand back a real proxy reference before the call it is an
-argument to has even happened, which the current call shape does not
-support. See
-[How to pass a Lisp function to Java](../how-to-guides/pass-a-lisp-function-to-java.md#avoid-a-callback-table-leak)
-for the practical impact.
+You cannot unload one jar. A loaded jar stays loaded until the process ends.
 
-## The GC-notification path has no automated test
+Why: all jars go into one shared `URLClassLoader`. `URLClassLoader` has no operation to remove
+one jar. One shared loader lets every jar see the classes of the other jars.
 
-Bidirectional GC notification (see
-[Architecture](architecture.md#why-lisp-functions-and-jvm-objects-need-bidirectional-gc-notification))
-depends on a real garbage-collection event happening on each side.
-Triggering one deterministically, inside a short-lived `emacs --batch`
-test process, is the obstacle — neither Emacs's nor the JVM's collector
-promises to run on demand within a bounded window. This path has been
-manually verified, but not automated. The same holds for the third
-wrapper, a collected `LispObject` freeing its `GlobalRef`: it depends
-on a JVM garbage-collection event, so it is documented and manually
-checked, not asserted by a test.
+Workaround: start a new Emacs process.
 
-## `jvm-call`/`jvm-new` trust the caller completely
+## Calls from Lisp to Java
 
-Reflective dispatch on a Lisp-supplied class name and method name has
-no access restriction: any Lisp caller can invoke any method on any
-loaded class, including something like `Runtime.exec`. This is an
-accepted assumption, not an oversight — Lisp code running inside Emacs
-already has unrestricted access to Emacs and the local machine through
-ordinary Elisp, so restricting what it can reach through the JVM would
-not change the actual security boundary, only add friction to using
-it.
+### Overload resolution only partly considers argument types
 
-## `*ns*` does not persist across separate Clojure eval calls
+`jvm-call` and `jvm-new` try each method or constructor with the correct name and argument
+count. They try them in the order that `getMethods()` returns. They skip a candidate if an
+argument does not marshal to its parameter type, or if `invoke` throws a bare
+`IllegalArgumentException`. The first candidate that succeeds wins. Specificity has no effect.
 
-Because each `jvm-clj-eval-string-await` call runs on its own freshly
-spawned thread, and Clojure's current-namespace pointer is
-thread-local, a namespace switch made by `(in-ns ...)` in one call is
-invisible to the next call — that call runs on a different thread,
-which sees Clojure's root namespace binding, not whatever the previous
-thread set. Pinning every Clojure eval call to one fixed, dedicated
-thread would fix this, at the cost of losing the concurrency and
-isolation the per-call thread model buys everywhere else. This project
-chose not to special-case Clojure eval calls that way. The nREPL
-server does not share this limitation: once started, it manages its
-own session and thread state internally, independent of the per-call
-dispatch model that everything else in this module uses. See
-[How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md#switch-namespaces-across-calls)
-for the workaround.
+The order of `getMethods()` is not specified. Thus a numeric argument can select an unexpected
+overload:
 
-The direct counterpart, `jvm-clj-eval-string-direct`, does *not* have
-this limitation: it runs on the Emacs main thread, which stays permanently
-attached to the JVM across calls, so `*ns*` and other thread-locals set by
-one direct eval persist into the next. The trade-off is the opposite one —
-it blocks Emacs for the whole eval (see below) and offers no concurrency.
+```elisp
+(jvm-call "java.lang.String" "valueOf" '(42))
+;; => "42.0"  (a float or double overload won, not int)
+```
 
-## A synchronous Clojure-to-Lisp call waits for Emacs to be free
+A choice between a numeric and a non-numeric type is deterministic. For example, with a `long`
+overload and a `String` overload, a Lisp integer cannot marshal to `String`, so `long` wins.
 
-Every `emacs-jni.clj` call — `intern`, `apply`, `type-of`, and so
-on — runs on the Emacs main thread, because it operates on Lisp values
-through an `Env` that is only valid there. The JVM thread that made the
-call blocks until Emacs services it, which happens the next time Emacs
-pumps the worker-to-Lisp pipe: while idle, or inside a `-sync`
-wrapper's `accept-process-output` loop. See
-[Architecture](architecture.md#why-clojure-calls-into-lisp-run-on-the-emacs-main-thread).
+Why: the module finds methods through reflection at call time. It does not use the overload
+algorithm of the Java compiler.
 
-The consequence is that such a call cannot complete while Emacs is busy
-in a long, uninterrupted Lisp computation — it waits until Emacs
-returns to its event loop. This is inherent to Emacs's single-threaded
-execution model, not a choice this module made; a per-call timeout
-bounds the wait rather than letting a stalled call hang forever.
+Workaround: call a method that has one overload for that argument count, or write a small Java
+or Clojure wrapper. See [How to call Java from Lisp](../how-to-guides/call-java-from-lisp.md).
 
-## `jvm-call-direct` blocks Emacs while it runs
+### Boxed-number parameters do not accept Lisp numbers
 
-`jvm-call-direct` runs the whole call on the Emacs main thread (attach,
-execute, return). While it runs, Emacs's main loop is frozen — so keep
-any heavy or blocking work on Clojure's own threads and return promptly.
-This holds even from a `make-thread` Lisp thread: a direct call blocking
-in the JVM holds Emacs's global thread lock the whole time (no module API
-releases it), so it freezes every Lisp thread, not just its own — a
-`make-thread` cannot run a blocking direct call "in the background".
+A Lisp integer does not marshal to a `java.lang.Long`, `Integer`, `Short`, or `Byte` parameter.
+A Lisp float does not marshal to a `java.lang.Double` or `Float` parameter. The call skips that
+candidate. If no other candidate fits, the call fails. Lisp numbers match only primitive types,
+`Object`, and `BigInteger`.
 
-The main thread stays permanently attached to the JVM across direct calls,
-so its `Thread.currentThread()` identity and thread-locals are stable (see
-`jvm-clj-eval-string-direct` above). `jvm-stop`, which runs on the main
-thread, detaches it before shutdown so `DestroyJavaVM` does not block on it.
-`DestroyJavaVM` is unreliable in-process regardless, so `jvm-stop` is
-best-effort either way — the design does not contort the call path to avoid
-non-daemon attachments. A direct call from any *other* thread uses a scoped
-attach that detaches on return, so it leaves no attachment behind.
+Why: marshalling uses the declared parameter type. It has no rule for the boxed number types.
 
-A Lisp signal or throw raised in a same-thread callback *during* the call
-propagates through Clojure as a `LispNonLocalExit` and is reconstructed at
-the boundary as the original `(signal …)`/`(throw …)`, so an enclosing
-`condition-case`/`catch` sees the real symbol and data. A genuine Clojure
-or Java exception (with no `LispNonLocalExit` in its cause chain) still
-surfaces as a `jvm-error` carrying the flattened message.
+Workaround: call a method that takes a primitive or `Object` parameter. Or write a small Java or
+Clojure wrapper that takes a primitive and calls the target method.
 
-## Lisp values held by Clojure are opaque
+### A Java `char` result is a wrapped JVM object
 
-Scalars, strings, and interned symbols/keywords from `apply` convert to
-Clojure values, but any other Lisp value that Clojure holds through
-`emacs-jni.clj` — a cons, vector, hash table, buffer, or an
-uninterned symbol — is a `LispObject`, an opaque handle, not marshalled
-Clojure data. You can inspect it (`type-of`, `is-not-nil?`, `eq`,
-`prin1-to-string`) and pass it back into `apply`, but you cannot pull
-its structure apart on the Clojure side. Marshalling those remaining
-Lisp values into Clojure data was a non-goal, for the same reason the
-reverse (rich Clojure-to-Lisp marshalling of vectors and maps) is:
-neither type universe maps onto the other in a single obvious way. See
-[Interop design](interop-design.md#why-a-lisp-value-becomes-an-opaque-java-object).
+A method that returns `char` or `Character` gives Lisp a wrapped JVM object, not an integer or
+a string.
 
-A `LispObject`'s underlying Lisp value stays alive only as long as the
-`LispObject` is reachable on the JVM side; a cross-runtime reference
-cycle through one would leak, the same as any other cross-runtime cycle
-(see [Interop design](interop-design.md#the-no-cycles-assumption)).
+Why: `Method.invoke` boxes each primitive result. `Character` is not a `Number`, so no numeric
+conversion applies to it.
 
-## The nREPL server ships unhardened
+Workaround: call `toString` on the result to get a one-character string:
 
-`jvm-clj-nrepl-start` uses nREPL's own defaults: loopback-only usage
-assumed, no authentication, no TLS, no middleware selection. Anyone
-who can reach the port can evaluate arbitrary code with the
-permissions of the Emacs process. Hardening an nREPL server —
-authentication, TLS, middleware choices — is an application-level
-decision with several reasonable answers depending on deployment, and
-this module deliberately did not pick one on the caller's behalf. It
-hands back the same `nrepl.server/start-server` primitive a hardened
-setup would build on, reachable directly through `jvm-call` if the
-defaults are not enough. See
-[How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md#restrict-who-can-connect).
+```elisp
+(let* ((builder (jvm-new "java.lang.StringBuilder" '("abc")))
+       (ch (jvm-call builder "charAt" '(0))))   ; a wrapped JVM object
+  (jvm-call ch "toString" nil))
+;; => "a"
+```
+
+### `jvm-call` trusts the caller
+
+`jvm-call` and `jvm-new` can call any public method on any class that the JVM can load. This
+includes methods such as `Runtime.exec`. There is no access control.
+
+Why: Lisp code in Emacs already has full access to Emacs and to the local machine. An access
+control on the JVM side does not change that boundary.
+
+Workaround: do not pass class or method names from untrusted input.
+
+### A panic in an async call thread is lost
+
+Each `-async` or `-await` call runs on a new OS thread. If the module code panics on that thread,
+the panic message goes to stderr, and nothing reports it to Lisp. An `-await` caller signals
+`jvm-timeout` when its TIMEOUT expires. An `-async` callback is never called.
+
+Why: the module does not catch panics on that thread and does not wait for the thread to end.
+
+Workaround: for `-async` calls, use your own timer if you must detect a lost result.
+
+## Lisp functions passed to Java
+
+### A failed call can leak a callback-table entry
+
+When Lisp passes a Lisp function to Java, Lisp first adds the function to a table. The JVM
+removes the entry later, when it collects the `LispFunction` for that entry. If the call fails
+before the JVM makes the `LispFunction`, the entry stays in the table. Examples: the class does
+not exist, no method has that name and argument count, or a later argument cannot marshal. Each
+failed attempt adds one entry, also for the same function value.
+
+Why: the table entry must exist before the call, because the JVM receives the entry's key as
+part of the call.
+
+Workaround: do not retry a failing call with a Lisp-function argument in a loop.
+
+### A `LispFunction` lives only while Java holds it
+
+A `LispFunction` works while the JVM can reach it. When the JVM collects it, Lisp removes the
+function from its table. Each call that passes a Lisp function makes a new `LispFunction`, also
+for the same function value. Thus two passes give two different Java objects.
+
+When overload resolution tries more than one candidate, each candidate gets its own
+`LispFunction` for the same table entry. When the JVM collects the `LispFunction` of a rejected
+candidate, Lisp removes the shared entry. After that, a call through the `LispFunction` that the
+chosen method keeps fails with `no such callback handle`.
+
+Why: the JVM garbage collector controls the lifetime of each `LispFunction`. Its cleanup removes
+the table entry and does not know about other `LispFunction` objects.
+
+Workaround: if Java keeps a Lisp function after the call returns, pass it to a method that has
+one overload for that argument count.
+
+### A `LispFunction` called from another thread blocks during a direct call
+
+Inside a `jvm-call-direct`, a `LispFunction.call` on the main thread runs the Lisp function
+immediately. The returned future is already complete. A call from another JVM thread puts the
+request in the queue that Emacs drains on the main thread. If the direct call waits for that
+thread, the wait ends only when the Java timeout expires. A wait with no timeout blocks Emacs
+permanently.
+
+Why: Emacs drains the queue only when the main thread is free. During a direct call, the main
+thread runs the Java code.
+
+Workaround: call a Java method that waits for a `LispFunction` result from another thread with
+`jvm-call-await` or `jvm-call-async`.
+
+## Clojure
+
+### `*ns*` resets after every eval, and `ThreadLocal` values persist only on the direct path
+
+A change to `*ns*` (for example from `in-ns`) does not reach the next `jvm-clj-eval-string` call.
+This applies to the direct path and to `-await`. The same applies to a `set!` on
+`*warn-on-reflection*`, `*unchecked-math*`, or `*data-readers*`.
+
+Why: each eval calls `load-string`. `load-string` binds `*ns*` and other compiler vars for that
+eval, and removes the bindings when it returns. A `binding` form is also scoped to its eval.
+
+Java `ThreadLocal` values persist across direct calls on the main thread. The main thread
+attaches to the JVM once and stays attached. `-await` and `-async` calls run on a new JVM thread
+each time, so `ThreadLocal` values do not persist there. A direct call from another Lisp thread
+attaches for that call only, so they do not persist there either.
+
+Workaround: put the `in-ns` form and the code in the same code string. See
+[How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md).
+
+### A synchronous Clojure-to-Lisp call waits for Emacs to be free
+
+The functions of `emacs-jni.clj` (`apply`, `intern`, `type-of`, `eq`, `is-not-nil?`), the
+callables from `require-symbol`, `require-function`, `refer-symbols`, and `refer-functions`, and
+`LispObject.prin1ToString` use Lisp values. Lisp values are available only on the main thread.
+
+- On the thread that runs a `jvm-call-direct`, the request runs immediately on that thread.
+- On other JVM threads (async call threads, nREPL threads, Clojure futures), the request goes
+  into a queue. Emacs runs it when it next drains the queue: when it is idle, or inside an
+  `-await` wait loop. The JVM thread waits for the reply.
+
+While Emacs runs a long Lisp computation or a direct call, the queued request waits:
+
+| Operation | Maximum wait off the main thread |
+|---|---|
+| `intern`, `type-of`, `is-not-nil?`, `eq`, `prin1ToString` | 30 s, then `TimeoutException` |
+| `apply`, and the `require-*`/`refer-*` callables | No timeout |
+
+A `LispFunction.call` follows the same rules. See [A `LispFunction` called from another
+thread blocks during a direct
+call](#a-lispfunction-called-from-another-thread-blocks-during-a-direct-call).
+
+Do not let a direct call wait for another JVM thread that calls Lisp. The main thread cannot
+drain the queue during the direct call, so both threads wait.
+
+Why: Emacs runs Lisp on one thread. Only the main thread can read and change Lisp values.
+
+Workaround: use `apply-async` when the JVM thread must not block. Keep Lisp work on the main
+thread short. See [How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md).
+
+### Lisp values held by Clojure are opaque
+
+Integers, floats, strings, `nil`, `t`, and interned symbols and keywords convert to Clojure
+values. Each other Lisp value is a `LispObject`. Examples are a cons, a vector, a hash table, a
+buffer, and an uninterned symbol. Clojure cannot read the structure of a `LispObject`. It can
+inspect it with `type-of`, `is-not-nil?`, `eq`, and `str` (which calls `prin1ToString`), and it
+can pass it back to `apply`.
+
+In the other direction, a Clojure vector or map returns to Lisp as a wrapped JVM object.
+
+Why: the two type systems do not map onto each other in one clear way. See
+[Interop design](interop-design.md).
+
+Workaround: apply a Lisp function that returns a scalar or a string, for example `car`,
+`length`, or `prin1-to-string`.
+
+### `LispSignal` and `LispThrow` fields are not Clojure values
+
+The `symbol` and `data` fields of a `LispSignal`, and the `tag` and `value` fields of a
+`LispThrow`, are not converted to Clojure values. Each one holds a `LispSymbol`, a `LispObject`,
+or a boxed scalar.
+
+Why: Java code creates these exceptions, so their fields use the Java-side types.
+
+Workaround: convert a field with `emacs-jni.clj/->clj`, for example `(l/->clj (.-symbol e))`.
+
+### A `LispObject` keeps its Lisp value alive, and cycles leak
+
+A `LispObject` keeps its Lisp value alive until the JVM collects the `LispObject`. Then Emacs
+frees the value the next time it drains the queue. A reference cycle that crosses the two
+runtimes is never collected. For example, a Lisp value holds a wrapped JVM object, and that
+Java object holds a `LispObject` for the same Lisp value.
+
+Why: each garbage collector sees only its own heap. Neither one can see a cycle through the
+other.
+
+Workaround: break the cycle by hand. For example, set the Java field to `null` when you no
+longer need the value.
+
+### The nREPL server has no authentication or TLS
+
+`jvm-clj-nrepl-start` starts an nREPL server with no authentication and no TLS. By default it
+listens on `127.0.0.1`. Each process that can connect to the port can run any code with the
+permissions of the Emacs process. On loopback, this includes other local users.
+
+Why: the correct security setup depends on the deployment. `jvm-clj-nrepl-start` does not choose
+one for the caller.
+
+Workaround: keep the default loopback address on a single-user machine. For TLS or other
+options, call `nrepl.server/start-server` yourself through `jvm-call`. See
+[How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md).
+
+## Blocking
+
+### `jvm-call-direct` blocks Emacs while it runs
+
+A direct call runs on the calling Lisp thread and holds the Emacs global lock until it returns.
+All Lisp threads stop during that time. This is also true for a direct call from a `make-thread`
+thread. Thus `make-thread` cannot run a blocking direct call in the background.
+
+Why: the Emacs module API has no way to release the global lock.
+
+Workaround: use `jvm-call-await` or `jvm-call-async` for slow calls. Or start the slow work on a
+Clojure or Java thread and return immediately.
+
+## Testing
+
+### The garbage-collection paths have no automated test
+
+Three cleanups depend on garbage collection. Emacs releases a wrapped JVM object. The JVM
+releases a `LispFunction` table entry. The JVM frees the Lisp value of a `LispObject`. No
+automated test covers these paths.
+
+Why: neither garbage collector runs on demand within a known time in a short `emacs --batch`
+process.

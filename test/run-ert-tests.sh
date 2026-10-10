@@ -3,9 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# jni-rs's `invocation` feature locates libjvm.so via JAVA_HOME (or `java`
-# on PATH) at runtime. Export it here so tests that create a real JVM don't
-# depend on every invoking shell already having it set.
+# jni-rs finds libjvm.so through JAVA_HOME.
 if [ -z "${JAVA_HOME:-}" ] && command -v mise >/dev/null 2>&1; then
     export JAVA_HOME="$(mise where java)"
 fi
@@ -15,13 +13,8 @@ javac -d target/test-fixtures test/fixtures/Greeter.java
 jar cf target/test-fixtures/greeter.jar -C target/test-fixtures Greeter.class
 export EMACS_JNI_GREETER_JAR="$(pwd)/target/test-fixtures/greeter.jar"
 
-# `cargo build` (via build.rs) compiles the emacs_jni.core.{LispCallable,
-# LispFunction,LispNonLocalExit} shim classes into target/emacs-jni-shim-classes.
-# Calc.java references emacs_jni.core.LispCallable (isLispCallable, added in
-# Task 6), so it must be compiled against that output — meaning this must
-# run before compiling Calc.java, not after, and Calc's javac invocation
-# needs that directory on its classpath explicitly (rather than relying on
-# javac's default classpath, which wouldn't include it).
+# Build first: Calc.java uses the shim classes that build.rs compiles into
+# target/emacs-jni-shim-classes.
 CARGO_FEATURES="${EMACS_JNI_TEST_FEATURES:-}"
 if [ -n "$CARGO_FEATURES" ]; then
     cargo build --features "$CARGO_FEATURES"
@@ -37,11 +30,7 @@ export EMACS_JNI_MODULE_PATH="$(pwd)/target/debug/libemacs_jni.so"
 TEST_FILES=("$@")
 if [ ${#TEST_FILES[@]} -eq 0 ]; then
     TEST_FILES=(test/*.el)
-    # test/jvm-crash-test.el calls `jvm--test-panic', which only exists when
-    # built with `--features test-support'. Without that feature the default
-    # build lacks the defun, so auto-discovery would always fail on this one
-    # file with an opaque void-function error; skip it here instead, with a
-    # note on how to run it explicitly.
+    # jvm-crash-test.el needs `jvm--test-panic', from `--features test-support'.
     if ! [[ "$CARGO_FEATURES" =~ (^|[,[:space:]])test-support($|[,[:space:]]) ]]; then
         FILTERED_TEST_FILES=()
         for f in "${TEST_FILES[@]}"; do
@@ -55,11 +44,8 @@ if [ ${#TEST_FILES[@]} -eq 0 ]; then
     fi
 fi
 
-# Each test file gets its own `emacs --batch` process: the embedded JVM and
-# Rust's STATUS static are both per-process singletons that persist for the
-# life of one Emacs process, so test files that each expect a fresh
-# not-started JVM would otherwise collide if loaded together into one
-# process.
+# One Emacs process per file: the JVM and the Rust status are per-process
+# singletons.
 overall_status=0
 for f in "${TEST_FILES[@]}"; do
     echo "=== $f ==="

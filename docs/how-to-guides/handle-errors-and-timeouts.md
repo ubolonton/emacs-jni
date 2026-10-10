@@ -1,16 +1,10 @@
 # How to handle errors and timeouts
 
-This module reports failure two different ways, depending on which
-variant you call: the synchronous forms signal a Lisp condition, the
-asynchronous form reports to its callback. This guide shows both. Full
-condition names are in the
+The bare (`-direct`) and `-await` functions signal a Lisp condition on failure. The `-async`
+functions send the failure to their callback. For all condition names, see the
 [Lisp API reference](../reference/lisp-api.md#error-conditions).
 
-## Catch a failure from a synchronous call
-
-The synchronous forms — the bare name (`-direct`) and the `-await`
-variant — return the value on success and signal a Lisp condition on
-failure. Catch it the normal way:
+## Catch a failure from a blocking call
 
 ```elisp
 (condition-case err
@@ -19,25 +13,24 @@ failure. Catch it the normal way:
    (message "call failed: %s" (cadr err))))
 ```
 
-`jvm-error` carries a descriptive string: the underlying Java
-exception's message and cause chain if the failure was on the Java
-side, a Clojure exception's message, or a marshalling error if a Lisp
-argument did not fit the target Java type.
+The `jvm-error` data is a message string. It contains one of these:
 
-## The conditions you might see
+- The Java exception message and its cause chain.
+- The Clojure exception message.
+- `no method NAME with N argument(s) found`, if no candidate accepts the Lisp arguments.
 
-- `jvm-error` — a Java/Clojure call failed. From the `-direct` and
-  `-await` forms of `jvm-call`/`jvm-new`/`jvm-load-jar` and the
-  `jvm-clj-*` functions.
-- `jvm-timeout` — an `-await` call did not finish before its timeout.
-- `jvm-invalid-argument` — a Lisp argument to `jvm-call`/`jvm-new` has
-  no marshalling rule at all (e.g. a vector). Signaled up front, for
-  every variant, before the call is dispatched.
-- `jvm-illegal-transition` — `jvm-start`/`jvm-pause`/`jvm-stop`, or a
-  `-direct` call with no running JVM, invoked from a status that does
-  not allow it.
+## Catch each condition
 
-Catch several at once the normal way:
+| Condition | When |
+|---|---|
+| `jvm-error` | A Java or Clojure call, or a jar load, failed. |
+| `jvm-timeout` | An `-await` call did not complete before its timeout. |
+| `jvm-invalid-argument` | An argument has no marshalling rule, for example a vector. |
+| `jvm-illegal-transition` | The JVM status does not allow the operation. |
+
+`jvm-invalid-argument` occurs before the call starts, for all variants. `jvm-illegal-transition`
+occurs for `jvm-start`, `jvm-pause`, and `jvm-stop` from a wrong status. It also occurs for a
+call or a jar load when the JVM is not `ready`.
 
 ```elisp
 (condition-case err
@@ -47,12 +40,10 @@ Catch several at once the normal way:
   (jvm-invalid-argument (message "bad argument: %S" err)))
 ```
 
-## Handle a failure from an asynchronous call
+## Handle a failure from an async call
 
-The `-async` forms do not signal — they report to their callback. The
-callback receives `(OK RESULT ERR)` (`(OK ERR)` for
-`jvm-load-jar-async`); check `OK`, and read the `ERR` string when it is
-nil:
+The callback receives `(OK RESULT ERR)`. For `jvm-load-jar-async`, it receives `(OK ERR)`. If
+`OK` is `nil`, `ERR` is the message string.
 
 ```elisp
 (jvm-call-async "Calc" "addLong" (list 2 3)
@@ -62,34 +53,28 @@ nil:
                     (message "call failed: %s" err))))
 ```
 
-(An unmarshallable argument still signals `jvm-invalid-argument`
-synchronously, from the `jvm-call-async` call itself, before any
-callback.)
+An argument with no marshalling rule signals `jvm-invalid-argument` from `jvm-call-async`. The
+callback does not run.
 
-## Give a call more time before it times out
+## Give a call more time
 
-Only the `-await` (and `-async`) forms take a timeout; it is the last
-argument, in seconds, and defaults to 30. The bare `-direct` call runs
-to completion with no timeout.
+Use the `-await` variant. Its last argument is the timeout in seconds. The default is 30.
 
 ```elisp
 (jvm-call-await "SlowClass" "slowMethod" nil 120)
 ```
 
-## Tell a Java exception apart from a marshalling failure
+The bare (`-direct`) and `-async` functions take no timeout.
 
-Both arrive the same way — a string carried by `jvm-error` (or in the
-`-async` callback's `ERR`). There is no separate condition for "the
-Java method threw" versus "an argument that had a rule did not fit."
-Read the string: a marshalling failure names the offending argument and
-the expected type; a Java exception carries the exception's own class
-name and message. A Lisp value with no rule at all is the exception —
-it signals `jvm-invalid-argument` up front instead.
+## Tell a Java exception from a marshalling failure
 
-## Handle an error raised inside a Lisp callback
+Both use `jvm-error`, or `ERR` in an `-async` callback. Read the message:
+
+- A marshalling failure gives `no method NAME with N argument(s) found`, or
+  `no constructor with N argument(s) found`. The message does not name the parameter type.
+- A Java exception contains one `CLASS: MESSAGE` line for each exception in its cause chain.
+
+## Handle an error in a Lisp callback
 
 See
-[How to pass a Lisp function to Java](pass-a-lisp-function-to-java.md#signal-an-error-from-inside-a-callback).
-An `error` signaled inside a Lisp function passed to Java propagates to
-the Java caller as a real exception on that side, not a hang or a
-dropped call.
+[How to pass a Lisp function to Java](pass-a-lisp-function-to-java.md#signal-an-error-from-a-callback).

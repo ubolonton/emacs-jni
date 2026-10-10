@@ -1,9 +1,8 @@
 # How to run an nREPL server
 
-This guide assumes the JVM is `ready` and the Clojure and nREPL jars
-are already loaded. See
-[Evaluate Clojure and connect an nREPL client](../tutorials/02-evaluate-clojure-and-connect-nrepl.md)
-for the setup steps.
+This guide assumes that `jvm-clj-classpath` contains the Clojure and nREPL jars. See
+[Start the Clojure side](access-lisp-from-clojure.md#start-the-clojure-side).
+`jvm-clj-nrepl-start` calls `jvm-clj-start` for you.
 
 ## Start a server on a specific port
 
@@ -12,90 +11,74 @@ for the setup steps.
 ;; => (7888 . #<user-ptr ...>)
 ```
 
-`jvm-clj-nrepl-start` returns `(ACTUAL-PORT . SERVER)`, and signals
-`jvm-error` on failure. Keep the whole `my-nrepl` value: you need
-`SERVER` later, to stop the server.
+`jvm-clj-nrepl-start` returns `(ACTUAL-PORT . SERVER)`. It signals `jvm-error` on failure. Keep
+the value. You need `SERVER` to stop the server.
 
-## Let the OS pick a free port
+## Let the OS select a free port
 
 ```elisp
 (setq my-nrepl (jvm-clj-nrepl-start))
 ;; => (54321 . #<user-ptr ...>)
-```
 
-Calling `jvm-clj-nrepl-start` with no argument passes port `0`, which
-means "any free port." Read the real port back from the `car`:
-
-```elisp
 (car my-nrepl)
 ;; => 54321
 ```
 
+Without a port argument, the server uses port `0`. The OS then selects a free port.
+
 ## Bind to a routable interface
 
-By default the server binds loopback (`127.0.0.1`) only — nREPL's own
-default. A loopback-only server is unreachable through VM or container
-port forwarding: the forward delivers the connection to a routable
-interface (the guest's `eth0`, say), not to the guest's `127.0.0.1`, so
-the connection is refused and the client sees an empty `clone` response
-("Could not open new session").
-
-Pass a bind address as the second argument to listen beyond loopback:
+The server binds only to loopback (`127.0.0.1`) by default. VM or container port forwarding cannot
+reach a loopback-only server. To listen on other interfaces, give a bind address as the second
+argument:
 
 ```elisp
 (setq my-nrepl (jvm-clj-nrepl-start 8000 "0.0.0.0"))
 ;; => (8000 . #<user-ptr ...>)
 ```
 
-`"0.0.0.0"` listens on every interface; a specific address narrows it.
-Read [Restrict who can connect](#restrict-who-can-connect) before
-binding beyond loopback.
+`"0.0.0.0"` listens on all interfaces. A specific address listens on that interface only. Read
+[Restrict who can connect](#restrict-who-can-connect) first.
 
 ## Connect a client
 
-Any bencode-speaking nREPL client works: `lein repl :connect
-localhost:PORT`, a `clj`-based client, an editor's built-in nREPL
-client, or a raw socket. See
-[the tutorial's connection step](../tutorials/02-evaluate-clojure-and-connect-nrepl.md#step-6-connect-from-a-separate-process)
-for a minimal `nc`-based example that needs no extra tooling.
+Use any nREPL client, for example `lein repl :connect localhost:PORT` or the nREPL client of your
+editor. For a minimal `nc` example, see
+[the tutorial](../tutorials/02-evaluate-clojure-and-connect-nrepl.md#step-6-connect-from-a-separate-process).
 
 ## Stop the server
 
 ```elisp
 (jvm-clj-nrepl-stop (cdr my-nrepl))
-;; => nil
+;; => #<user-ptr ...>
 ```
 
-`(cdr my-nrepl)` pulls `SERVER` out of the value `jvm-clj-nrepl-start`
-returned.
+`(cdr my-nrepl)` is the `SERVER` value from `jvm-clj-nrepl-start`.
 
-## Worker-thread and timeout variants
+## Set a timeout
 
-`jvm-clj-nrepl-start` and `jvm-clj-nrepl-stop` are the direct
-(main-thread) forms. An `-await` variant of each
-(`jvm-clj-nrepl-start-await`, `jvm-clj-nrepl-stop-await`) runs the
-start/stop on the JVM worker instead and takes a trailing `timeout`;
-both return the same `(ACTUAL-PORT . SERVER)` / result value and signal
-`jvm-error` on failure.
+Use `jvm-clj-nrepl-start-await` and `jvm-clj-nrepl-stop-await`. These run on the worker thread.
+Their last argument is the timeout in seconds:
 
-## Reach Emacs Lisp from connected clients
+```elisp
+(setq my-nrepl (jvm-clj-nrepl-start-await 7888 nil 60))
+(jvm-clj-nrepl-stop-await (cdr my-nrepl) 60)
+```
 
-`jvm-clj-nrepl-start` (from `jvm-clj.el`) loads `emacs-jni.clj` before
-it starts the server, so a connected nREPL client reaches Emacs Lisp
-through that namespace out of the box. See
-[How to access Emacs Lisp from Clojure](access-lisp-from-clojure.md).
+## Use Lisp from an nREPL client
+
+`jvm-clj-nrepl-start` loads `emacs-jni.clj` before it starts the server. A client can use it
+immediately. See [How to access Emacs Lisp from Clojure](access-lisp-from-clojure.md).
 
 ## Restrict who can connect
 
-`jvm-clj-nrepl-start` uses nREPL's defaults throughout: loopback bind,
-no authentication, no TLS, no middleware configuration. Anyone who can
-reach the port can evaluate arbitrary code with the permissions of
-your Emacs process. Binding beyond loopback (the `bind` argument above)
-widens that reach to everyone who can reach that interface — do it only
-on a network you trust, and prefer a specific routable address over
-`"0.0.0.0"` when you can. This is out of scope for this module — see
+The server has no authentication and no TLS. A client that can reach the port can run any code
+with the permissions of your Emacs process.
+
+- Keep the default loopback bind if you can.
+- Bind to other interfaces only on a network that you trust.
+- Use a specific address, not `"0.0.0.0"`, if you can.
+
+For other server options, such as TLS, call `nrepl.server/start-server` from Clojure, not
+`jvm-clj-nrepl-start`. See the nREPL documentation, and
 [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md).
-If you need authentication or TLS, configure them through nREPL's own
-middleware, by starting the server with `jvm-call`/`jvm-new` directly
-against `nrepl.server/start-server` instead of through
-`jvm-clj-nrepl-start`.

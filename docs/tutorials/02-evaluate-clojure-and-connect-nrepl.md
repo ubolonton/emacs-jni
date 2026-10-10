@@ -1,25 +1,22 @@
 # Evaluate Clojure and connect an nREPL client
 
-In this tutorial, we run Clojure code inside an Emacs-embedded JVM.
-Then we start a real nREPL server and connect to it from a separate
-terminal. By the end, an external nREPL client will evaluate Clojure
-code running inside your Emacs process.
+In this tutorial, we run Clojure code in the JVM inside Emacs. Then we start an nREPL server and
+connect to it from a different terminal. At the end, an external nREPL client evaluates Clojure
+code in your Emacs process.
 
-This tutorial builds on
-[Your first JVM call](01-your-first-jvm-call.md). It assumes you can
-already build the module and start the JVM.
+This tutorial continues from [Your first JVM call](01-your-first-jvm-call.md). It assumes that you
+can build the module and start the JVM.
 
 ## Step 1: Fetch the Clojure and nREPL jars
 
-These jars are not bundled with this repository. Fetch them once:
+This repository does not include these jars. Fetch them once:
 
 ```sh
 ./test/fetch-clojure-jars.sh
 ```
 
-This downloads four jars into `target/clojure-jars/`: `clojure-1.12.0.jar`,
-`spec.alpha-0.5.238.jar`, `core.specs.alpha-0.4.74.jar`, and
-`nrepl-1.7.0.jar`.
+The script downloads four jars into `target/clojure-jars/`: `clojure-1.12.0.jar`,
+`spec.alpha-0.5.238.jar`, `core.specs.alpha-0.4.74.jar`, and `nrepl-1.7.0.jar`.
 
 ## Step 2: Start Emacs with the jar directory set
 
@@ -28,25 +25,29 @@ cargo build
 EMACS_JNI_CLOJURE_JARS_DIR="$(pwd)/target/clojure-jars" emacs -Q -L elisp
 ```
 
-Setting `EMACS_JNI_CLOJURE_JARS_DIR` before launch lets the next step
-find the jars by reading this environment variable back from Lisp.
+In the next step, Lisp reads `EMACS_JNI_CLOJURE_JARS_DIR` to find the jars.
 
-## Step 3: Start the JVM and load the jars
+## Step 3: Start the JVM and load Clojure
 
 In `*scratch*`, evaluate each form one at a time.
 
 ```elisp
 (require 'jvm-clj)
 
-(jvm-start)
-;; => ready
+(setq jvm-clj-classpath
+      (directory-files (getenv "EMACS_JNI_CLOJURE_JARS_DIR") t "\\.jar\\'"))
 
-(dolist (jar (directory-files (getenv "EMACS_JNI_CLOJURE_JARS_DIR") t "\\.jar\\'"))
-  (jvm-load-jar jar))
+(jvm-clj-start)
+;; => nil
 ```
 
-The `dolist` loads all four jars, one at a time, into the JVM's shared
-classloader.
+`jvm-clj-start` starts the JVM. Then it loads the four jars and the `emacs-jni.clj` namespace.
+Check the status:
+
+```elisp
+(jvm-status)
+;; => ready
+```
 
 ## Step 4: Evaluate Clojure code
 
@@ -55,8 +56,7 @@ classloader.
 ;; => 42
 ```
 
-`jvm-clj-eval-string` returns the result value directly. Clojure
-evaluated the expression and returned `42`.
+Clojure evaluated the expression. `jvm-clj-eval-string` returned the result as a Lisp integer.
 
 ## Step 5: Start an nREPL server
 
@@ -65,53 +65,46 @@ evaluated the expression and returned `42`.
 ;; => (7888 . #<user-ptr ...>)
 ```
 
-`7888` is the port. `jvm-clj-nrepl-start` returns
-`(ACTUAL-PORT . SERVER)`. `ACTUAL-PORT` confirms the port the server
-bound. `SERVER` is a wrapped JVM object you will need later, to stop
+`7888` is the port. `jvm-clj-nrepl-start` returns `(ACTUAL-PORT . SERVER)`. `ACTUAL-PORT` is the
+port that the server listens on. `SERVER` is a wrapped JVM object. We use it in Step 7 to stop
 the server.
 
-A real nREPL server is now listening on `localhost:7888`, inside your
-Emacs process.
+An nREPL server now listens on `localhost:7888`, inside your Emacs process.
 
 ## Step 6: Connect from a separate process
 
-Open a new terminal. Any bencode-speaking nREPL client works here
-(`lein repl :connect localhost:7888`, an editor's nREPL client, and so
-on). This tutorial uses `nc`, so no extra tooling is required:
+Open a new terminal. We use `nc` to send one nREPL message:
 
 ```sh
 code='(+ 100 23)'
 len=${#code}
-printf 'd2:op4:eval4:code%d:%s2:id1:1e' "$len" "$code" | nc 127.0.0.1 7888
+printf 'd2:op4:eval4:code%d:%s2:id1:1e' "$len" "$code" | timeout 3 nc 127.0.0.1 7888
 ```
 
-The output contains `5:value3:123` and `6:statusl4:donee`. That is a
-real bencode-encoded nREPL response. `123` is `(+ 100 23)`, evaluated
-by the Clojure runtime running inside Emacs, and sent back over the
-network to this separate terminal.
+The output contains `5:value3:123` and `6:statusl4:donee`. This is a bencode-encoded nREPL
+response. The Clojure runtime in Emacs evaluated `(+ 100 23)` and sent `123` to this terminal.
+`nc` keeps the connection open, so `timeout 3` closes it after 3 seconds.
 
 ## Step 7: Stop the server
 
-Back in Emacs:
+In Emacs:
 
 ```elisp
 (jvm-clj-nrepl-stop (cdr my-nrepl))
-;; => nil
+;; => #<user-ptr ...>
 ```
 
-`(cdr my-nrepl)` pulls `SERVER` out of the `(ACTUAL-PORT . SERVER)`
-value you stored in Step 5.
+`(cdr my-nrepl)` is the `SERVER` value from Step 5. `jvm-clj-nrepl-stop` returns the stopped
+server.
 
-You have now evaluated Clojure code inside Emacs, and reached it from
-an independent process over the real nREPL wire protocol.
+We evaluated Clojure code inside Emacs. Then a different process evaluated code there over the
+nREPL protocol.
 
 ## What's next
 
-- [How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md)
-  for namespace handling and return-value limits.
-- [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md)
-  for port choice and security notes.
-- [How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md)
-  to call Lisp functions and hold Lisp values from Clojure.
-- [Limitations and trade-offs](../explanation/limitations-and-tradeoffs.md)
-  for why `*ns*` does not carry over between separate eval calls.
+- [How to evaluate Clojure code](../how-to-guides/evaluate-clojure-code.md) for namespaces and
+  result types.
+- [How to run an nREPL server](../how-to-guides/run-an-nrepl-server.md) for ports, bind
+  addresses, and security.
+- [How to access Emacs Lisp from Clojure](../how-to-guides/access-lisp-from-clojure.md) to call
+  Lisp functions and hold Lisp values from Clojure.
