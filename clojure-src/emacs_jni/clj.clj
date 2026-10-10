@@ -13,7 +13,7 @@
 
   See `docs/how-to-guides/access-lisp-from-clojure.md`."
   (:refer-clojure :exclude [intern apply])
-  (:import [emacs_jni.core Lisp LispObject LispSymbol LispNonLocalExit LispSignal LispThrow]
+  (:import [emacs_jni.core Lisp LispSymbol LispNonLocalExit]
            [java.util.function BiFunction]))
 
 (defn- ->lisp
