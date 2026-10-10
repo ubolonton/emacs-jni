@@ -1,5 +1,4 @@
-//! Same-thread reentrancy support for `jvm--call-direct` (plan
-//! `docs/superpowers/plans/2026-09-13-sync-lisp-clojure-plan.md`, phases 3-5).
+//! Same-thread reentrancy support for `jvm--call-direct`.
 //!
 //! A synchronous `jvm--call-direct` runs Clojure on the Emacs main thread and
 //! blocks there for the whole call. If that Clojure code calls back into Lisp
@@ -15,7 +14,7 @@
 //! not itself a module call, so it reuses the innermost frame's `Env`.
 //!
 //! A background JVM thread never pushes here, so its stack is empty and the
-//! natives fall back to the async queue -- exactly as before.
+//! natives use the async queue.
 
 use std::cell::RefCell;
 
@@ -74,7 +73,7 @@ pub fn with_current_env<R>(f: impl FnOnce(&Env) -> R) -> Option<R> {
     // `EnvScope` that pushed it, so the pointer is live (not yet popped). The
     // reconstructed `Env` is used only within F, inside that dynamic extent,
     // and never stored. `Env::new`'s only contract is that `raw` is a live
-    // `emacs_env`, which holds here. See this module's doc comment.
+    // `emacs_env`, which holds here.
     let env = unsafe { Env::new(raw) };
     Some(f(&env))
 }
