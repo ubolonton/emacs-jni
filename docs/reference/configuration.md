@@ -34,7 +34,7 @@ see [Lisp API reference](lisp-api.md#variables).
 | Operating system | Linux. macOS and Windows are not supported. |
 | Emacs | 28 or later, with dynamic module support. Tested with 30.1. |
 | Rust | Stable toolchain. |
-| JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `mise.toml` pins Java 26. `mise.lock` locks 26.0.2.1. |
+| JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `.config/mise/config.toml` pins Java 26. `.config/mise/mise.lock` locks 26.0.2.1. |
 
 ## Prerequisites for Clojure
 

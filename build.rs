@@ -31,6 +31,6 @@ fn main() {
         .arg(format!("{manifest_dir}/java/emacs_jni/core/LispRefReleaseNotifier.java"))
         .arg(format!("{manifest_dir}/java/emacs_jni/core/LispSymbol.java"))
         .status()
-        .expect("failed to run javac (is a JDK on PATH? see mise.toml for the pinned version)");
+        .expect("failed to run javac (is a JDK on PATH? see .config/mise/config.toml for the pinned version)");
     assert!(status.success(), "javac failed to compile the emacs_jni.core shim");
 }
