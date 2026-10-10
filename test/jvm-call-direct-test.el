@@ -1,9 +1,6 @@
 ;;; jvm-call-direct-test.el --- Tests for jvm-call-direct -*- lexical-binding: t; -*-
 
-;; The synchronous, main-thread call path (`jvm--call-direct'): attach,
-;; execute, return, with no worker round trip. Mirrors `jvm-call-test.el',
-;; but the return shape is the value itself (not a `(OK RESULT ERR)' tuple)
-;; and a failure signals `jvm-error' rather than filling in ERR.
+;; The synchronous main-thread call path. Same cases as `jvm-call-test.el'.
 
 (require 'ert)
 (require 'jvm)
@@ -14,7 +11,7 @@
 
 (defun jvm-call-direct-test--ensure-ready ()
   "Ensure the JVM is running and the Calc fixture jar is loaded.
-See `jvm-call-test--ensure-ready' for why every test does this itself."
+Every test calls this: ERT does not run tests in definition order."
   (unless (eq (jvm-status) 'ready)
     (should (eq (jvm-start-await) 'ready)))
   (jvm-load-jar-await jvm-call-direct-test--calc-jar))
@@ -57,10 +54,8 @@ See `jvm-call-test--ensure-ready' for why every test does this itself."
                 :type 'jvm-error))
 
 (ert-deftest emacs-jni-jvm-call-direct-test/thread-identity-is-stable-across-calls ()
-  "The main thread stays permanently attached across direct calls, so its
-`java.lang.Thread' peer -- hence `Thread.currentThread().threadId()' -- is
-identical for two separate top-level calls. (When each call detached the
-thread, a fresh peer with a new id was minted every time.)"
+  "The main thread stays attached, so `Thread.currentThread().threadId()'
+is the same for two separate calls."
   (jvm-call-direct-test--ensure-ready)
   (let ((id1 (jvm-call-direct
               (jvm-call-direct "java.lang.Thread" "currentThread" nil) "threadId" nil))

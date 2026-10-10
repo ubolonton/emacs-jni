@@ -5,16 +5,11 @@
 
 (defvar jvm-clj-eval-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR")
   "Directory containing Clojure/nREPL jars, or nil if unset.
-Set via `test/fetch-clojure-jars.sh' and the EMACS_JNI_CLOJURE_JARS_DIR
-environment variable — tests in this file skip cleanly, not fail, when
-this isn't configured, so the suite stays runnable with no network
-access.")
+See test/fetch-clojure-jars.sh. Tests skip when it is unset, so the suite
+runs without network access.")
 
 (defvar jvm-clj-eval-test--ready nil
-  "Set to t once the JVM is started and jars are loaded, so every test
-in this file can call `jvm-clj-eval-test--ensure-ready' idempotently
-regardless of ERT's (non-definition-order) execution order — the exact
-problem Phase 2's Task 5 already hit for `jvm-call-test.el'.")
+  "Non-nil once the JVM is started and the jars are loaded.")
 
 (defun jvm-clj-eval-test--skip-unless-jars ()
   (unless (and jvm-clj-eval-test--jars-dir (file-directory-p jvm-clj-eval-test--jars-dir))
@@ -31,12 +26,9 @@ problem Phase 2's Task 5 already hit for `jvm-call-test.el'.")
     (setq jvm-clj-eval-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/context-classloader-fix-lets-clojure-bootstrap ()
-  "Proves Task 1's fix stays in effect: a `Clojure/var'+`read'+`require'
-sequence keeps working (without the fix, touching Clojure's runtime fails
-with ExceptionInInitializerError -- see the spec's Feasibility section for
-the exact failure). `--ensure-ready' already bootstraps Clojure's runtime
-via `emacs-jni.clj', so this is not that first touch, just a check that
-the sequence itself still succeeds."
+  "`Clojure/var', `read', and `require' work on a worker thread.
+These need the context classloader set on the thread; without it, Clojure
+fails with `ExceptionInInitializerError'."
   (jvm-clj-eval-test--ensure-ready)
   (let* ((require-fn (jvm-call-await "clojure.java.api.Clojure" "var" (list "clojure.core" "require")))
          (sym (jvm-call-await "clojure.java.api.Clojure" "read" (list "clojure.set"))))
@@ -56,12 +48,8 @@ the sequence itself still succeeds."
     (should (string-match-p "Divide by zero" (cadr err)))))
 
 (ert-deftest emacs-jni-jvm-clj-nrepl-test/start-serves-real-bencode-protocol ()
-  "Starts a real nREPL server and connects to it from a SEPARATE OS
-process (bash + /dev/tcp) speaking the real bencode wire protocol -- this
-is deliberately not Emacs's own network stack, since that's what an
-actual external nREPL client does, and it's the exact mechanism verified
-working during the Phase 3 design spike (see the spec's Feasibility
-section)."
+  "An nREPL server answers a bencode `eval' from a separate process.
+The client is bash with /dev/tcp, as an external client would be."
   (jvm-clj-eval-test--ensure-ready)
   (let* ((start-result (jvm-clj-nrepl-start-await))
          (port (car start-result))
@@ -73,24 +61,15 @@ section)."
          (response (with-temp-buffer
                      (call-process "bash" nil t nil "-c" script)
                      (buffer-string))))
-      ;; Bencode has no quoting: a correct eval response contains the
-      ;; literal substring "5:value2:42" (the "value" key's 5-char length
-      ;; prefix, then the "42" result's 2-char length prefix) -- this is
-      ;; the exact response shape observed during the design spike, not a
-      ;; guess.
+      ;; Bencode for the `value' key and the result "42".
       (should (string-match-p "5:value2:42" response))
-      ;; No `unwind-protect': a failing `should' above leaves this
-      ;; server thread running for the rest of this batch process. Low
-      ;; impact (the process exits right after), but a real gap if this
-      ;; test is extended.
+      ;; FIX: No `unwind-protect', so a failing `should' leaves the server
+      ;; running until the batch process exits.
       (jvm-clj-nrepl-stop-await server)))
 
 (ert-deftest emacs-jni-jvm-clj-nrepl-test/bind-opens-the-server-beyond-loopback ()
-  "Passing BIND makes the server listen on the given interface instead
-of nREPL's loopback default. A loopback-only server is unreachable
-through VM/NAT port forwarding, which delivers the connection to a
-routable interface, not to the guest's `127.0.0.1'. Asserts the LISTEN
-socket for the bound port is a wildcard address, not loopback."
+  "With BIND, the server listens on that address, not loopback.
+Asserts that the listen socket is a wildcard address."
   (jvm-clj-eval-test--ensure-ready)
   (unless (executable-find "ss")
     (ert-skip "needs `ss' to inspect the listening socket's bind address"))
@@ -101,12 +80,8 @@ socket for the bound port is a wildcard address, not loopback."
         (let ((listen (with-temp-buffer
                         (call-process "ss" nil t nil "-tlnH")
                         (buffer-string))))
-          ;; Bound to a wildcard address (`*'/`0.0.0.0'/`[::]'), the
-          ;; forms `ss' prints for an all-interfaces bind -- verified
-          ;; empirically against nREPL 1.7.0.
+          ;; How `ss' prints a wildcard bind.
           (should (string-match-p (format "\\(\\*\\|0\\.0\\.0\\.0\\|\\[::\\]\\):%d\\b" port) listen))
-          ;; ...and specifically NOT loopback-only, which is what the
-          ;; default (no BIND) produces and what this option fixes.
           (should-not (string-match-p (format "127\\.0\\.0\\.1:%d\\b" port) listen)))
       (jvm-clj-nrepl-stop-await server))))
 

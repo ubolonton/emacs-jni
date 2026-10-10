@@ -15,10 +15,7 @@
   (jvm--test-panic)
   (jvm--wait-for-status 'crashed 10)
   (should (eq (jvm-status) 'crashed))
-  ;; Restarting after a crash re-creates the JVM from scratch (the old one
-  ;; may be in an undefined state); this may itself fail, which is
-  ;; documented as acceptable in the spec's Error Handling section, so
-  ;; accept either outcome as long as it's not stuck in 'starting.
+  ;; A restart after a crash can fail; it must not stay at `starting'.
   (should (memq (jvm-start-await) '(ready start-failed))))
 
 (provide 'jvm-crash-test)

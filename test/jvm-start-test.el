@@ -7,41 +7,22 @@
   (should (eq (jvm-start-await) 'ready)))
 
 (ert-deftest emacs-jni-jvm-start-test/default-options-include-xrs ()
-  "`jvm-options' must default to include \"-Xrs\", which stops the JVM from
-installing its own SIGINT/SIGTERM/SIGHUP/SIGQUIT handlers — without it,
-since the JVM shares Emacs's process, `C-g' can terminate Emacs outright
-instead of just interrupting it (empirically verified with a `sigaction'
-probe during development; see docs/explanation/architecture.md). This
-only guards the default Elisp value doesn't silently regress — it
-doesn't re-verify the OS-level signal-handler effect itself, which
-isn't practical to assert from Elisp."
+  "`jvm-options' includes \"-Xrs\" by default.
+See docs/explanation/architecture.md. This checks only the default value,
+not the signal handlers."
   (should (member "-Xrs" jvm-options)))
 
 (ert-deftest emacs-jni-jvm-start-test/status-not-stuck-after-illegal-transition ()
-  "An illegal `jvm-start' while already `ready' must not leave
-`jvm--status' stuck at `starting' — it should revert to the prior status
-after the primitive signals `jvm-illegal-transition'.
-`jvm-start-await' is only called here if the JVM (a process-wide, one-time
-resource shared with other tests in this same batch Emacs session) isn't
-already `ready', since a second `jvm-start-await' call once `ready' would
-itself hit the same illegal-transition signal this test provokes on
-purpose below."
+  "An illegal `jvm-start' reverts `jvm--status' to the prior status."
   (unless (eq (jvm-status) 'ready)
     (should (eq (jvm-start-await) 'ready)))
   (should-error (jvm-start-async) :type 'jvm-illegal-transition)
   (should (eq (jvm-status) 'ready)))
 
 (ert-deftest emacs-jni-jvm-start-test/start-failed-message-reaches-log-buffer ()
-  "A `start-failed' status transition with a detail message must not
-silently drop it \(Fix 1 of the final review\): it should be appended to
-the `*jvm-log*' buffer. This drives `jvm--apply-status' directly with a
-synthetic message rather than provoking a real `start-failed', since
-there's no reliable way to make `JavaVM::new' fail fast from Elisp.
-\(Before Task 8, this drove `jvm--dispatch-message' with a `(status ...)'
-wire message; `jvm--apply-status' is now its native-queue counterpart —
-see `lisp_requests.rs''s `service_inbound'.\) `jvm--status' is
-saved/restored around the synthetic dispatch so this doesn't leak a fake
-`start-failed' status into the other tests sharing this batch process."
+  "A `start-failed' detail message goes to the `*jvm-log*' buffer.
+Calls `jvm--apply-status' directly: a real start cannot be made to fail
+from Elisp. Restores `jvm--status' for the other tests."
   (when (get-buffer jvm--log-buffer-name)
     (kill-buffer jvm--log-buffer-name))
   (let ((previous-status jvm--status))

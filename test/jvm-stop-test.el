@@ -13,14 +13,7 @@
   (should (memq (jvm-stop-await) '(stopped stop-failed))))
 
 (ert-deftest emacs-jni-jvm-stop-test/status-not-stuck-after-illegal-transition ()
-  "An illegal `jvm-stop' while already `stopped'/`stop-failed' must not
-leave `jvm--status' stuck at `stopping' — it should revert to the prior
-status after the primitive signals `jvm-illegal-transition'.
-Forces the JVM to `ready' (or reuses `paused', if that's where another
-test in this process left it) and then to `stopped'/`stop-failed' itself
-first, rather than relying on another test having already done so, so
-this test is deterministic regardless of ERT's test ordering within this
-process."
+  "An illegal `jvm-stop' reverts `jvm--status' to the prior status."
   (unless (memq (jvm-status) '(ready paused))
     (should (eq (jvm-start-await) 'ready)))
   (should (memq (jvm-stop-await) '(stopped stop-failed)))

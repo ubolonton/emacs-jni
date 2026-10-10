@@ -5,14 +5,11 @@
 (require 'jvm-clj)
 
 (defvar jvm-clj-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR")
-  "Directory containing Clojure/nREPL jars, or nil if unset. See
-`jvm-clj-eval-test--jars-dir' in test/jvm-clj-eval-test.el for why tests in
-this file skip cleanly (not fail) when this isn't configured.")
+  "Directory containing Clojure/nREPL jars, or nil if unset.
+Tests skip when it is unset.")
 
 (defvar jvm-clj-test--ready nil
-  "Set to t once the JVM is started and `emacs-jni.clj' is loaded, so
-every test in this file can call `jvm-clj-test--ensure-ready' idempotently
-regardless of ERT's execution order.")
+  "Non-nil once the JVM is started and `emacs-jni.clj' is loaded.")
 
 (defun jvm-clj-test--skip-unless-jars ()
   (unless (and jvm-clj-test--jars-dir (file-directory-p jvm-clj-test--jars-dir))
@@ -26,16 +23,11 @@ regardless of ERT's execution order.")
     (setq jvm-clj-test--ready t)))
 
 (defun jvm-clj-test--eval (code)
-  "Evaluate CODE (Clojure source) via `jvm-clj-eval-string-await' and return
-its result value (signalling `jvm-error' on failure)."
+  "Evaluate CODE (Clojure source) with `jvm-clj-eval-string-await'."
   (jvm-clj-eval-string-await code))
 
 (defun jvm-clj-test--prin1 (lisp-object)
-  "Call `prin1ToString' on the wrapped Java LISP-OBJECT via plain
-`jvm-call-await' reflection (the same generic path any other JVM-object
-method call uses -- a Java `emacs_jni.core.LispObject' has no special status on
-the Lisp side, it's just an opaque wrapped handle, per the design spec's
-non-goal: \"marshalling arbitrary Lisp values to Clojure data\")."
+  "Call `prin1ToString' on LISP-OBJECT, an opaque `LispObject'."
   (jvm-call-await lisp-object "prin1ToString" nil))
 
 (ert-deftest emacs-jni-jvm-clj-test/intern-returns-a-clojure-symbol ()
@@ -205,15 +197,9 @@ exposing tag and value as fields."
               nil)))
 
 (ert-deftest emacs-jni-jvm-clj-test/clojure-calls-lisp-back-inside-a-lisp-to-clojure-call ()
-  "Reentrancy: this test's OWN call is Lisp -> Clojure (`jvm-clj-eval-
-string', serviced by `jvm-call-await's `accept-process-output' loop). The
-Clojure code below itself calls back into Lisp twice (`apply', then
-`is-not-nil?' on the result) *during* that same outer call -- each inner
-round trip sends its own `(lisp-request)' wakeup, serviced by the SAME
-still-running outer `accept-process-output' loop, before the outer
-`eval' itself returns. See design spec, \"Core constraint\": \"a
-`clj/apply' issued from inside a `jvm-clj-eval-string-await' is serviced by
-the outer `-sync' wrapper's own `accept-process-output' loop.\""
+  "Clojure calls back into Lisp during a Lisp-to-Clojure call.
+The outer `jvm-clj-eval-string-await' waits in `accept-process-output',
+which also services the inner requests."
   (jvm-clj-test--ensure-ready)
   (should (eq (jvm-clj-test--eval
                "(let [sym (emacs-jni.clj/intern \"car\")]
@@ -223,10 +209,6 @@ the outer `-sync' wrapper's own `accept-process-output' loop.\""
 (ert-deftest jvm-clj-test-require-symbol-is-callable ()
   "require-symbol returns an IFn that funcalls the Lisp symbol."
   (jvm-clj-test--ensure-ready)
-  ;; `jvm-clj-test--eval' reads CODE via `clojure.java.api.Clojure/read',
-  ;; which is `clojure.edn/read-string' -- edn has no `'' quote reader
-  ;; macro, so `'sym' would misread as a symbol literally named "'sym".
-  ;; Spell it out as `(quote sym)' instead; same semantics.
   ;; `=' is numeric-only in Elisp; use `equal' for the string result.
   (should
    (equal (jvm-clj-test--eval
@@ -260,9 +242,8 @@ does not change the imported function, while require-symbol tracks it."
               (emacs-jni.clj/intern \"jvm-clj-test-fn\") (emacs-jni.clj/intern \"cdr\"))
             (let [lst (emacs-jni.clj/apply (emacs-jni.clj/intern \"list\") 1 2 3)]
               (str (early lst) \"|\" (str (late lst))))))")
-    ;; early still `car' -> 1; late now `cdr' -> opaque LispObject (2 3),
-    ;; whose prin1 is "(2 3)". Returned as a string to avoid depending on
-    ;; vector return marshaling in jvm-clj-eval-string-await.
+    ;; early is still `car' -> 1; late is now `cdr' -> an opaque LispObject
+    ;; that prints as "(2 3)".
     "1|(2 3)")))
 
 (provide 'jvm-clj-test)
