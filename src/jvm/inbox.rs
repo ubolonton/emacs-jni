@@ -525,6 +525,8 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
 
+    use crate::jvm::test_support::create_test_jvm;
+
     /// Uses a local flag: other tests may already have set `JVM_CREATE_ATTEMPTED`.
     #[test]
     fn is_first_attempt_is_true_exactly_once() {
@@ -602,23 +604,6 @@ mod tests {
 
         assert_eq!(greeting, "hello from Greeter");
     }
-
-    /// Retries `JavaVM::new`; see `jvm::convert`'s `create_test_jvm`.
-    fn create_test_jvm() -> JavaVM {
-        let mut last_err = None;
-        for _ in 0..20 {
-            let init_args = InitArgsBuilder::new().version(JNIVersion::V1_8).build().unwrap();
-            match JavaVM::new(init_args) {
-                Ok(vm) => return vm,
-                Err(e) => {
-                    last_err = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-        }
-        panic!("failed to create/attach a test JVM after retries: {last_err:?}");
-    }
-
     #[test]
     fn register_then_take_returns_once() {
         let vm = create_test_jvm();

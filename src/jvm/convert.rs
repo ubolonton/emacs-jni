@@ -410,25 +410,7 @@ pub(crate) fn jobject_array_to_bridge_values(
 #[cfg(test)]
 mod jvm_tests {
     use super::*;
-    use jni::vm::{InitArgsBuilder, JavaVM};
-    use jni::JNIVersion;
-
-    /// Retries `JavaVM::new`. jni 0.22.4 checks for an existing JVM without a lock, so parallel
-    /// tests can get `AlreadyCreated`; the next attempt finds the winner's JVM.
-    fn create_test_jvm() -> JavaVM {
-        let mut last_err = None;
-        for _ in 0..20 {
-            let init_args = InitArgsBuilder::new().version(JNIVersion::V1_8).build().unwrap();
-            match JavaVM::new(init_args) {
-                Ok(vm) => return vm,
-                Err(e) => {
-                    last_err = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-        }
-        panic!("failed to create/attach a test JVM after retries: {last_err:?}");
-    }
+    use crate::jvm::test_support::create_test_jvm;
 
     #[test]
     fn int_arg_widens_correctly_to_a_long_parameter() {

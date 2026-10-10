@@ -481,24 +481,7 @@ pub(crate) fn get_ptr_field(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jni::vm::{InitArgsBuilder, JavaVM};
-    use jni::JNIVersion;
-
-    /// Retries `JavaVM::new`; see `jvm::convert`'s `create_test_jvm`.
-    fn create_test_jvm() -> JavaVM {
-        let mut last_err = None;
-        for _ in 0..20 {
-            let init_args = InitArgsBuilder::new().version(JNIVersion::V1_8).build().unwrap();
-            match JavaVM::new(init_args) {
-                Ok(vm) => return vm,
-                Err(e) => {
-                    last_err = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-        }
-        panic!("failed to create/attach a test JVM after retries: {last_err:?}");
-    }
+    use crate::jvm::test_support::create_test_jvm;
 
     #[test]
     fn defines_shim_classes_and_they_are_findable() {
