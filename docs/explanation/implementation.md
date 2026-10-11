@@ -32,6 +32,16 @@ state.
 Code in `lisp::` needs an `emacs::Env`, so it runs on the main thread. Code in `jvm::` needs a
 JNI `Env`, so it runs on an attached thread. The direct path runs both on the main thread.
 
+## Source lookup for module functions
+
+`module-load` does not add the module's functions to `load-history`. `jvm.el` adds them, against
+the module file. Then `symbol-file` returns the module file, and `find-function`, elisp xref
+(`M-.`), and the `describe-function` link all call `find-function-search-for-symbol` with it.
+
+`jvm.el` advises `find-function-search-for-symbol` to map the module file to the `#[defun]` in
+`src/` (see `jvm--find-function-search-for-symbol`). The package archive holds `src/`, `java/`,
+and `clojure/` with their checkout paths, so lookup also works for an installed package.
+
 ## Shim classes
 
 `build.rs` compiles `java/emacs_jni/core/*.java` with `javac` into
@@ -212,7 +222,7 @@ The script has two modes, which load different code:
 
 | Task | Loads | Also |
 |---|---|---|
-| `mise run test` | The checkout, through `dev-paths.el`: `elisp/`, `target/debug/`, `clojure/`. | Builds the debug module. Without file arguments, runs the Rust unit tests first. |
+| `mise run test` | The checkout, through `dev-paths.el`: `elisp/`, `target/debug/`, and the sources at the root. | Builds the debug module. Without file arguments, runs the Rust unit tests first. |
 | `mise run test:package` | The archive from `mise run package`, installed into `target/package-test-elpa/` and loaded through package.el (byte-compiled). | Skips `test/jvm-crash-test.el`: the release module has no `test-support`. |
 
 The Clojure tests get their jars from `jvm-clj-ensure-jars`. The first run downloads them.

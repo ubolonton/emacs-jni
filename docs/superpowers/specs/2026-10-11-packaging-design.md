@@ -11,10 +11,11 @@ An installable package.el archive, mise tasks for build/test/package, and shorte
 - `jvm.el` loads `<jvm-module-directory>/<cargo file name>`: `lib` prefix except on Windows,
   `emacs_jni`, then `module-file-suffix` (`.so`, `.dylib`, `.dll`). No search over several paths.
 - `jvm--module-path` and `EMACS_JNI_MODULE_PATH` are removed.
-- `jvm-clj--source-dir` stays private. Its default changes to `clojure/` next to
-  `jvm-clj.el` (installed-package layout).
+- `jvm--source-directory` (private) holds `src/`, `java/`, `clojure/`. Its default is the
+  directory of `jvm.el` (installed-package layout). `jvm-clj--classpath`
+  adds its `clojure/`.
 - `dev-paths.el` (repo root) sets `load-path`, `jvm-module-directory` (`target/debug/`), and
-  `jvm-clj--source-dir` (`clojure/`) for a checkout: `emacs -Q -l dev-paths.el`.
+  `jvm--source-directory` (the root) for a checkout: `emacs -Q -l dev-paths.el`.
   Tests and docs use it.
 
 ## mise tasks (`.config/mise/config.toml`)

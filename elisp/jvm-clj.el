@@ -41,13 +41,6 @@ change the entries; a jar whose sha256 differs is rejected.")
 The default is the one that Maven and Clojure CLI (`clj') use, so jars
 are shared with them.")
 
-(defvar jvm-clj--source-dir
-  (expand-file-name "clojure/"
-                    (file-name-directory
-                     (or load-file-name buffer-file-name)))
-  "Absolute path to this package's `clojure' directory.
-A source checkout sets it in dev-paths.el.")
-
 ;;; Clojure interop primitives (worker await path).
 
 (defun jvm-clj--var-await (ns name)
@@ -195,7 +188,7 @@ Emacs.  Signal an error if a jar's sha256 does not match."
 (defun jvm-clj--classpath ()
   "Return the classpath entries that `jvm-clj-start' loads."
   (append (or jvm-clj-classpath (jvm-clj-ensure-jars))
-          (list jvm-clj--source-dir)))
+          (list (expand-file-name "clojure/" jvm--source-directory))))
 
 ;;; Startup.
 
