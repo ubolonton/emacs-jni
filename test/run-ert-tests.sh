@@ -27,7 +27,7 @@ if [ ${#TEST_FILES[@]} -eq 0 ]; then
         FILTERED_TEST_FILES=()
         for f in "${TEST_FILES[@]}"; do
             if [ "$f" = "test/jvm-crash-test.el" ]; then
-                echo "Skipping test/jvm-crash-test.el (needs --features test-support); run: EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh test/jvm-crash-test.el"
+                echo "Skipping test/jvm-crash-test.el (needs --features test-support); run: EMACS_JNI_TEST_FEATURES=test-support mise run test test/jvm-crash-test.el"
             else
                 FILTERED_TEST_FILES+=("$f")
             fi
