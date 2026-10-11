@@ -11,3 +11,8 @@ run = "cargo build"
 description = "Build the test fixture jars"
 depends = ["build"]
 run = "test/build-fixtures.sh"
+
+[tasks.package-test]
+description = "Install the archive in a scratch package dir and smoke-test it"
+depends = ["package"]
+run = "emacs -Q --batch -l test/package/smoke-test.el target/package/jvm-*.tar"
