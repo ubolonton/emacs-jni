@@ -3,23 +3,13 @@
 (require 'ert)
 (require 'jvm-clj)
 
-(defvar jvm-clj-eval-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR")
-  "Directory containing Clojure/nREPL jars, or nil if unset.
-See test/fetch-clojure-jars.sh. Tests skip when it is unset, so the suite
-runs without network access.")
-
 (defvar jvm-clj-eval-test--ready nil
   "Non-nil once the JVM is started and the jars are loaded.")
 
-(defun jvm-clj-eval-test--skip-unless-jars ()
-  (unless (and jvm-clj-eval-test--jars-dir (file-directory-p jvm-clj-eval-test--jars-dir))
-    (ert-skip "Set EMACS_JNI_CLOJURE_JARS_DIR (see test/fetch-clojure-jars.sh) to run this test")))
-
 (defun jvm-clj-eval-test--ensure-ready ()
-  (jvm-clj-eval-test--skip-unless-jars)
   (unless jvm-clj-eval-test--ready
     (should (eq (jvm-start-await) 'ready))
-    (dolist (jar (directory-files jvm-clj-eval-test--jars-dir t "\\.jar\\'"))
+    (dolist (jar (jvm-clj-ensure-jars))
       (jvm-load-jar-await jar))
     (jvm-load-jar-await jvm-clj--source-dir)
     (jvm-clj-require-await "emacs-jni.clj")

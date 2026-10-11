@@ -11,8 +11,6 @@ call.
 
 ```elisp
 (require 'jvm-clj)
-(setq jvm-clj-classpath
-      (directory-files (getenv "EMACS_JNI_CLOJURE_JARS_DIR") t "\\.jar\\'"))
 (jvm-clj-start)
 ```
 
@@ -20,6 +18,8 @@ call.
 
 1. It starts the JVM if the status is not `ready`.
 2. It loads each entry of `jvm-clj-classpath`, and the `clojure-src` directory of this package.
+   If `jvm-clj-classpath` is `nil`, it loads the jars from `jvm-clj-ensure-jars`. This downloads
+   missing jars.
 3. It requires `emacs-jni.clj`.
 
 It signals an error if a step fails, for example if `jvm-clj-classpath` has no Clojure jar.

@@ -49,12 +49,7 @@ EMACS_JNI_TEST_FEATURES=test-support mise run test test/jvm-crash-test.el
 ```
 
 Each ERT file runs in its own `emacs --batch` process. The task builds the module and the test
-fixture jars first. The Clojure tests skip unless `EMACS_JNI_CLOJURE_JARS_DIR` names a directory
-with the Clojure and nREPL jars:
-
-```sh
-./test/fetch-clojure-jars.sh    # downloads to target/clojure-jars/
-EMACS_JNI_CLOJURE_JARS_DIR="$PWD/target/clojure-jars" mise run test
-```
+fixture jars first. On the first run, the Clojure tests download the Clojure and nREPL jars into
+`~/.m2/repository`.
 
 For how the Rust side is built, see [Implementation](docs/explanation/implementation.md).

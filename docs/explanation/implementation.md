@@ -203,14 +203,13 @@ The check for an existing VM has no lock. So parallel unit tests can race, and t
 finds `libjvm` through `JAVA_HOME`. Unit tests cover the parts that need no Emacs, for example the
 status state machine, queue order, and JNI conversion.
 
-`test/run-ert-tests.sh` runs the ERT integration tests in `test/*.el`. It compiles the fixture
+`mise run test` runs the Rust unit tests, then `test/run-ert-tests.sh`. That script runs the ERT integration tests in `test/*.el`. It compiles the fixture
 jars, builds the module, and runs each test file in a separate `emacs -Q --batch` process. Each file
 needs a separate process because the JVM and the module status are per-process singletons, and a
 restart reuses the destroyed VM. Give file paths as arguments to run only those files.
 
-Two environment variables control optional tests:
+The Clojure tests get their jars from `jvm-clj-ensure-jars`. The first run downloads them.
 
 | Variable | Effect |
 |---|---|
-| `EMACS_JNI_CLOJURE_JARS_DIR` | Directory of Clojure and nREPL jars. Clojure tests skip without it. `test/fetch-clojure-jars.sh` downloads the jars. |
 | `EMACS_JNI_TEST_FEATURES` | Cargo features for the build. `test-support` adds `jvm--test-panic`, which `test/jvm-crash-test.el` needs. Without it, the script skips that file. |

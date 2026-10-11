@@ -13,15 +13,40 @@
 
 (defvar jvm-clj-classpath nil
   "Jar files or directories added to the JVM classpath by `jvm-clj-start'.
-Usually the Clojure and nREPL jars; see test/fetch-clojure-jars.sh for
-working versions.  `jvm-clj-start' also adds this package's
+If nil, `jvm-clj-start' uses `jvm-clj-ensure-jars', which downloads
+`jvm-clj-dependencies'.  `jvm-clj-start' also adds this package's
 `clojure-src'.")
 
+(defvar jvm-clj-dependencies
+  '((:group "org.clojure" :artifact "clojure" :version "1.12.0"
+     :repository "https://repo1.maven.org/maven2"
+     :sha256 "c45333006441a059ea9fdb1341fc6c1f40b921a10dccd82665311e48a0384763")
+    (:group "org.clojure" :artifact "spec.alpha" :version "0.5.238"
+     :repository "https://repo1.maven.org/maven2"
+     :sha256 "94cd99b6ea639641f37af4860a643b6ed399ee5a8be5d717cff0b663c8d75077")
+    (:group "org.clojure" :artifact "core.specs.alpha" :version "0.4.74"
+     :repository "https://repo1.maven.org/maven2"
+     :sha256 "eb73ac08cf49ba840c88ba67beef11336ca554333d9408808d78946e0feb9ddb")
+    ;; nREPL is published to Clojars, not Maven Central.
+    (:group "nrepl" :artifact "nrepl" :version "1.7.0"
+     :repository "https://repo.clojars.org"
+     :sha256 "d07390277190e0a974e1497fd4485005a4964f9f556a50bd530509f48ba65c1b"))
+  "Jars that `jvm-clj-ensure-jars' downloads: Clojure, its deps, and nREPL.
+Each entry is a plist with :group, :artifact, :version, :repository (a
+Maven repository URL), and :sha256 (of the jar).  To use other versions,
+change the entries; a jar whose sha256 differs is rejected.")
+
+(defvar jvm-clj-maven-local-repo "~/.m2/repository"
+  "Local Maven repository where `jvm-clj-ensure-jars' caches jars.
+The default is the one that Maven and Clojure CLI (`clj') use, so jars
+are shared with them.")
+
 (defvar jvm-clj--source-dir
-  (expand-file-name "../clojure-src/"
+  (expand-file-name "clojure-src/"
                     (file-name-directory
                      (or load-file-name buffer-file-name)))
-  "Absolute path to this package's `clojure-src' directory.")
+  "Absolute path to this package's `clojure-src' directory.
+A source checkout sets it in dev-paths.el.")
 
 ;;; Clojure interop primitives (worker await path).
 
@@ -118,6 +143,60 @@ slow work on Clojure's own threads."
   "Canonical `jvm-clj-eval-string' is the direct (main-thread) variant.
 See `jvm-clj-eval-string-await' for the worker-blocking form.")
 
+;;; Dependencies.
+
+(defun jvm-clj--jar-relative-path (dependency)
+  "Return the Maven repository path of DEPENDENCY's jar."
+  (let ((group (plist-get dependency :group))
+        (artifact (plist-get dependency :artifact))
+        (version (plist-get dependency :version)))
+    (format "%s/%s/%s/%s-%s.jar"
+            (subst-char-in-string ?. ?/ group) artifact version artifact version)))
+
+(defun jvm-clj--check-sha256 (file expected)
+  "Signal an error unless FILE's sha256 is EXPECTED."
+  (let ((actual (with-temp-buffer
+                  (set-buffer-multibyte nil)
+                  (insert-file-contents-literally file)
+                  (secure-hash 'sha256 (current-buffer)))))
+    (unless (equal actual expected)
+      (error "jvm-clj: %s has sha256 %s, expected %s" file actual expected))))
+
+(defun jvm-clj--ensure-jar (dependency)
+  "Return the local path of DEPENDENCY's jar.  Download it if missing.
+Check the sha256 of a cached jar and of a downloaded one.  A download
+goes to a temporary file first, so a failed or corrupt download does
+not stay in the cache."
+  (let* ((relative (jvm-clj--jar-relative-path dependency))
+         (local (expand-file-name relative jvm-clj-maven-local-repo))
+         (expected (plist-get dependency :sha256)))
+    (if (file-exists-p local)
+        (jvm-clj--check-sha256 local expected)
+      (make-directory (file-name-directory local) t)
+      (let ((url (concat (plist-get dependency :repository) "/" relative))
+            (temp (make-temp-file
+                   (expand-file-name ".download-" (file-name-directory local)))))
+        (unwind-protect
+            (progn
+              (message "jvm-clj: downloading %s" url)
+              (url-copy-file url temp t)
+              (jvm-clj--check-sha256 temp expected)
+              (rename-file temp local))
+          (when (file-exists-p temp)
+            (delete-file temp)))))
+    local))
+
+(defun jvm-clj-ensure-jars ()
+  "Return the local paths of the jars in `jvm-clj-dependencies'.
+Download a missing jar into `jvm-clj-maven-local-repo'.  This blocks
+Emacs.  Signal an error if a jar's sha256 does not match."
+  (mapcar #'jvm-clj--ensure-jar jvm-clj-dependencies))
+
+(defun jvm-clj--classpath ()
+  "Return the classpath entries that `jvm-clj-start' loads."
+  (append (or jvm-clj-classpath (jvm-clj-ensure-jars))
+          (list jvm-clj--source-dir)))
+
 ;;; Startup.
 
 (defun jvm-clj-start-await (&optional timeout)
@@ -130,7 +209,7 @@ load, or the namespace cannot be required (e.g. no Clojure jar on
     (unless (eq (jvm-start-await nil nil timeout) 'ready)
       (error "jvm-clj-start-await: JVM failed to start (status: %s)"
              (jvm-status))))
-  (dolist (path (append jvm-clj-classpath (list jvm-clj--source-dir)))
+  (dolist (path (jvm-clj--classpath))
     (jvm-load-jar-await path timeout))
   (jvm-clj-require-await "emacs-jni.clj" timeout))
 
@@ -142,7 +221,7 @@ seconds (default 30) each."
     (unless (eq (jvm-start-await nil nil timeout) 'ready)
       (error "jvm-clj-start-direct: JVM failed to start (status: %s)"
              (jvm-status))))
-  (dolist (path (append jvm-clj-classpath (list jvm-clj--source-dir)))
+  (dolist (path (jvm-clj--classpath))
     (jvm-load-jar-await path timeout))
   (jvm-clj-require-direct "emacs-jni.clj"))
 

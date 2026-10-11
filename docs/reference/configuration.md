@@ -5,13 +5,13 @@
 | Variable | Read by | Effect |
 |---|---|---|
 | `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. `test/run-ert-tests.sh` sets it from `mise where java` if it is unset and `mise` is available. |
-| `EMACS_JNI_CLOJURE_JARS_DIR` | the Clojure tests (`test/jvm-clj-*.el`, `test/jvm-symbol-marshal-test.el`) | Directory of Clojure and nREPL jars. If unset, these tests skip. The module and `jvm-clj.el` do not read it. The tutorials and how-to guides read it with `getenv`. |
 | `EMACS_JNI_TEST_FEATURES` | `test/run-ert-tests.sh` | Cargo features for the test build. `test-support` enables `test/jvm-crash-test.el`. Without it, the script skips that file. |
 | `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `test/run-ert-tests.sh` sets it. |
 
 ## Configuration variables
 
-`jvm-classpath`, `jvm-options`, `jvm-status-hook`, `jvm-module-directory`, and `jvm-clj-classpath`:
+`jvm-classpath`, `jvm-options`, `jvm-status-hook`, `jvm-module-directory`, `jvm-clj-classpath`,
+`jvm-clj-dependencies`, and `jvm-clj-maven-local-repo`:
 see [Lisp API reference](lisp-api.md#variables).
 
 ## Build outputs
@@ -21,7 +21,6 @@ see [Lisp API reference](lisp-api.md#variables).
 | `target/debug/libemacs_jni.so` | `cargo build` | The dynamic module that `elisp/jvm.el` loads. |
 | `target/emacs-jni-shim-classes/` | `cargo build` (`build.rs` runs `javac`) | Compiled classes of package `emacs_jni.core`: `LispCallable`, `LispFunction`, `LispNonLocalExit`, `LispSignal`, `LispThrow`, `ReleaseNotifier`, `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Add this directory to the `javac` classpath to compile Java code that uses these types, as for `test/fixtures/Calc.java`. |
 | `target/test-fixtures/` | `test/run-ert-tests.sh` | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
-| `target/clojure-jars/` | `test/fetch-clojure-jars.sh` | The jars in [Prerequisites for Clojure](#prerequisites-for-clojure). The script takes an optional output directory argument. |
 
 `clojure-src/` holds the `emacs-jni.clj` namespace. It is source, not a build output.
 `jvm-clj-start` adds it to the classpath.
@@ -37,7 +36,9 @@ see [Lisp API reference](lisp-api.md#variables).
 
 ## Prerequisites for Clojure
 
-`test/fetch-clojure-jars.sh` downloads these jars. The repository does not include them.
+`jvm-clj-start` downloads these jars into `jvm-clj-maven-local-repo` (default `~/.m2/repository`)
+and checks their sha256. `jvm-clj-dependencies` lists them. To use other jars, set
+`jvm-clj-classpath`.
 
 | Jar | Version | Source |
 |---|---|---|
