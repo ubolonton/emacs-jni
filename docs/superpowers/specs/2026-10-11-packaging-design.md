@@ -35,7 +35,8 @@ Archive layout, `jvm-<version>/`:
 - `jvm.el`, `jvm-clj.el`
 - `jvm-pkg.el`, generated. Version from `Cargo.toml`.
 - the module, with cargo's file name. The suffix comes from batch Emacs `module-file-suffix`.
-- `clojure/`
+- `clojure/`, loaded by `jvm-clj-start`
+- `src/`, `java/`, for source browsing. All three source directories keep their checkout paths.
 
 The archive targets the host platform only.
 
