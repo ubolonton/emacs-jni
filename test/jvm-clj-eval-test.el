@@ -8,11 +8,7 @@
 
 (defun jvm-clj-eval-test--ensure-ready ()
   (unless jvm-clj-eval-test--ready
-    (should (eq (jvm-start-await) 'ready))
-    (dolist (jar (jvm-clj-ensure-jars))
-      (jvm-load-jar-await jar))
-    (jvm-load-jar-await (jvm-clj--source-dir))
-    (jvm-clj-require-await "emacs-jni.clj")
+    (jvm-clj-start-await)
     (setq jvm-clj-eval-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-test/context-classloader-fix-lets-clojure-bootstrap ()

@@ -20,11 +20,7 @@ fi
 CARGO_FEATURES="${EMACS_JNI_TEST_FEATURES:-}"
 if [ "$MODE" = dev ]; then
     # The fixtures need the shim classes that build.rs compiles.
-    if [ -n "$CARGO_FEATURES" ]; then
-        cargo build --features "$CARGO_FEATURES"
-    else
-        cargo build
-    fi
+    cargo build ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
     if [ $# -eq 0 ]; then
         cargo test --lib
     fi
@@ -33,38 +29,20 @@ else
     ELPA_DIR="$PWD/target/package-test-elpa"
     rm -rf "$ELPA_DIR"
     TAR="$(echo target/package/jvm-*.tar)"
-    emacs -Q --batch \
-          --eval "(setq package-user-dir \"$ELPA_DIR\")" \
-          -f package-initialize \
-          --eval "(package-install-file \"$TAR\")"
     EMACS_SETUP=(--eval "(setq package-user-dir \"$ELPA_DIR\")" -f package-initialize)
+    emacs -Q --batch "${EMACS_SETUP[@]}" --eval "(package-install-file \"$TAR\")"
 fi
 
 .config/scripts/build-fixtures.sh
 export EMACS_JNI_GREETER_JAR="$PWD/target/test-fixtures/greeter.jar"
 
-TEST_FILES=("$@")
-if [ ${#TEST_FILES[@]} -eq 0 ]; then
-    TEST_FILES=(test/*.el)
-    # jvm-crash-test.el needs `jvm--test-panic', which only a dev build with
-    # `--features test-support' has.
-    if [ "$MODE" = package ] \
-           || ! [[ "$CARGO_FEATURES" =~ (^|[,[:space:]])test-support($|[,[:space:]]) ]]; then
-        FILTERED_TEST_FILES=()
-        for f in "${TEST_FILES[@]}"; do
-            if [ "$f" = "test/jvm-crash-test.el" ]; then
-                echo "Skipping test/jvm-crash-test.el (needs a dev build with test-support); run: EMACS_JNI_TEST_FEATURES=test-support mise run test test/jvm-crash-test.el"
-            else
-                FILTERED_TEST_FILES+=("$f")
-            fi
-        done
-        TEST_FILES=("${FILTERED_TEST_FILES[@]}")
-    fi
+if [ $# -eq 0 ]; then
+    set -- test/*.el
 fi
 
 # One Emacs process per file: the JVM and the Rust status are per-process singletons.
 overall_status=0
-for f in "${TEST_FILES[@]}"; do
+for f in "$@"; do
     echo "=== $f ==="
     if ! emacs -Q --batch "${EMACS_SETUP[@]}" -l "$f" -f ert-run-tests-batch-and-exit; then
         overall_status=1

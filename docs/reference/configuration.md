@@ -5,7 +5,7 @@
 | Variable | Read by | Effect |
 |---|---|---|
 | `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. mise sets it in tasks. |
-| `EMACS_JNI_TEST_FEATURES` | `mise run test` | Cargo features for the debug test build. `test-support` enables `test/jvm-crash-test.el`. Without it, the task skips that file. `mise run test:package` always skips it. |
+| `EMACS_JNI_TEST_FEATURES` | `mise run test` | Cargo features for the debug test build. `test-support` enables `test/jvm-crash-test.el`. Without it, that test skips itself, as it does in `mise run test:package`. |
 | `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `mise run test` and `mise run test:package` set it. |
 
 ## Configuration variables

@@ -3,6 +3,8 @@
 (require 'ert)
 (require 'jvm)
 
+(declare-function jvm--test-panic "ext:emacs-jni" ())
+
 (defun jvm--wait-for-status (target timeout)
   (let ((deadline (+ (float-time) timeout)))
     (while (not (eq (jvm-status) target))
@@ -11,6 +13,8 @@
           (error "Timed out waiting for status %s, got %s" target (jvm-status)))))))
 
 (ert-deftest emacs-jni-jvm-crash-test/panic-marks-crashed-and-allows-restart ()
+  ;; Only a dev build with `--features test-support' has `jvm--test-panic'.
+  (skip-unless (fboundp 'jvm--test-panic))
   (should (eq (jvm-start-await) 'ready))
   (jvm--test-panic)
   (jvm--wait-for-status 'crashed 10)
