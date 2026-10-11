@@ -344,7 +344,7 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     // `URLClassLoader#addURL` does not check the path, so check it here.
     //
     // A directory also works: `File::toURI` adds the trailing `/` that `URLClassLoader` needs.
-    // `jvm-clj-start` uses this to add `clojure-src/`.
+    // `jvm-clj-start` uses this to add `clojure/`.
     if !std::path::Path::new(&path).exists() {
         crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::LoadJarDone {
             id,

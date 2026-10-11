@@ -12,6 +12,6 @@
 (let ((root (file-name-directory (or load-file-name buffer-file-name))))
   (add-to-list 'load-path (expand-file-name "elisp" root))
   (setq jvm-module-directory (expand-file-name "target/debug/" root)
-        jvm-clj--source-dir (expand-file-name "clojure-src/" root)))
+        jvm-clj--source-dir (expand-file-name "clojure/" root)))
 
 ;;; dev-paths.el ends here

@@ -15,7 +15,7 @@
   "Jar files or directories added to the JVM classpath by `jvm-clj-start'.
 If nil, `jvm-clj-start' uses `jvm-clj-ensure-jars', which downloads
 `jvm-clj-dependencies'.  `jvm-clj-start' also adds this package's
-`clojure-src'.")
+`clojure'.")
 
 (defvar jvm-clj-dependencies
   '((:group "org.clojure" :artifact "clojure" :version "1.12.0"
@@ -42,10 +42,10 @@ The default is the one that Maven and Clojure CLI (`clj') use, so jars
 are shared with them.")
 
 (defvar jvm-clj--source-dir
-  (expand-file-name "clojure-src/"
+  (expand-file-name "clojure/"
                     (file-name-directory
                      (or load-file-name buffer-file-name)))
-  "Absolute path to this package's `clojure-src' directory.
+  "Absolute path to this package's `clojure' directory.
 A source checkout sets it in dev-paths.el.")
 
 ;;; Clojure interop primitives (worker await path).

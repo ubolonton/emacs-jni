@@ -30,7 +30,7 @@ Three coupled changes to the Clojure/JVM/Emacs layers:
 | --- | --- |
 | Java package `emacs_jni`, dir `java/emacs_jni/` | `emacs_jni.core`, dir `java/emacs_jni/core/` |
 | Rust `find_class` / `define_if_absent` / `build.rs` paths `emacs_jni/X` | `emacs_jni/core/X` |
-| Clojure ns `dev.ublt.emacs.clj`, file `clojure-src/dev/ublt/emacs/clj.clj` | `emacs-jni.clj`, file `clojure-src/emacs_jni/clj.clj` |
+| Clojure ns `dev.ublt.emacs.clj`, file `clojure/dev/ublt/emacs/clj.clj` | `emacs-jni.clj`, file `clojure/emacs_jni/clj.clj` |
 | Emacs file `elisp/emacs-jni.el` | `elisp/jvm.el` |
 | `(provide 'emacs-jni)`, `(featurep 'emacs-jni)` | `(provide 'jvm)`, `(featurep 'jvm)` |
 | var `emacs-jni--module-path` | `jvm--module-path` |

@@ -6,7 +6,7 @@
 Clojure jars downloaded on demand by `jvm-clj.el`, and shorter tutorials.
 
 **Architecture:** `jvm.el` and `jvm-clj.el` default to the installed-package layout (module and
-`clojure-src/` next to the `.el` files). A checkout overrides two variables via
+`clojure/` next to the `.el` files). A checkout overrides two variables via
 `scripts/dev-paths.el`. `jvm-clj.el` fetches pinned jars into the Maven local repository and
 checks sha256. Shell logic lives in `scripts/`; mise tasks chain them.
 
@@ -61,7 +61,7 @@ checks sha256. Shell logic lives in `scripts/`; mise tasks chain them.
 
 **Interfaces:**
 - Produces: `jvm-module-directory` (string, directory). `scripts/dev-paths.el` (load with `-l`),
-  which also sets `jvm-clj--source-dir` to `<root>/clojure-src/` (consumed in Task 3).
+  which also sets `jvm-clj--source-dir` to `<root>/clojure/` (consumed in Task 3).
 
 - [ ] **Step 1: Replace the module path logic in `elisp/jvm.el`**
 
@@ -104,7 +104,7 @@ The file name is the one that cargo gives a cdylib on this platform."
              ".." (file-name-directory (or load-file-name buffer-file-name)))))
   (add-to-list 'load-path (expand-file-name "elisp" root))
   (setq jvm-module-directory (expand-file-name "target/debug/" root)
-        jvm-clj--source-dir (expand-file-name "clojure-src/" root)))
+        jvm-clj--source-dir (expand-file-name "clojure/" root)))
 
 ;;; dev-paths.el ends here
 ```
@@ -325,7 +325,7 @@ After `(require 'jvm)` add `(require 'url-handlers)`. Replace the `jvm-clj-class
   "Jar files or directories added to the JVM classpath by `jvm-clj-start'.
 If nil, `jvm-clj-start' uses `jvm-clj-ensure-jars', which downloads
 `jvm-clj-dependencies'.  `jvm-clj-start' also adds this package's
-`clojure-src'.")
+`clojure'.")
 
 (defvar jvm-clj-dependencies
   '((:group "org.clojure" :artifact "clojure" :version "1.12.0"
@@ -352,10 +352,10 @@ The default is the one that Maven and Clojure CLI (`clj') use, so jars
 are shared with them.")
 
 (defvar jvm-clj--source-dir
-  (expand-file-name "clojure-src/"
+  (expand-file-name "clojure/"
                     (file-name-directory
                      (or load-file-name buffer-file-name)))
-  "Absolute path to this package's `clojure-src' directory.
+  "Absolute path to this package's `clojure' directory.
 A source checkout sets it in scripts/dev-paths.el.")
 ```
 
@@ -500,7 +500,7 @@ rm -rf "$PKG_DIR"
 rm -f "$OUT_DIR"/jvm-*.tar
 mkdir -p "$PKG_DIR"
 cp elisp/jvm.el elisp/jvm-clj.el "target/release/$MODULE" "$PKG_DIR/"
-cp -r clojure-src "$PKG_DIR/"
+cp -r clojure "$PKG_DIR/"
 cat > "$PKG_DIR/jvm-pkg.el" <<EOF
 (define-package "jvm" "$VERSION"
   "Embed a JVM in Emacs; call Java and Clojure from Lisp"
@@ -570,7 +570,7 @@ The glob matches one file because `package.sh` removes old archives (Step 1).
 
 Run: `mise run package-test`
 Expected: `package-test: OK`. `tar -tf target/package/jvm-0.1.0.tar` lists `jvm-0.1.0/jvm.el`,
-`jvm-clj.el`, `jvm-pkg.el`, `libemacs_jni.so`, `clojure-src/emacs_jni/clj.clj`.
+`jvm-clj.el`, `jvm-pkg.el`, `libemacs_jni.so`, `clojure/emacs_jni/clj.clj`.
 
 - [ ] **Step 5: Docs**
 

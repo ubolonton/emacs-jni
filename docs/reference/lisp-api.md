@@ -2,7 +2,7 @@
 
 Library `jvm` (`elisp/jvm.el`) loads the dynamic module and defines the core API. Library
 `jvm-clj` (`elisp/jvm-clj.el`) adds Clojure functions. Namespace `emacs-jni.clj`
-(`clojure-src/emacs_jni/clj.clj`) gives Clojure code access to Lisp values.
+(`clojure/emacs_jni/clj.clj`) gives Clojure code access to Lisp values.
 
 ## Variants
 
@@ -97,7 +97,7 @@ step calls `jvm-call-await` or `jvm-call-direct`. See
 
 | Function | Arguments | Returns | Notes |
 |---|---|---|---|
-| `jvm-clj-start-await` | `(&optional timeout)` | Result of Clojure `require`. | If the status is not `ready`, calls `jvm-start-await`. Loads each entry of `jvm-clj-classpath` (if `nil`, the jars from `jvm-clj-ensure-jars`), then this package's `clojure-src/`, with `jvm-load-jar-await`. Requires `emacs-jni.clj`. Signals `error` if the JVM does not become `ready`. |
+| `jvm-clj-start-await` | `(&optional timeout)` | Result of Clojure `require`. | If the status is not `ready`, calls `jvm-start-await`. Loads each entry of `jvm-clj-classpath` (if `nil`, the jars from `jvm-clj-ensure-jars`), then this package's `clojure/`, with `jvm-load-jar-await`. Requires `emacs-jni.clj`. Signals `error` if the JVM does not become `ready`. |
 | `jvm-clj-start-direct` | `(&optional timeout)` | Result of Clojure `require`. | Same as `jvm-clj-start-await`, but requires `emacs-jni.clj` on the direct path. JVM start and jar loading use `-await`, with `timeout`. |
 | `jvm-clj-require-await` | `(namespace &optional timeout)` | Result of Clojure `require`. | `namespace` is a string, for example `"clojure.set"`. |
 | `jvm-clj-require-direct` | `(namespace)` | Result of Clojure `require`. | |
@@ -181,7 +181,7 @@ to get a Clojure symbol or keyword. See
 | `jvm-options` | `jvm` | list of strings | `("-Xrs")` | JVM options for a new JVM, for example `"-Xmx512m"`. Ignored on resume from `paused`. `"-Xrs"` stops the JVM from installing signal handlers. See [Architecture](../explanation/architecture.md). |
 | `jvm-status-hook` | `jvm` | hook | `nil` | Run with one argument, the new status symbol, on every transition, including `starting`, `pausing`, `stopping`. |
 | `jvm-module-directory` | `jvm` | string | directory of `jvm.el` | Directory of the dynamic module. Read once, at load time. Set it before `(require 'jvm)`. `dev-paths.el` sets it to `target/debug/` for a checkout. |
-| `jvm-clj-classpath` | `jvm-clj` | list of strings | `nil` | Jars or directories that `jvm-clj-start` loads. If `nil`, `jvm-clj-start` uses `jvm-clj-ensure-jars`. `jvm-clj-start` also loads `clojure-src/`. |
+| `jvm-clj-classpath` | `jvm-clj` | list of strings | `nil` | Jars or directories that `jvm-clj-start` loads. If `nil`, `jvm-clj-start` uses `jvm-clj-ensure-jars`. `jvm-clj-start` also loads `clojure/`. |
 | `jvm-clj-dependencies` | `jvm-clj` | list of plists | Clojure 1.12.0, spec.alpha 0.5.238, core.specs.alpha 0.4.74, nREPL 1.7.0 | Jars for `jvm-clj-ensure-jars`. Keys: `:group`, `:artifact`, `:version`, `:repository` (Maven repository URL), `:sha256`. |
 | `jvm-clj-maven-local-repo` | `jvm-clj` | string | `"~/.m2/repository"` | Local Maven repository for `jvm-clj-ensure-jars`. The default is shared with Maven and Clojure CLI. |
 

@@ -23,7 +23,7 @@ The crate splits by the runtime that a piece of code needs, not by feature.
 | `src/jvm/test_support.rs` | `create_test_jvm`, for unit tests. |
 | `java/emacs_jni/core/` | The shim classes: `Lisp`, `LispObject`, `LispSymbol`, `LispFunction`, `LispNonLocalExit`, and others. |
 | `elisp/jvm.el`, `elisp/jvm-clj.el` | The public Lisp API, on top of the `jvm--*` defuns. |
-| `clojure-src/emacs_jni/clj.clj` | The `emacs-jni.clj` namespace, on top of the `Lisp` shim class. |
+| `clojure/emacs_jni/clj.clj` | The `emacs-jni.clj` namespace, on top of the `Lisp` shim class. |
 
 In each half, `entry` holds the entry points that the other runtime calls. `inbox` holds the queue
 into that half. `convert` holds the value conversion for that half. `runtime` holds its global
@@ -212,7 +212,7 @@ The script has two modes, which load different code:
 
 | Task | Loads | Also |
 |---|---|---|
-| `mise run test` | The checkout, through `dev-paths.el`: `elisp/`, `target/debug/`, `clojure-src/`. | Builds the debug module. Without file arguments, runs the Rust unit tests first. |
+| `mise run test` | The checkout, through `dev-paths.el`: `elisp/`, `target/debug/`, `clojure/`. | Builds the debug module. Without file arguments, runs the Rust unit tests first. |
 | `mise run test:package` | The archive from `mise run package`, installed into `target/package-test-elpa/` and loaded through package.el (byte-compiled). | Skips `test/jvm-crash-test.el`: the release module has no `test-support`. |
 
 The Clojure tests get their jars from `jvm-clj-ensure-jars`. The first run downloads them.

@@ -20,12 +20,12 @@ see [Lisp API reference](lisp-api.md#variables).
 |---|---|---|
 | `target/debug/libemacs_jni.so` | `mise run build` | The debug dynamic module. `dev-paths.el` points `jvm-module-directory` at it. |
 | `target/release/libemacs_jni.so` | `mise run package` | The release dynamic module, copied into the archive. |
-| `target/package/jvm-<version>.tar` | `mise run package` | The package.el archive for the host platform: `jvm.el`, `jvm-clj.el`, `jvm-pkg.el`, the module, `clojure-src/`. Install it with `M-x package-install-file`. |
+| `target/package/jvm-<version>.tar` | `mise run package` | The package.el archive for the host platform: `jvm.el`, `jvm-clj.el`, `jvm-pkg.el`, the module, `clojure/`. Install it with `M-x package-install-file`. |
 | `target/package-test-elpa/` | `mise run test:package` | Scratch `package-user-dir` that the archive is installed into for the ERT tests. |
 | `target/emacs-jni-shim-classes/` | `cargo build` (`build.rs` runs `javac`) | Compiled classes of package `emacs_jni.core`: `LispCallable`, `LispFunction`, `LispNonLocalExit`, `LispSignal`, `LispThrow`, `ReleaseNotifier`, `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Add this directory to the `javac` classpath to compile Java code that uses these types, as for `test/fixtures/Calc.java`. |
 | `target/test-fixtures/` | `mise run fixtures`, `mise run test`, `mise run test:package` | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
 
-`clojure-src/` holds the `emacs-jni.clj` namespace. It is source, not a build output.
+`clojure/` holds the `emacs-jni.clj` namespace. It is source, not a build output.
 `jvm-clj-start` adds it to the classpath.
 
 ## Prerequisites

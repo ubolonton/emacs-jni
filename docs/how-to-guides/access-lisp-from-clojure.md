@@ -17,7 +17,7 @@ call.
 `jvm-clj-start` does these steps:
 
 1. It starts the JVM if the status is not `ready`.
-2. It loads each entry of `jvm-clj-classpath`, and the `clojure-src` directory of this package.
+2. It loads each entry of `jvm-clj-classpath`, and the `clojure` directory of this package.
    If `jvm-clj-classpath` is `nil`, it loads the jars from `jvm-clj-ensure-jars`. This downloads
    missing jars.
 3. It requires `emacs-jni.clj`.
