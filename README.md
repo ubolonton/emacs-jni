@@ -52,10 +52,12 @@ For a guided start, see [Your first JVM call](docs/tutorials/01-your-first-jvm-c
 mise run test                                   # Rust unit tests, then every ERT file
 mise run test test/jvm-call-test.el             # only the given ERT files
 EMACS_JNI_TEST_FEATURES=test-support mise run test test/jvm-crash-test.el
+mise run test:package                           # every ERT file, against the installed archive
 ```
 
-Each ERT file runs in its own `emacs --batch` process. The task builds the module and the test
-fixture jars first. On the first run, the Clojure tests download the Clojure and nREPL jars into
+Each ERT file runs in its own `emacs --batch` process. `test` loads the checkout through
+`dev-paths.el`. `test:package` builds the archive, installs it into a scratch package directory,
+and loads it through package.el. On the first run, the Clojure tests download the Clojure and nREPL jars into
 `~/.m2/repository`.
 
 For how the Rust side is built, see [Implementation](docs/explanation/implementation.md).

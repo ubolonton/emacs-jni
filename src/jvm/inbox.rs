@@ -548,7 +548,7 @@ mod tests {
     }
 
     /// Builds `test/fixtures/Greeter.java` into `target/test-fixtures/greeter.jar`, so a plain
-    /// `cargo test` does not depend on `test/run-ert-tests.sh`.
+    /// `cargo test` does not depend on `mise run fixtures`.
     fn build_greeter_jar() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let out_dir = manifest_dir.join("target/test-fixtures");

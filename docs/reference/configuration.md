@@ -4,9 +4,9 @@
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. `test/run-ert-tests.sh` sets it from `mise where java` if it is unset and `mise` is available. |
-| `EMACS_JNI_TEST_FEATURES` | `test/run-ert-tests.sh` | Cargo features for the test build. `test-support` enables `test/jvm-crash-test.el`. Without it, the script skips that file. |
-| `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `test/run-ert-tests.sh` sets it. |
+| `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. mise sets it in tasks. |
+| `EMACS_JNI_TEST_FEATURES` | `mise run test` | Cargo features for the debug test build. `test-support` enables `test/jvm-crash-test.el`. Without it, the task skips that file. `mise run test:package` always skips it. |
+| `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `mise run test` and `mise run test:package` set it. |
 
 ## Configuration variables
 
@@ -21,9 +21,9 @@ see [Lisp API reference](lisp-api.md#variables).
 | `target/debug/libemacs_jni.so` | `mise run build` | The debug dynamic module. `dev-paths.el` points `jvm-module-directory` at it. |
 | `target/release/libemacs_jni.so` | `mise run package` | The release dynamic module, copied into the archive. |
 | `target/package/jvm-<version>.tar` | `mise run package` | The package.el archive for the host platform: `jvm.el`, `jvm-clj.el`, `jvm-pkg.el`, the module, `clojure-src/`. Install it with `M-x package-install-file`. |
-| `target/package-test-elpa/` | `mise run package-test` | Scratch `package-user-dir` that the archive smoke test installs into. |
+| `target/package-test-elpa/` | `mise run test:package` | Scratch `package-user-dir` that the archive is installed into for the ERT tests. |
 | `target/emacs-jni-shim-classes/` | `cargo build` (`build.rs` runs `javac`) | Compiled classes of package `emacs_jni.core`: `LispCallable`, `LispFunction`, `LispNonLocalExit`, `LispSignal`, `LispThrow`, `ReleaseNotifier`, `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Add this directory to the `javac` classpath to compile Java code that uses these types, as for `test/fixtures/Calc.java`. |
-| `target/test-fixtures/` | `mise run fixtures` (`test/build-fixtures.sh`) | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
+| `target/test-fixtures/` | `mise run fixtures`, `mise run test`, `mise run test:package` | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
 
 `clojure-src/` holds the `emacs-jni.clj` namespace. It is source, not a build output.
 `jvm-clj-start` adds it to the classpath.
@@ -35,7 +35,7 @@ see [Lisp API reference](lisp-api.md#variables).
 | Operating system | Linux. macOS and Windows are not tested. `jvm.el` uses the module file name that cargo gives on each platform. |
 | Emacs | 28 or later, with dynamic module support. Tested with 30.1. |
 | Rust | Stable toolchain. |
-| mise | Runs the tasks in `.config/mise/`. Installs the pinned JDK. |
+| mise | Runs the tasks in `.config/mise/config.toml`; their scripts are in `.config/scripts/`. Installs the pinned JDK. |
 | JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `.config/mise/config.toml` pins Java 26. `.config/mise/mise.lock` locks 26.0.2.1. |
 
 ## Prerequisites for Clojure

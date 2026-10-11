@@ -19,17 +19,16 @@ An installable package.el archive, mise tasks for build/test/package, and shorte
 
 ## mise tasks (`.config/mise/config.toml`)
 
-No `scripts/` directory. Short tasks are inline in `config.toml`; longer ones are mise file tasks
-in `.config/mise/tasks/` (`test`, `package`). Test helpers live in `test/`
-(`build-fixtures.sh`, `package/smoke-test.el`).
+Every helper script is in `.config/scripts/`, declared in `config.toml` with `file =` (the same
+convention as the doc-lint tasks). Short tasks are inline `run =`.
 
 | Task | Does |
 |---|---|
 | `build` | `cargo build` (debug). |
 | `fixtures` | Builds `target/test-fixtures/{greeter,calc}.jar`. Depends on `build` (Calc needs the shim classes). |
-| `test` | No args: `cargo test --lib`, then all ERT files. With file args: only those ERT files. Honors `EMACS_JNI_TEST_FEATURES`. |
+| `test` | Dev setup (`dev-paths.el`). No args: `cargo test --lib`, then all ERT files. With file args: only those ERT files. Honors `EMACS_JNI_TEST_FEATURES`. |
+| `test:package` | Depends on `package`. Installs the tar into `target/package-test-elpa/`, then runs the same ERT files against it through package.el. Skips the crash test (no `test-support`). |
 | `package` | `cargo build --release`, then makes `target/package/jvm-<version>.tar`. |
-| `package-test` | Installs the tar into a scratch `package-user-dir` under `target/`, then `(require 'jvm)`, `(jvm-start)`, one `jvm-call`. |
 
 Archive layout, `jvm-<version>/`:
 

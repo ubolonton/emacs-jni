@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-#MISE description="Build the package.el archive target/package/jvm-<version>.tar"
-# The archive holds the module for the host platform only. Install it with
-# M-x package-install-file.
+# Build target/package/jvm-<version>.tar, a package.el archive. It holds the module for the host
+# platform only. Install it with M-x package-install-file.
 set -euo pipefail
 
 cargo build --release

@@ -3,8 +3,6 @@
 # puts in target/emacs-jni-shim-classes/, because Calc.java uses them.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
-
 OUT_DIR=target/test-fixtures
 mkdir -p "$OUT_DIR"
 javac -d "$OUT_DIR" test/fixtures/Greeter.java

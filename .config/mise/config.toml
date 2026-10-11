@@ -10,9 +10,17 @@ run = "cargo build"
 [tasks.fixtures]
 description = "Build the test fixture jars"
 depends = ["build"]
-run = "test/build-fixtures.sh"
+file = ".config/scripts/build-fixtures.sh"
 
-[tasks.package-test]
-description = "Install the archive in a scratch package dir and smoke-test it"
+[tasks.test]
+description = "Test the checkout: Rust unit tests and every ERT file, or only the given ERT files"
+file = ".config/scripts/test.sh"
+
+[tasks."test:package"]
+description = "Install the package archive, then run every ERT file, or only the given ones, against it"
 depends = ["package"]
-run = "emacs -Q --batch -l test/package/smoke-test.el target/package/jvm-*.tar"
+run = ".config/scripts/test.sh --package"
+
+[tasks.package]
+description = "Build the package.el archive target/package/jvm-<version>.tar"
+file = ".config/scripts/package.sh"

@@ -203,13 +203,20 @@ The check for an existing VM has no lock. So parallel unit tests can race, and t
 finds `libjvm` through `JAVA_HOME`. Unit tests cover the parts that need no Emacs, for example the
 status state machine, queue order, and JNI conversion.
 
-`mise run test` runs the Rust unit tests, then `test/run-ert-tests.sh`. That script runs the ERT integration tests in `test/*.el`. It compiles the fixture
-jars, builds the module, and runs each test file in a separate `emacs -Q --batch` process. Each file
-needs a separate process because the JVM and the module status are per-process singletons, and a
-restart reuses the destroyed VM. Give file paths as arguments to run only those files.
+`.config/scripts/test.sh` runs the ERT integration tests in `test/*.el`. It builds the fixture
+jars and runs each test file in a separate `emacs -Q --batch` process. Each file needs a separate
+process because the JVM and the module status are per-process singletons, and a restart reuses the
+destroyed VM. Give file paths as arguments to run only those files.
+
+The script has two modes, which load different code:
+
+| Task | Loads | Also |
+|---|---|---|
+| `mise run test` | The checkout, through `dev-paths.el`: `elisp/`, `target/debug/`, `clojure-src/`. | Builds the debug module. Without file arguments, runs the Rust unit tests first. |
+| `mise run test:package` | The archive from `mise run package`, installed into `target/package-test-elpa/` and loaded through package.el (byte-compiled). | Skips `test/jvm-crash-test.el`: the release module has no `test-support`. |
 
 The Clojure tests get their jars from `jvm-clj-ensure-jars`. The first run downloads them.
 
 | Variable | Effect |
 |---|---|
-| `EMACS_JNI_TEST_FEATURES` | Cargo features for the build. `test-support` adds `jvm--test-panic`, which `test/jvm-crash-test.el` needs. Without it, the script skips that file. |
+| `EMACS_JNI_TEST_FEATURES` | Cargo features for the build. `test-support` adds `jvm--test-panic`, which `test/jvm-crash-test.el` needs. Without it, or in package mode, the script skips that file. |
