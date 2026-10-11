@@ -4,41 +4,45 @@
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `EMACS_JNI_MODULE_PATH` | `elisp/jvm.el`, at load time | Path of the dynamic module. Default: `../target/debug/libemacs_jni.so`, relative to `jvm.el`. `test/run-ert-tests.sh` sets it. |
-| `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. `test/run-ert-tests.sh` sets it from `mise where java` if it is unset and `mise` is available. |
-| `EMACS_JNI_CLOJURE_JARS_DIR` | the Clojure tests (`test/jvm-clj-*.el`, `test/jvm-symbol-marshal-test.el`) | Directory of Clojure and nREPL jars. If unset, these tests skip. The module and `jvm-clj.el` do not read it. The tutorials and how-to guides read it with `getenv`. |
-| `EMACS_JNI_TEST_FEATURES` | `test/run-ert-tests.sh` | Cargo features for the test build. `test-support` enables `test/jvm-crash-test.el`. Without it, the script skips that file. |
-| `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `test/run-ert-tests.sh` sets it. |
+| `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. mise sets it in tasks. |
+| `EMACS_JNI_TEST_FEATURES` | `mise run test` | Cargo features for the debug test build. `test-support` enables `test/jvm-crash-test.el`. Without it, that test skips itself, as it does in `mise run test:package`. |
+| `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `mise run test` and `mise run test:package` set it. |
 
 ## Configuration variables
 
-`jvm-classpath`, `jvm-options`, `jvm-status-hook`, `jvm--module-path`, and `jvm-clj-classpath`:
+`jvm-classpath`, `jvm-options`, `jvm-status-hook`, `jvm-module-directory`, `jvm-clj-classpath`,
+`jvm-clj-dependencies`, and `jvm-clj-maven-local-repo`:
 see [Lisp API reference](lisp-api.md#variables).
 
 ## Build outputs
 
 | Path | Produced by | Contents |
 |---|---|---|
-| `target/debug/libemacs_jni.so` | `cargo build` | The dynamic module that `elisp/jvm.el` loads. |
+| `target/debug/libemacs_jni.so` | `mise run build` | The debug dynamic module. `dev-paths.el` points `jvm-module-directory` at it. |
+| `target/release/libemacs_jni.so` | `mise run package` | The release dynamic module, copied into the archive. |
+| `target/package/jvm-<version>.tar` | `mise run package` | The package.el archive for the host platform: `jvm.el`, `jvm-clj.el`, `jvm-pkg.el`, the module, and the `src/`, `java/`, `clojure/` sources. Install it with `M-x package-install-file`. |
+| `target/package-test-elpa/` | `mise run test:package` | Scratch `package-user-dir` that the archive is installed into for the ERT tests. |
 | `target/emacs-jni-shim-classes/` | `cargo build` (`build.rs` runs `javac`) | Compiled classes of package `emacs_jni.core`: `LispCallable`, `LispFunction`, `LispNonLocalExit`, `LispSignal`, `LispThrow`, `ReleaseNotifier`, `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Add this directory to the `javac` classpath to compile Java code that uses these types, as for `test/fixtures/Calc.java`. |
-| `target/test-fixtures/` | `test/run-ert-tests.sh` | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
-| `target/clojure-jars/` | `test/fetch-clojure-jars.sh` | The jars in [Prerequisites for Clojure](#prerequisites-for-clojure). The script takes an optional output directory argument. |
+| `target/test-fixtures/` | `mise run fixtures` | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
 
-`clojure-src/` holds the `emacs-jni.clj` namespace. It is source, not a build output.
+`clojure/` holds the `emacs-jni.clj` namespace. It is source, not a build output.
 `jvm-clj-start` adds it to the classpath.
 
 ## Prerequisites
 
 | Requirement | Version |
 |---|---|
-| Operating system | Linux. macOS and Windows are not supported. |
+| Operating system | Linux. macOS and Windows are not tested. `jvm.el` uses the module file name that cargo gives on each platform. |
 | Emacs | 28 or later, with dynamic module support. Tested with 30.1. |
 | Rust | Stable toolchain. |
+| mise | Runs the tasks in `.config/mise/config.toml`; their scripts are in `.config/scripts/`. Installs the pinned JDK. |
 | JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `.config/mise/config.toml` pins Java 26. `.config/mise/mise.lock` locks 26.0.2.1. |
 
 ## Prerequisites for Clojure
 
-`test/fetch-clojure-jars.sh` downloads these jars. The repository does not include them.
+`jvm-clj-start` downloads these jars into `jvm-clj-maven-local-repo` (default `~/.m2/repository`)
+and checks their sha256. `jvm-clj-dependencies` lists them. To use other jars, set
+`jvm-clj-classpath`.
 
 | Jar | Version | Source |
 |---|---|---|

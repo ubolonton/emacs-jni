@@ -14,15 +14,87 @@
 
 ;;; Code:
 
-(defvar jvm--module-path
-  (or (getenv "EMACS_JNI_MODULE_PATH")
-      (expand-file-name "../target/debug/libemacs_jni.so"
-                        (file-name-directory
-                         (or load-file-name buffer-file-name))))
-  "Path to the built emacs-jni dynamic module (.so file).")
+(defvar jvm--source-directory (file-name-directory (macroexp-file-name))
+  "Directory that holds this package's src/, java/, and clojure/ sources.
+The default, the directory of this file, is the installed-package
+layout.  A source checkout sets it in dev-paths.el.")
+
+(defvar jvm-module-directory jvm--source-directory
+  "Directory that holds the emacs-jni dynamic module.
+The default, the directory of this file, is the installed-package
+layout.  Set it before loading `jvm' to use another build, e.g. a
+checkout's \"target/debug/\" (see dev-paths.el).")
+
+(defun jvm--module-file ()
+  "Return the path of the dynamic module in `jvm-module-directory'.
+The file name is the one that cargo gives a cdylib on this platform."
+  (expand-file-name (concat (if (eq system-type 'windows-nt) "" "lib")
+                            "emacs_jni" module-file-suffix)
+                    jvm-module-directory))
 
 (unless (featurep 'emacs-jni)
-  (module-load jvm--module-path))
+  ;; `module-load' does not record the module's functions in
+  ;; `load-history', so `symbol-file' returns nil for them, and
+  ;; `find-function', xref, and `describe-function' cannot locate them.
+  ;; Record them against the module file.  All of them are named jvm-*.
+  (let ((file (jvm--module-file)))
+    (module-load file)
+    (push (cons file
+                (mapcar (lambda (name) (cons 'defun (intern name)))
+                        (all-completions
+                         "jvm" obarray
+                         (lambda (symbol)
+                           (module-function-p (symbol-function symbol))))))
+          load-history)))
+
+(defun jvm--rust-defun-file (regexp)
+  "Return the first .rs file under `jvm--source-directory' that matches REGEXP.
+Search temporary copies, so that only the caller visits the file."
+  (let ((src (expand-file-name "src" jvm--source-directory)))
+    (when (file-directory-p src)
+      (catch 'found
+        (dolist (file (directory-files-recursively src (rx ".rs" eos)))
+          (with-temp-buffer
+            (insert-file-contents file)
+            (when (re-search-forward regexp nil t)
+              (throw 'found file))))))))
+
+(defun jvm--find-rust-defun (symbol)
+  "Visit the Rust `#[defun]' that defines SYMBOL in `jvm--source-directory'.
+Return (BUFFER . POSITION), where POSITION is the start of the
+docstring above the `#[defun]' (or of the `#[defun]' line if there is
+no docstring).  Return nil if no Rust file defines SYMBOL."
+  (let* ((regexp (rx "#[defun(" (* (not ")"))
+                     "name = \"" (literal (symbol-name symbol)) "\""))
+         (file (jvm--rust-defun-file regexp)))
+    (when file
+      (with-current-buffer (find-file-noselect file)
+        (save-restriction
+          (widen)
+          (goto-char (point-min))
+          (when (re-search-forward regexp nil t)
+            (forward-line 0)
+            (while (and (not (bobp))
+                        (save-excursion
+                          (forward-line -1)
+                          (looking-at-p (rx (* blank) "///"))))
+              (forward-line -1))
+            (cons (current-buffer) (point))))))))
+
+(defun jvm--find-function-search-for-symbol (find-fn symbol type library)
+  "Around advice for `find-function-search-for-symbol'.
+If LIBRARY is the emacs-jni module and TYPE is nil, return the Rust
+`#[defun]' of SYMBOL, so that `find-function', xref, and the
+`describe-function' link do not visit the binary module file.
+Otherwise call FIND-FN with SYMBOL, TYPE, and LIBRARY."
+  (or (and (null type)
+           (stringp library)
+           (file-equal-p library (jvm--module-file))
+           (jvm--find-rust-defun symbol))
+      (funcall find-fn symbol type library)))
+
+(advice-add 'find-function-search-for-symbol :around
+            #'jvm--find-function-search-for-symbol)
 
 ;; Primitives defined by the native module.
 (declare-function jvm--init-channel "ext:emacs-jni" (process))

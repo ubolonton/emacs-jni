@@ -23,7 +23,7 @@ The crate splits by the runtime that a piece of code needs, not by feature.
 | `src/jvm/test_support.rs` | `create_test_jvm`, for unit tests. |
 | `java/emacs_jni/core/` | The shim classes: `Lisp`, `LispObject`, `LispSymbol`, `LispFunction`, `LispNonLocalExit`, and others. |
 | `elisp/jvm.el`, `elisp/jvm-clj.el` | The public Lisp API, on top of the `jvm--*` defuns. |
-| `clojure-src/emacs_jni/clj.clj` | The `emacs-jni.clj` namespace, on top of the `Lisp` shim class. |
+| `clojure/emacs_jni/clj.clj` | The `emacs-jni.clj` namespace, on top of the `Lisp` shim class. |
 
 In each half, `entry` holds the entry points that the other runtime calls. `inbox` holds the queue
 into that half. `convert` holds the value conversion for that half. `runtime` holds its global
@@ -31,6 +31,16 @@ state.
 
 Code in `lisp::` needs an `emacs::Env`, so it runs on the main thread. Code in `jvm::` needs a
 JNI `Env`, so it runs on an attached thread. The direct path runs both on the main thread.
+
+## Source lookup for module functions
+
+`module-load` does not add the module's functions to `load-history`. `jvm.el` adds them, against
+the module file. Then `symbol-file` returns the module file, and `find-function`, elisp xref
+(`M-.`), and the `describe-function` link all call `find-function-search-for-symbol` with it.
+
+`jvm.el` advises `find-function-search-for-symbol` to map the module file to the `#[defun]` in
+`src/` (see `jvm--find-function-search-for-symbol`). The package archive holds `src/`, `java/`,
+and `clojure/` with their checkout paths, so lookup also works for an installed package.
 
 ## Shim classes
 
@@ -203,14 +213,20 @@ The check for an existing VM has no lock. So parallel unit tests can race, and t
 finds `libjvm` through `JAVA_HOME`. Unit tests cover the parts that need no Emacs, for example the
 status state machine, queue order, and JNI conversion.
 
-`test/run-ert-tests.sh` runs the ERT integration tests in `test/*.el`. It compiles the fixture
-jars, builds the module, and runs each test file in a separate `emacs -Q --batch` process. Each file
-needs a separate process because the JVM and the module status are per-process singletons, and a
-restart reuses the destroyed VM. Give file paths as arguments to run only those files.
+`.config/scripts/test.sh` runs the ERT integration tests in `test/*.el`. It builds the fixture
+jars and runs each test file in a separate `emacs -Q --batch` process. Each file needs a separate
+process because the JVM and the module status are per-process singletons, and a restart reuses the
+destroyed VM. Give file paths as arguments to run only those files.
 
-Two environment variables control optional tests:
+The script has two modes, which load different code:
+
+| Task | Loads | Also |
+|---|---|---|
+| `mise run test` | The checkout, through `dev-paths.el`: `elisp/`, `target/debug/`, and the sources at the root. | Builds the debug module. Without file arguments, runs the Rust unit tests first. |
+| `mise run test:package` | The archive from `mise run package`, installed into `target/package-test-elpa/` and loaded through package.el (byte-compiled). | `test/jvm-crash-test.el` skips itself: the release module has no `test-support`. |
+
+The Clojure tests get their jars from `jvm-clj-ensure-jars`. The first run downloads them.
 
 | Variable | Effect |
 |---|---|
-| `EMACS_JNI_CLOJURE_JARS_DIR` | Directory of Clojure and nREPL jars. Clojure tests skip without it. `test/fetch-clojure-jars.sh` downloads the jars. |
-| `EMACS_JNI_TEST_FEATURES` | Cargo features for the build. `test-support` adds `jvm--test-panic`, which `test/jvm-crash-test.el` needs. Without it, the script skips that file. |
+| `EMACS_JNI_TEST_FEATURES` | Cargo features for the build. `test-support` adds `jvm--test-panic`, which `test/jvm-crash-test.el` needs. Without it, the test skips itself. |

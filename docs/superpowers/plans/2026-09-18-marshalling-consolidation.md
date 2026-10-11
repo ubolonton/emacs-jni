@@ -42,7 +42,7 @@ Files touched, by responsibility:
 - `src/worker.rs` — untouched except possibly the `Cmd` doc comment.
 - `elisp/jvm.el` — filter, dispatch, pending alists, `jvm--resolve-sexp-result`, `jvm--service-lisp-requests` call site. Item 2 rewrites the filter to the native drain and deletes text dispatch.
 - `java/emacs_jni/core/LispSignal.java`, `LispThrow.java` — NEW (Item 3). `LispNonLocalExit.java` stays as the shared base.
-- `clojure-src/emacs_jni/clj.clj` — Item 3 replaces `ex-info` translation with typed `catch`.
+- `clojure/emacs_jni/clj.clj` — Item 3 replaces `ex-info` translation with typed `catch`.
 - Java shim loading: `src/jvm_thread.rs` `define_classes`/`shim.rs` embeds bytecode for shim classes — Item 3 adds the two new classes to whatever `include_bytes!`/embed list exists (verify at implementation time; see Task 4 Step 1).
 
 ---
@@ -321,7 +321,7 @@ Give signals and throws their own platform-loader classes extending `LispNonLoca
 - Modify: `java/emacs_jni/core/LispNonLocalExit.java` (make non-`final`; it becomes the shared base).
 - Modify: the shim class-loading list (bytecode embed) — locate via Step 1.
 - Modify: `src/jvm_thread.rs` (`build_non_local_exit` picks the subclass by `kind`).
-- Modify: `clojure-src/emacs_jni/clj.clj` (typed `catch`, delete `ex-info` helpers/predicates).
+- Modify: `clojure/emacs_jni/clj.clj` (typed `catch`, delete `ex-info` helpers/predicates).
 - Test: `test/jvm-clj-test.el` (rewrite the two signal/throw tests to catch by type).
 
 **Interfaces:**
@@ -453,7 +453,7 @@ fn build_non_local_exit<'local>(
 
 - [ ] **Step 6: Replace `ex-info` with typed catch in Clojure**
 
-In `clojure-src/emacs_jni/clj.clj`:
+In `clojure/emacs_jni/clj.clj`:
 - Add `LispSignal LispThrow` to the `:import` (line 11).
 - Make `<-lisp` public and add a public alias `->clj` for tests/consumers:
 
@@ -496,7 +496,7 @@ Run `cargo clippy` — no new warnings.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add java/emacs_jni/core/LispNonLocalExit.java java/emacs_jni/core/LispSignal.java java/emacs_jni/core/LispThrow.java src/jvm_thread.rs clojure-src/emacs_jni/clj.clj test/jvm-clj-test.el
+git add java/emacs_jni/core/LispNonLocalExit.java java/emacs_jni/core/LispSignal.java java/emacs_jni/core/LispThrow.java src/jvm_thread.rs clojure/emacs_jni/clj.clj test/jvm-clj-test.el
 # plus any shim-loading file from Step 1
 git commit -m "feat: first-class LispSignal/LispThrow, drop ex-info
 

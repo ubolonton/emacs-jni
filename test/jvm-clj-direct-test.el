@@ -9,14 +9,8 @@
 (require 'jvm)
 (require 'jvm-clj)
 
-(defvar jvm-clj-direct-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR"))
-
 (defun jvm-clj-direct-test--ensure-ready ()
-  (unless (and jvm-clj-direct-test--jars-dir
-               (file-directory-p jvm-clj-direct-test--jars-dir))
-    (ert-skip "Set EMACS_JNI_CLOJURE_JARS_DIR (see test/fetch-clojure-jars.sh)"))
   (unless (eq (jvm-status) 'ready)
-    (setq jvm-clj-classpath (directory-files jvm-clj-direct-test--jars-dir t "\\.jar\\'"))
     (jvm-clj-start-await)))
 
 (defun jvm-clj-direct-test--eval (code)

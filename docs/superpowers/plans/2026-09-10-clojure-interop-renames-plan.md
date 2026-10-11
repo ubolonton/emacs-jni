@@ -128,33 +128,33 @@ git commit -m "Rename elisp emacs-jni.el -> jvm.el (feature jvm)"
 ### Task 3: Rename Clojure namespace `dev.ublt.emacs.clj` → `emacs-jni.clj`
 
 **Files:**
-- Move: `clojure-src/dev/ublt/emacs/clj.clj` → `clojure-src/emacs_jni/clj.clj`
-- Modify: `clojure-src/emacs_jni/clj.clj` (`ns` form, `:import` package)
+- Move: `clojure/dev/ublt/emacs/clj.clj` → `clojure/emacs_jni/clj.clj`
+- Modify: `clojure/emacs_jni/clj.clj` (`ns` form, `:import` package)
 - Modify: `elisp/jvm-clj.el` (require string `"dev.ublt.emacs.clj"` → `"emacs-jni.clj"`, and the two error-message/doc mentions)
 - Modify: `test/jvm-clj-test.el`, `test/jvm-clojure-test.el` (every `dev.ublt.emacs.clj` → `emacs-jni.clj`)
 - Modify: `src/lisp_requests.rs`, `src/commands.rs` (doc comments mentioning `dev.ublt.emacs.clj`)
 
 **Interfaces:**
-- Produces: Clojure namespace `emacs-jni.clj` (file `clojure-src/emacs_jni/clj.clj`).
+- Produces: Clojure namespace `emacs-jni.clj` (file `clojure/emacs_jni/clj.clj`).
 
 - [ ] **Step 1: Move the source file to the munged path**
 
 ```bash
-mkdir -p clojure-src/emacs_jni
-git mv clojure-src/dev/ublt/emacs/clj.clj clojure-src/emacs_jni/clj.clj
-rmdir -p clojure-src/dev/ublt/emacs 2>/dev/null || true
+mkdir -p clojure/emacs_jni
+git mv clojure/dev/ublt/emacs/clj.clj clojure/emacs_jni/clj.clj
+rmdir -p clojure/dev/ublt/emacs 2>/dev/null || true
 ```
 
 - [ ] **Step 2: Edit the `ns` form and imports**
 
-In `clojure-src/emacs_jni/clj.clj`: `(ns dev.ublt.emacs.clj ...)` → `(ns emacs-jni.clj ...)`. Update the docstring's spec path reference if present. Change `(:import [emacs_jni Lisp LispObject LispSymbol] ...)` → `(:import [emacs_jni.core Lisp LispObject LispSymbol] ...)`.
+In `clojure/emacs_jni/clj.clj`: `(ns dev.ublt.emacs.clj ...)` → `(ns emacs-jni.clj ...)`. Update the docstring's spec path reference if present. Change `(:import [emacs_jni Lisp LispObject LispSymbol] ...)` → `(:import [emacs_jni.core Lisp LispObject LispSymbol] ...)`.
 
 - [ ] **Step 3: Update elisp and tests**
 
 In `elisp/jvm-clj.el`: the `jvm-clojure-require` argument `"dev.ublt.emacs.clj"` → `"emacs-jni.clj"`; update the two doc/error strings that name the namespace.
 In `test/jvm-clj-test.el` and `test/jvm-clojure-test.el`: replace every `dev.ublt.emacs.clj` with `emacs-jni.clj` (docstrings, comments, and the many `(dev.ublt.emacs.clj/…)` eval strings).
 
-Verify: `grep -rn "dev\.ublt\|dev/ublt" clojure-src/ elisp/ test/ src/` returns nothing.
+Verify: `grep -rn "dev\.ublt\|dev/ublt" clojure/ elisp/ test/ src/` returns nothing.
 
 - [ ] **Step 4: Update Rust doc comments**
 
@@ -184,7 +184,7 @@ git commit -m "Rename Clojure namespace dev.ublt.emacs.clj -> emacs-jni.clj"
 - Modify: `src/commands.rs` (`LispReplyValue`: replace `Error(String)` with `Signal`/`Throw`)
 - Modify: `src/lisp_requests.rs` (`reply` takes `&Env`; add `error_to_reply`; update every `reply(id, …)` call site to `reply(env, id, …)`; add a unit test)
 - Modify: `src/jvm_thread.rs` (`handle_lisp_reply`, `handle_invoke_reply`, `build_lisp_reply_object`)
-- Modify: `clojure-src/emacs_jni/clj.clj` (import `LispNonLocalExit`; `apply`/`apply-async` translate to `ex-info`; add predicates)
+- Modify: `clojure/emacs_jni/clj.clj` (import `LispNonLocalExit`; `apply`/`apply-async` translate to `ex-info`; add predicates)
 - Modify: `test/jvm-clj-test.el` (rewrite the error test to assert `ex-info`; add a throw test)
 
 **Interfaces:**
@@ -446,7 +446,7 @@ fn fallback_signal_is_error_symbol_with_message() {
 
 - [ ] **Step 8: Translate to `ex-info` in `emacs-jni.clj`**
 
-In `clojure-src/emacs_jni/clj.clj`, add `LispNonLocalExit` to the `:import` (`[emacs_jni.core Lisp LispObject LispSymbol LispNonLocalExit]`) and replace the `apply` / `apply-async` definitions:
+In `clojure/emacs_jni/clj.clj`, add `LispNonLocalExit` to the `:import` (`[emacs_jni.core Lisp LispObject LispSymbol LispNonLocalExit]`) and replace the `apply` / `apply-async` definitions:
 
 ```clojure
 (defn- lisp-exit->ex-info
@@ -516,7 +516,7 @@ git commit -m "Replace LispError with structured LispSignal/LispThrow via ex-inf
 ### Task 5: Import Lisp symbols and functions into Clojure
 
 **Files:**
-- Modify: `clojure-src/emacs_jni/clj.clj` (helpers, callable `deftype`s, `require-symbol`/`refer-symbols`/`require-function`/`refer-functions`)
+- Modify: `clojure/emacs_jni/clj.clj` (helpers, callable `deftype`s, `require-symbol`/`refer-symbols`/`require-function`/`refer-functions`)
 - Modify: `test/jvm-clj-test.el` (import tests)
 
 **Interfaces:**
@@ -577,7 +577,7 @@ Expected: FAIL (`require-symbol`/`require-function`/`refer-symbols` undefined).
 
 - [ ] **Step 3: Add the name helper and the Lisp-apply runner**
 
-In `clojure-src/emacs_jni/clj.clj` (after `apply`):
+In `clojure/emacs_jni/clj.clj` (after `apply`):
 
 ```clojure
 (defn- sym->lisp-name

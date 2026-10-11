@@ -20,7 +20,7 @@ symbols:
   plus the `emacs_jni.core.LispSymbol` marker class. The only place
   keyword/symbol ↔ Lisp conversion lives, split between native code
   (`src/lisp_requests.rs:110`, `src/jvm_thread.rs:631`) and the Clojure
-  `->lisp`/`<-lisp` (`clojure-src/emacs_jni/clj.clj:14-30`).
+  `->lisp`/`<-lisp` (`clojure/emacs_jni/clj.clj:14-30`).
 
 So `((require-function 'identity) :a)` returns `:a` in Clojure (Lisp-access
 path, `<-lisp`), but `(jvm-clj-eval-string ":a")` returns an opaque user
@@ -165,7 +165,7 @@ caches its defined classes, so the nREPL test's later re-entry into
   converter).
 - `elisp/jvm.el` — `jvm-symbol` arm in `jvm--resolve-sexp-result` (async-path
   OUT converter).
-- `clojure-src/emacs_jni/clj.clj` — public `eval-for-lisp`.
+- `clojure/emacs_jni/clj.clj` — public `eval-for-lisp`.
 - `elisp/jvm-clj.el` — `jvm-clj-eval-string-{direct,await}` resolve
   `emacs-jni.clj/eval-for-lisp`.
 

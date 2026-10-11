@@ -7,20 +7,11 @@
 (require 'ert)
 (require 'jvm-clj)
 
-(defvar jvm-clj-eval-direct-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR"))
-
 (defvar jvm-clj-eval-direct-test--ready nil)
 
 (defun jvm-clj-eval-direct-test--ensure-ready ()
-  (unless (and jvm-clj-eval-direct-test--jars-dir
-               (file-directory-p jvm-clj-eval-direct-test--jars-dir))
-    (ert-skip "Set EMACS_JNI_CLOJURE_JARS_DIR (see test/fetch-clojure-jars.sh) to run this test"))
   (unless jvm-clj-eval-direct-test--ready
-    (should (eq (jvm-start-await) 'ready))
-    (dolist (jar (directory-files jvm-clj-eval-direct-test--jars-dir t "\\.jar\\'"))
-      (jvm-load-jar-await jar))
-    (jvm-load-jar-await jvm-clj--source-dir)
-    (jvm-clj-require-await "emacs-jni.clj")
+    (jvm-clj-start-await)
     (setq jvm-clj-eval-direct-test--ready t)))
 
 (ert-deftest emacs-jni-jvm-clj-eval-direct-test/eval-returns-marshalled-scalar ()

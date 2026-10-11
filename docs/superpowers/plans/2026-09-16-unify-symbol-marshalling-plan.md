@@ -319,7 +319,7 @@ git commit -m "feat: pass Lisp keywords/symbols into jvm-call as markers"
 `clojure.core/eval` of `:a` returns a `clojure.lang.Keyword` the core does not recognise. Route eval-string through `emacs-jni.clj/eval-for-lisp` (`(->lisp (eval form))`) so a keyword/symbol result becomes a marker. Update both eval test files' `ensure-ready` (eval-string now needs `emacs-jni.clj` loaded).
 
 **Files:**
-- Modify: `clojure-src/emacs_jni/clj.clj` (add `eval-for-lisp`, after `intern`, ~line 42)
+- Modify: `clojure/emacs_jni/clj.clj` (add `eval-for-lisp`, after `intern`, ~line 42)
 - Modify: `elisp/jvm-clj.el` (`jvm-clj--invoke-with-form-direct` line 84-86 caller; `jvm-clj-eval-string-direct` line 108; `jvm-clj-eval-string-await` line 59 — change the resolved var)
 - Modify: `test/jvm-clj-eval-test.el` (`ensure-ready`, line 23)
 - Modify: `test/jvm-clj-eval-direct-test.el` (`ensure-ready`, line 17; add keyword/symbol eval tests)
@@ -328,7 +328,7 @@ git commit -m "feat: pass Lisp keywords/symbols into jvm-call as markers"
 - Consumes: `->lisp` (private, same namespace); Task 1's OUT converters; Task 3 not required.
 - Produces: `(jvm-clj-eval-string ":a")` → `:a`; `"'foo"` → `foo`.
 
-- [ ] **Step 1: Add `eval-for-lisp`** in `clojure-src/emacs_jni/clj.clj`, after the `intern` defn (line 42):
+- [ ] **Step 1: Add `eval-for-lisp`** in `clojure/emacs_jni/clj.clj`, after the `intern` defn (line 42):
 
 ```clojure
 (defn eval-for-lisp
@@ -430,7 +430,7 @@ Expected: PASS.
 - [ ] **Step 10: Commit:**
 
 ```bash
-git add clojure-src/emacs_jni/clj.clj elisp/jvm-clj.el test/jvm-clj-eval-test.el test/jvm-clj-eval-direct-test.el
+git add clojure/emacs_jni/clj.clj elisp/jvm-clj.el test/jvm-clj-eval-test.el test/jvm-clj-eval-direct-test.el
 git commit -m "feat: jvm-clj-eval-string returns Lisp keywords/symbols via emacs-jni.clj"
 ```
 

@@ -2,3 +2,25 @@
 babashka = { version = "latest", exe = "bb" }
 clojure = "latest"
 java = "26"
+
+[tasks.build]
+description = "Build the debug module"
+run = "cargo build"
+
+[tasks.fixtures]
+description = "Build the test fixture jars"
+depends = ["build"]
+file = ".config/scripts/build-fixtures.sh"
+
+[tasks.test]
+description = "Test the checkout: Rust unit tests and every ERT file, or only the given ERT files"
+file = ".config/scripts/test.sh"
+
+[tasks."test:package"]
+description = "Install the package archive, then run every ERT file, or only the given ones, against it"
+depends = ["package"]
+run = ".config/scripts/test.sh --package"
+
+[tasks.package]
+description = "Build the package.el archive target/package/jvm-<version>.tar"
+file = ".config/scripts/package.sh"

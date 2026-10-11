@@ -8,16 +8,12 @@
 (require 'jvm)
 (require 'jvm-clj)
 
-(defvar jvm-symbol-marshal-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR"))
 (defvar jvm-symbol-marshal-test--ready nil)
 
 (defun jvm-symbol-marshal-test--ensure-ready ()
-  (unless (and jvm-symbol-marshal-test--jars-dir
-               (file-directory-p jvm-symbol-marshal-test--jars-dir))
-    (ert-skip "Set EMACS_JNI_CLOJURE_JARS_DIR (see test/fetch-clojure-jars.sh) to run this test"))
   (unless jvm-symbol-marshal-test--ready
     (should (eq (jvm-start-await) 'ready))
-    (dolist (jar (directory-files jvm-symbol-marshal-test--jars-dir t "\\.jar\\'"))
+    (dolist (jar (jvm-clj-ensure-jars))
       (jvm-load-jar-await jar))
     (setq jvm-symbol-marshal-test--ready t)))
 

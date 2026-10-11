@@ -4,21 +4,11 @@
 (require 'jvm)
 (require 'jvm-clj)
 
-(defvar jvm-clj-test--jars-dir (getenv "EMACS_JNI_CLOJURE_JARS_DIR")
-  "Directory containing Clojure/nREPL jars, or nil if unset.
-Tests skip when it is unset.")
-
 (defvar jvm-clj-test--ready nil
   "Non-nil once the JVM is started and `emacs-jni.clj' is loaded.")
 
-(defun jvm-clj-test--skip-unless-jars ()
-  (unless (and jvm-clj-test--jars-dir (file-directory-p jvm-clj-test--jars-dir))
-    (ert-skip "Set EMACS_JNI_CLOJURE_JARS_DIR (see test/fetch-clojure-jars.sh) to run this test")))
-
 (defun jvm-clj-test--ensure-ready ()
-  (jvm-clj-test--skip-unless-jars)
   (unless jvm-clj-test--ready
-    (setq jvm-clj-classpath (directory-files jvm-clj-test--jars-dir t "\\.jar\\'"))
     (jvm-clj-start-await)
     (setq jvm-clj-test--ready t)))
 

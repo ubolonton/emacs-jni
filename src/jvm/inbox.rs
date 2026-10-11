@@ -344,7 +344,7 @@ fn handle_load_jar(vm: &JavaVM, id: u64, path: String) {
     // `URLClassLoader#addURL` does not check the path, so check it here.
     //
     // A directory also works: `File::toURI` adds the trailing `/` that `URLClassLoader` needs.
-    // `jvm-clj-start` uses this to add `clojure-src/`.
+    // `jvm-clj-start` uses this to add `clojure/`.
     if !std::path::Path::new(&path).exists() {
         crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::LoadJarDone {
             id,
@@ -548,7 +548,7 @@ mod tests {
     }
 
     /// Builds `test/fixtures/Greeter.java` into `target/test-fixtures/greeter.jar`, so a plain
-    /// `cargo test` does not depend on `test/run-ert-tests.sh`.
+    /// `cargo test` does not depend on `mise run fixtures`.
     fn build_greeter_jar() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let out_dir = manifest_dir.join("target/test-fixtures");

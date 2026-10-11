@@ -229,9 +229,9 @@ No `lisp_handles.rs` table: the `GlobalRef` is owned by the Java
   a pure data carrier (no natives), the wire form for a symbol/keyword.
   Injected like the other shims so it is reachable from `find_class`.
 
-### Clojure — `clojure-src/dev/ublt/emacs/clj.clj`
+### Clojure — `clojure/dev/ublt/emacs/clj.clj`
 
-New source directory `clojure-src/`, added to the JVM classpath. The
+New source directory `clojure/`, added to the JVM classpath. The
 namespace wraps `emacs_jni.Lisp`, mapping Clojure symbols/keywords
 to/from `LispSymbol` markers on the way in/out:
 
@@ -269,7 +269,7 @@ touches the reachable `LispSymbol` shim. Loaded at runtime via
   `` `(lisp-request) `` → `(jvm--service-lisp-requests)`.
 - `jvm-clj.el` (new library):
   - `jvm-clj-classpath` (`defvar`): list of paths added when starting
-    the Clojure side — the user's Clojure jars plus the `clojure-src`
+    the Clojure side — the user's Clojure jars plus the `clojure`
     directory.
   - `jvm-clj-start`: start the JVM if needed (honoring
     `jvm-clj-classpath`), then `(jvm-clojure-require

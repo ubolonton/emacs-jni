@@ -10,25 +10,31 @@ Documentation: [`docs/index.md`](docs/index.md).
 
 ## Prerequisites
 
-- Linux.
+- Linux. Other platforms are not tested.
 - Emacs 28 or later.
 - A stable Rust toolchain.
-- A JDK, found through `JAVA_HOME` or `java` on `PATH`. The repository pins JDK 26 with
-  [mise](https://mise.jdx.dev/).
+- A JDK, found through `JAVA_HOME` or `java` on `PATH`.
+- [mise](https://mise.jdx.dev/). It pins JDK 26 and defines the tasks below.
 
 Details: [Configuration reference](docs/reference/configuration.md).
 
-## Build
+## Install
 
 ```sh
-cargo build
+mise run package    # makes target/package/jvm-0.1.0.tar
 ```
 
-This makes `target/debug/libemacs_jni.so`. `elisp/jvm.el` loads it.
+In Emacs, `M-x package-install-file RET target/package/jvm-0.1.0.tar`. The archive holds the module
+for the host platform only.
 
-## Quick taste
+## Develop
 
-Start `emacs -Q -L elisp` from the repository root, then evaluate:
+```sh
+mise run build      # makes target/debug/libemacs_jni.so
+emacs -Q -l dev-paths.el
+```
+
+`dev-paths.el` puts `elisp/` on `load-path` and points `jvm` at `target/debug/`. In Emacs, evaluate:
 
 ```elisp
 (require 'jvm)
@@ -43,18 +49,15 @@ For a guided start, see [Your first JVM call](docs/tutorials/01-your-first-jvm-c
 ## Testing
 
 ```sh
-cargo test --lib                # Rust unit tests
-./test/run-ert-tests.sh         # ERT integration tests, one emacs --batch process per file
-./test/run-ert-tests.sh test/jvm-call-test.el                    # one test file
-EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh     # adds the crash test
+mise run test                                   # Rust unit tests, then every ERT file
+mise run test test/jvm-call-test.el             # only the given ERT files
+EMACS_JNI_TEST_FEATURES=test-support mise run test test/jvm-crash-test.el
+mise run test:package                           # every ERT file, against the installed archive
 ```
 
-`run-ert-tests.sh` builds the module and the test fixture jars first. The Clojure tests skip
-unless `EMACS_JNI_CLOJURE_JARS_DIR` names a directory with the Clojure and nREPL jars:
-
-```sh
-./test/fetch-clojure-jars.sh    # downloads to target/clojure-jars/
-EMACS_JNI_CLOJURE_JARS_DIR="$PWD/target/clojure-jars" ./test/run-ert-tests.sh
-```
+Each ERT file runs in its own `emacs --batch` process. `test` loads the checkout through
+`dev-paths.el`. `test:package` builds the archive, installs it into a scratch package directory,
+and loads it through package.el. On the first run, the Clojure tests download the Clojure and
+nREPL jars into `~/.m2/repository`.
 
 For how the Rust side is built, see [Implementation](docs/explanation/implementation.md).
