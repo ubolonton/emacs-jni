@@ -179,7 +179,7 @@ to get a Clojure symbol or keyword. See
 | `jvm-classpath` | `jvm` | list of strings | `nil` | Classpath entries for a new JVM. Ignored on resume from `paused`. |
 | `jvm-options` | `jvm` | list of strings | `("-Xrs")` | JVM options for a new JVM, for example `"-Xmx512m"`. Ignored on resume from `paused`. `"-Xrs"` stops the JVM from installing signal handlers. See [Architecture](../explanation/architecture.md). |
 | `jvm-status-hook` | `jvm` | hook | `nil` | Run with one argument, the new status symbol, on every transition, including `starting`, `pausing`, `stopping`. |
-| `jvm--module-path` | `jvm` | string | `$EMACS_JNI_MODULE_PATH`, else `../target/debug/libemacs_jni.so` relative to `jvm.el` | Path of the dynamic module. Read once, at load time. |
+| `jvm-module-directory` | `jvm` | string | directory of `jvm.el` | Directory of the dynamic module. Read once, at load time. Set it before `(require 'jvm)`. `dev-paths.el` sets it to `target/debug/` for a checkout. |
 | `jvm-clj-classpath` | `jvm-clj` | list of strings | `nil` | Jars or directories that `jvm-clj-start` loads (usually the Clojure and nREPL jars). `jvm-clj-start` also loads `clojure-src/`. |
 
 ## Buffers

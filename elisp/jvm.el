@@ -14,15 +14,22 @@
 
 ;;; Code:
 
-(defvar jvm--module-path
-  (or (getenv "EMACS_JNI_MODULE_PATH")
-      (expand-file-name "../target/debug/libemacs_jni.so"
-                        (file-name-directory
-                         (or load-file-name buffer-file-name))))
-  "Path to the built emacs-jni dynamic module (.so file).")
+(defvar jvm-module-directory
+  (file-name-directory (or load-file-name buffer-file-name))
+  "Directory that holds the emacs-jni dynamic module.
+The default, the directory of this file, is the installed-package
+layout.  Set it before loading `jvm' to use another build, e.g. a
+checkout's \"target/debug/\" (see dev-paths.el).")
+
+(defun jvm--module-file ()
+  "Return the path of the dynamic module in `jvm-module-directory'.
+The file name is the one that cargo gives a cdylib on this platform."
+  (expand-file-name (concat (if (eq system-type 'windows-nt) "" "lib")
+                            "emacs_jni" module-file-suffix)
+                    jvm-module-directory))
 
 (unless (featurep 'emacs-jni)
-  (module-load jvm--module-path))
+  (module-load (jvm--module-file)))
 
 ;; Primitives defined by the native module.
 (declare-function jvm--init-channel "ext:emacs-jni" (process))

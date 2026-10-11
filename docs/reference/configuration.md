@@ -4,7 +4,6 @@
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `EMACS_JNI_MODULE_PATH` | `elisp/jvm.el`, at load time | Path of the dynamic module. Default: `../target/debug/libemacs_jni.so`, relative to `jvm.el`. `test/run-ert-tests.sh` sets it. |
 | `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. `test/run-ert-tests.sh` sets it from `mise where java` if it is unset and `mise` is available. |
 | `EMACS_JNI_CLOJURE_JARS_DIR` | the Clojure tests (`test/jvm-clj-*.el`, `test/jvm-symbol-marshal-test.el`) | Directory of Clojure and nREPL jars. If unset, these tests skip. The module and `jvm-clj.el` do not read it. The tutorials and how-to guides read it with `getenv`. |
 | `EMACS_JNI_TEST_FEATURES` | `test/run-ert-tests.sh` | Cargo features for the test build. `test-support` enables `test/jvm-crash-test.el`. Without it, the script skips that file. |
@@ -12,7 +11,7 @@
 
 ## Configuration variables
 
-`jvm-classpath`, `jvm-options`, `jvm-status-hook`, `jvm--module-path`, and `jvm-clj-classpath`:
+`jvm-classpath`, `jvm-options`, `jvm-status-hook`, `jvm-module-directory`, and `jvm-clj-classpath`:
 see [Lisp API reference](lisp-api.md#variables).
 
 ## Build outputs

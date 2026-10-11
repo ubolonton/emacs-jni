@@ -25,7 +25,6 @@ fi
 javac -cp target/emacs-jni-shim-classes -d target/test-fixtures test/fixtures/Calc.java
 jar cf target/test-fixtures/calc.jar -C target/test-fixtures Calc.class
 
-export EMACS_JNI_MODULE_PATH="$(pwd)/target/debug/libemacs_jni.so"
 
 TEST_FILES=("$@")
 if [ ${#TEST_FILES[@]} -eq 0 ]; then
@@ -49,7 +48,7 @@ fi
 overall_status=0
 for f in "${TEST_FILES[@]}"; do
     echo "=== $f ==="
-    if ! emacs -Q --batch -L elisp -l "$f" -f ert-run-tests-batch-and-exit; then
+    if ! emacs -Q --batch -l dev-paths.el -l "$f" -f ert-run-tests-batch-and-exit; then
         overall_status=1
     fi
 done
