@@ -43,18 +43,18 @@ For a guided start, see [Your first JVM call](docs/tutorials/01-your-first-jvm-c
 ## Testing
 
 ```sh
-cargo test --lib                # Rust unit tests
-./test/run-ert-tests.sh         # ERT integration tests, one emacs --batch process per file
-./test/run-ert-tests.sh test/jvm-call-test.el                    # one test file
-EMACS_JNI_TEST_FEATURES=test-support ./test/run-ert-tests.sh     # adds the crash test
+mise run test                                   # Rust unit tests, then every ERT file
+mise run test test/jvm-call-test.el             # only the given ERT files
+EMACS_JNI_TEST_FEATURES=test-support mise run test test/jvm-crash-test.el
 ```
 
-`run-ert-tests.sh` builds the module and the test fixture jars first. The Clojure tests skip
-unless `EMACS_JNI_CLOJURE_JARS_DIR` names a directory with the Clojure and nREPL jars:
+Each ERT file runs in its own `emacs --batch` process. The task builds the module and the test
+fixture jars first. The Clojure tests skip unless `EMACS_JNI_CLOJURE_JARS_DIR` names a directory
+with the Clojure and nREPL jars:
 
 ```sh
 ./test/fetch-clojure-jars.sh    # downloads to target/clojure-jars/
-EMACS_JNI_CLOJURE_JARS_DIR="$PWD/target/clojure-jars" ./test/run-ert-tests.sh
+EMACS_JNI_CLOJURE_JARS_DIR="$PWD/target/clojure-jars" mise run test
 ```
 
 For how the Rust side is built, see [Implementation](docs/explanation/implementation.md).

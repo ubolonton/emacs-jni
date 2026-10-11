@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Run all tests, or only the given ERT files"
+# With no arguments, also run the Rust unit tests.
+set -euo pipefail
+
+if [ $# -eq 0 ]; then
+    cargo test --lib
+fi
+exec test/run-ert-tests.sh "$@"

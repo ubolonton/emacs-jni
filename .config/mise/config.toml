@@ -2,3 +2,12 @@
 babashka = { version = "latest", exe = "bb" }
 clojure = "latest"
 java = "26"
+
+[tasks.build]
+description = "Build the debug module"
+run = "cargo build"
+
+[tasks.fixtures]
+description = "Build the test fixture jars"
+depends = ["build"]
+run = "test/build-fixtures.sh"

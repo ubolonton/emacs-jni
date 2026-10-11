@@ -8,13 +8,7 @@ if [ -z "${JAVA_HOME:-}" ] && command -v mise >/dev/null 2>&1; then
     export JAVA_HOME="$(mise where java)"
 fi
 
-mkdir -p target/test-fixtures
-javac -d target/test-fixtures test/fixtures/Greeter.java
-jar cf target/test-fixtures/greeter.jar -C target/test-fixtures Greeter.class
-export EMACS_JNI_GREETER_JAR="$(pwd)/target/test-fixtures/greeter.jar"
-
-# Build first: Calc.java uses the shim classes that build.rs compiles into
-# target/emacs-jni-shim-classes.
+# Build the module first: the fixtures use the shim classes that build.rs compiles.
 CARGO_FEATURES="${EMACS_JNI_TEST_FEATURES:-}"
 if [ -n "$CARGO_FEATURES" ]; then
     cargo build --features "$CARGO_FEATURES"
@@ -22,9 +16,8 @@ else
     cargo build
 fi
 
-javac -cp target/emacs-jni-shim-classes -d target/test-fixtures test/fixtures/Calc.java
-jar cf target/test-fixtures/calc.jar -C target/test-fixtures Calc.class
-
+test/build-fixtures.sh
+export EMACS_JNI_GREETER_JAR="$(pwd)/target/test-fixtures/greeter.jar"
 
 TEST_FILES=("$@")
 if [ ${#TEST_FILES[@]} -eq 0 ]; then
