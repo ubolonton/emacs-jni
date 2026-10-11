@@ -10,25 +10,31 @@ Documentation: [`docs/index.md`](docs/index.md).
 
 ## Prerequisites
 
-- Linux.
+- Linux. Other platforms are not tested.
 - Emacs 28 or later.
 - A stable Rust toolchain.
-- A JDK, found through `JAVA_HOME` or `java` on `PATH`. The repository pins JDK 26 with
-  [mise](https://mise.jdx.dev/).
+- A JDK, found through `JAVA_HOME` or `java` on `PATH`.
+- [mise](https://mise.jdx.dev/). It pins JDK 26 and defines the tasks below.
 
 Details: [Configuration reference](docs/reference/configuration.md).
 
-## Build
+## Install
 
 ```sh
-cargo build
+mise run package    # makes target/package/jvm-0.1.0.tar
 ```
 
-This makes `target/debug/libemacs_jni.so`. `elisp/jvm.el` loads it.
+In Emacs, `M-x package-install-file RET target/package/jvm-0.1.0.tar`. The archive holds the module
+for the host platform only.
 
-## Quick taste
+## Develop
 
-Start `emacs -Q -L elisp` from the repository root, then evaluate:
+```sh
+mise run build      # makes target/debug/libemacs_jni.so
+emacs -Q -l dev-paths.el
+```
+
+`dev-paths.el` puts `elisp/` on `load-path` and points `jvm` at `target/debug/`. In Emacs, evaluate:
 
 ```elisp
 (require 'jvm)

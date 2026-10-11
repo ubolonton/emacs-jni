@@ -3,21 +3,20 @@
 In this tutorial, we start a JVM inside Emacs. We call a Java method from Lisp. Then we let Java
 call a Lisp function. At the end, Emacs and the JVM call each other in both directions.
 
-This tutorial assumes a working build. If `cargo build` is new to you, read the
+This tutorial uses a checkout of this repository. Install the tools in the
 [Prerequisites](../../README.md#prerequisites) section of the README first.
 
-## Step 1: Build the module and a test jar
+## Step 1: Build the module and the test jars
 
-Run these commands from the repository root:
+Run this command from the repository root:
 
 ```sh
-cargo build
-mkdir -p target/test-fixtures
-javac -d target/test-fixtures test/fixtures/Greeter.java
-jar cf target/test-fixtures/greeter.jar -C target/test-fixtures Greeter.class
+mise run fixtures
 ```
 
-`test/fixtures/Greeter.java` is a small class in this repository:
+It builds the module, `target/debug/libemacs_jni.so`. Then it builds two test jars in
+`target/test-fixtures/`: `greeter.jar` and `calc.jar`. `test/fixtures/Greeter.java` is a small
+class:
 
 ```java
 public class Greeter {
@@ -27,16 +26,16 @@ public class Greeter {
 }
 ```
 
-`cargo build` makes `target/debug/libemacs_jni.so`. This is the dynamic module that
-`elisp/jvm.el` loads.
+We use `calc.jar` in Step 5.
 
-## Step 2: Start Emacs with the module on the load path
+## Step 2: Start Emacs with the checkout on the load path
 
 ```sh
-emacs -Q -L elisp
+emacs -Q -l dev-paths.el
 ```
 
-`-Q` skips your personal init file. `-L elisp` puts `elisp/jvm.el` on the Emacs `load-path`.
+`-Q` skips your personal init file. `dev-paths.el` puts `elisp/` on the Emacs `load-path`. It
+also tells `jvm.el` to load the module from `target/debug/`.
 
 ## Step 3: Load the library and start the JVM
 
@@ -82,17 +81,12 @@ Now call `Greeter.greet()`:
 
 We called a static Java method from Lisp.
 
-## Step 5: Build a second fixture with a constructor and a callback method
+## Step 5: Load a second jar
 
-```sh
-javac -cp target/emacs-jni-shim-classes -d target/test-fixtures test/fixtures/Calc.java
-jar cf target/test-fixtures/calc.jar -C target/test-fixtures Calc.class
-```
+`Calc` has a constructor, an instance method, and the method `callWithArg`, which takes a Lisp
+function as a parameter. We use `callWithArg` in Step 7.
 
-`cargo build` generates the classes in `target/emacs-jni-shim-classes`. `Calc.java` needs them,
-because its method `callWithArg` takes a Lisp function as a parameter. We use it in Step 7.
-
-Load the new jar:
+Load the jar:
 
 ```elisp
 (jvm-load-jar (expand-file-name "target/test-fixtures/calc.jar"))
