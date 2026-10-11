@@ -13,13 +13,15 @@ An installable package.el archive, mise tasks for build/test/package, and shorte
 - `jvm--module-path` and `EMACS_JNI_MODULE_PATH` are removed.
 - `jvm-clj--source-dir` stays private. Its default changes to `clojure-src/` next to
   `jvm-clj.el` (installed-package layout).
-- `scripts/dev-paths.el` sets `load-path`, `jvm-module-directory` (`target/debug/`), and
-  `jvm-clj--source-dir` (`clojure-src/`) for a checkout: `emacs -Q -l scripts/dev-paths.el`.
+- `dev-paths.el` (repo root) sets `load-path`, `jvm-module-directory` (`target/debug/`), and
+  `jvm-clj--source-dir` (`clojure-src/`) for a checkout: `emacs -Q -l dev-paths.el`.
   Tests and docs use it.
 
 ## mise tasks (`.config/mise/config.toml`)
 
-Shell logic stays in scripts; tasks only chain them.
+No `scripts/` directory. Short tasks are inline in `config.toml`; longer ones are mise file tasks
+in `.config/mise/tasks/` (`test`, `package`). Test helpers live in `test/`
+(`build-fixtures.sh`, `package/smoke-test.el`).
 
 | Task | Does |
 |---|---|
