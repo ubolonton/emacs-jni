@@ -57,7 +57,7 @@ mise run test:package                           # every ERT file, against the in
 
 Each ERT file runs in its own `emacs --batch` process. `test` loads the checkout through
 `dev-paths.el`. `test:package` builds the archive, installs it into a scratch package directory,
-and loads it through package.el. On the first run, the Clojure tests download the Clojure and nREPL jars into
-`~/.m2/repository`.
+and loads it through package.el. On the first run, the Clojure tests download the Clojure and
+nREPL jars into `~/.m2/repository`.
 
 For how the Rust side is built, see [Implementation](docs/explanation/implementation.md).

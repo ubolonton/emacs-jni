@@ -27,9 +27,9 @@ In `*scratch*`, evaluate each form one at a time.
 ;; => nil
 ```
 
-On the first call, `jvm-clj-start` downloads four jars into `~/.m2/repository`: Clojure 1.12.0,
-spec.alpha 0.5.238, core.specs.alpha 0.4.74, and nREPL 1.7.0. This can take some seconds. Later
-calls use these jars again.
+On the first call, `jvm-clj-start` downloads the Clojure and nREPL jars into `~/.m2/repository` (see
+[Prerequisites for Clojure](../reference/configuration.md#prerequisites-for-clojure)). This can take
+some seconds. Later calls use these jars again.
 
 `jvm-clj-start` also starts the JVM. Then it loads the four jars and the `emacs-jni.clj` namespace.
 Check the status:
