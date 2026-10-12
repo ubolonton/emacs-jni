@@ -18,6 +18,13 @@ if [ "${1:-}" = --package ]; then
 fi
 
 CARGO_FEATURES="${EMACS_JNI_TEST_FEATURES:-}"
+
+# Absolute paths for Emacs. Native Windows Emacs does not understand MSYS2 paths like /c/foo, so
+# convert them to C:/foo.
+ROOT="$PWD"
+if command -v cygpath >/dev/null; then
+    ROOT="$(cygpath -m "$PWD")"
+fi
 if [ "$MODE" = dev ]; then
     # The fixtures need the shim classes that build.rs compiles.
     cargo build ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
@@ -26,7 +33,7 @@ if [ "$MODE" = dev ]; then
     fi
     EMACS_SETUP=(-l dev-paths.el)
 else
-    ELPA_DIR="$PWD/target/package-test-elpa"
+    ELPA_DIR="$ROOT/target/package-test-elpa"
     rm -rf "$ELPA_DIR"
     TAR="$(echo target/package/jvm-*.tar)"
     EMACS_SETUP=(--eval "(setq package-user-dir \"$ELPA_DIR\")" -f package-initialize)
@@ -34,7 +41,7 @@ else
 fi
 
 .config/scripts/build-fixtures.sh
-export EMACS_JNI_GREETER_JAR="$PWD/target/test-fixtures/greeter.jar"
+export EMACS_JNI_GREETER_JAR="$ROOT/target/test-fixtures/greeter.jar"
 
 if [ $# -eq 0 ]; then
     set -- test/*.el
