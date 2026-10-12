@@ -7,6 +7,13 @@ java = "openjdk-26"
 description = "Build the debug module"
 run = "cargo build"
 
+[tasks.lint]
+description = "Check Rust formatting and clippy warnings"
+run = [
+  "cargo fmt --check",
+  "cargo clippy --all-targets --all-features -- -D warnings",
+]
+
 [tasks.fixtures]
 description = "Build the test fixture jars"
 depends = ["build"]

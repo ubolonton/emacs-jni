@@ -53,6 +53,7 @@ mise run test                                   # Rust unit tests, then every ER
 mise run test test/jvm-call-test.el             # only the given ERT files
 EMACS_JNI_TEST_FEATURES=test-support mise run test test/jvm-crash-test.el
 mise run test:package                           # every ERT file, against the installed archive
+mise run lint                                   # rustfmt and clippy checks
 ```
 
 Each ERT file runs in its own `emacs --batch` process. `test` loads the checkout through
