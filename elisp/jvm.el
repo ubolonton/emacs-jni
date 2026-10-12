@@ -160,9 +160,10 @@ FORMAT-STRING and ARGS are as for `format'."
 (defun jvm--resolve-call (id ok value err)
   "Resolve the pending `jvm-call-async' callback for ID.
 Call the callback with OK, VALUE, and ERR."
-  (when-let ((callback (alist-get id jvm--pending-call)))
-    (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
-    (funcall callback ok value err)))
+  (let ((callback (alist-get id jvm--pending-call)))
+    (when callback
+      (setq jvm--pending-call (assq-delete-all id jvm--pending-call))
+      (funcall callback ok value err))))
 
 (defun jvm--resolve-invoke (id handle args)
   "Call the callback registered for HANDLE with ARGS and reply to the JVM.
@@ -182,9 +183,10 @@ completes the JVM future."
 (defun jvm--resolve-load-jar (id ok err)
   "Resolve the pending `jvm-load-jar-async' callback for ID.
 Call the callback with OK and ERR."
-  (when-let ((callback (alist-get id jvm--pending-load-jar)))
-    (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
-    (funcall callback ok err)))
+  (let ((callback (alist-get id jvm--pending-load-jar)))
+    (when callback
+      (setq jvm--pending-load-jar (assq-delete-all id jvm--pending-load-jar))
+      (funcall callback ok err))))
 
 (defun jvm--apply-status (state detail)
   "Apply a JVM lifecycle transition to STATE, logging optional DETAIL."
