@@ -365,7 +365,21 @@ fn run_callback(env: &Env, handle: u64, args: &[BridgeValue]) -> EmacsResult<Lis
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{MutexGuard, PoisonError};
+
     use super::*;
+
+    /// Serializes the tests that use the process-global [`QUEUE`]. cargo runs tests in parallel,
+    /// so without it a test can drain another test's messages.
+    static QUEUE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Locks [`QUEUE_TEST_LOCK`] and empties the queue. Hold the guard for the whole test.
+    fn lock_queue() -> MutexGuard<'static, ()> {
+        // A failed test poisons the lock. The other tests are still valid.
+        let guard = QUEUE_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        drain();
+        guard
+    }
 
     #[test]
     fn fallback_signal_is_error_symbol_with_message() {
@@ -385,6 +399,7 @@ mod tests {
 
     #[test]
     fn drain_returns_requests_in_fifo_order() {
+        let _queue = lock_queue();
         // `FreeRef` is the simplest variant. No `Env`, so nothing is freed.
         enqueue(Inbound::FreeRef { ptr: 1 });
         enqueue(Inbound::FreeRef { ptr: 2 });
@@ -402,6 +417,7 @@ mod tests {
 
     #[test]
     fn drain_empties_the_queue() {
+        let _queue = lock_queue();
         enqueue(Inbound::FreeRef { ptr: 42 });
         assert_eq!(drain().len(), 1);
         assert!(drain().is_empty());
@@ -410,6 +426,7 @@ mod tests {
     /// `FreeRef` must drain after an earlier request that borrows the same ptr.
     #[test]
     fn apply_enqueued_before_freeref_for_the_same_ptr_drains_before_it() {
+        let _queue = lock_queue();
         enqueue(Inbound::Apply { id: 1, f: LispInput::Obj(99), args: vec![] });
         enqueue(Inbound::FreeRef { ptr: 99 });
         let drained = drain();
@@ -420,6 +437,7 @@ mod tests {
 
     #[test]
     fn message_variants_drain_in_fifo_order() {
+        let _queue = lock_queue();
         enqueue(Inbound::CallDone { id: 1, ok: true, result: BridgeValue::Nil, err: None });
         enqueue(Inbound::Invoke { id: 2, handle: 3, args: vec![] });
         enqueue(Inbound::Release { handle: 4 });
