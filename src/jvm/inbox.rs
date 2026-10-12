@@ -2,6 +2,7 @@
 //! futures waiting for a Lisp reply. Reflective calls are in [`crate::jvm::invoke`].
 
 use std::collections::HashMap;
+use std::env::join_paths;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -225,7 +226,9 @@ fn is_first_attempt(flag: &AtomicBool) -> bool {
 fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String> {
     let mut builder = InitArgsBuilder::new().version(JNIVersion::V1_8);
     if !classpath.is_empty() {
-        builder = builder.option(format!("-Djava.class.path={}", classpath.join(":")));
+        // The separator is `:` on Unix and `;` on Windows.
+        let joined = join_paths(classpath).map_err(|e| e.to_string())?;
+        builder = builder.option(format!("-Djava.class.path={}", joined.to_string_lossy()));
     }
     for opt in options {
         builder = builder.option(opt.clone());
