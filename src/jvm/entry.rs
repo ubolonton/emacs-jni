@@ -131,6 +131,9 @@ pub fn define_classes(env: &mut jni::Env) -> jni::errors::Result<()> {
 /// time. Its error policy throws a `RuntimeException` for a returned `jni::errors::Error`. That
 /// happens only if the request cannot be sent; a failed Lisp callback completes the future
 /// exceptionally instead.
+// FIX: Rust 1.99 deprecates `AtomicBool::fetch_update`, which `native_method!` expands to in
+// jni 0.22.4. Remove the `allow`s when jni stops using it. `expect` would fail on Rust 1.98.
+#[allow(deprecated)]
 fn register_lisp_function_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispFunction"))?;
     const CALL_METHOD: jni::NativeMethod = jni::native_method! {
@@ -183,6 +186,8 @@ fn lisp_function_call<'local>(
 }
 
 /// Registers the native implementation of `ReleaseNotifier.run`.
+// FIX: Deprecated `native_method!` expansion; see `register_lisp_function_native`.
+#[allow(deprecated)]
 fn register_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/ReleaseNotifier"))?;
     const RUN_METHOD: jni::NativeMethod = jni::native_method! {
@@ -234,6 +239,8 @@ const LISP_REQUEST_TIMEOUT_SECS: i64 = 30;
 
 /// Registers the static natives on `emacs_jni.core.Lisp`, which Clojure uses to access Lisp
 /// values.
+// FIX: Deprecated `native_method!` expansion; see `register_lisp_function_native`.
+#[allow(deprecated)]
 fn register_lisp_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/Lisp"))?;
     // Parameters are `Object`: a value can be a `LispObject`, a `LispSymbol`, or a boxed scalar.
@@ -269,6 +276,8 @@ fn register_lisp_native(env: &mut jni::Env) -> jni::errors::Result<()> {
 }
 
 /// Registers `LispObject.prin1ToString`'s native implementation.
+// FIX: Deprecated `native_method!` expansion; see `register_lisp_function_native`.
+#[allow(deprecated)]
 fn register_lisp_object_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispObject"))?;
     const PRIN1_TO_STRING_METHOD: jni::NativeMethod = jni::native_method! {
@@ -281,6 +290,8 @@ fn register_lisp_object_native(env: &mut jni::Env) -> jni::errors::Result<()> {
 }
 
 /// Registers `LispRefReleaseNotifier.run`'s native implementation.
+// FIX: Deprecated `native_method!` expansion; see `register_lisp_function_native`.
+#[allow(deprecated)]
 fn register_lisp_ref_release_notifier_native(env: &mut jni::Env) -> jni::errors::Result<()> {
     let class = env.find_class(jni::jni_str!("emacs_jni/core/LispRefReleaseNotifier"))?;
     const RUN_METHOD: jni::NativeMethod = jni::native_method! {
