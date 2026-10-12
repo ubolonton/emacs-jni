@@ -49,11 +49,8 @@ url = "https://download.clojure.org/install/clojure-tools-1.12.6.1673.tar.gz"
 url = "https://download.clojure.org/install/clojure-tools-1.12.6.1673.tar.gz"
 
 [[tools.java]]
-version = "26.0.2.1"
+version = "openjdk-26.0.2.1"
 backend = "core:java"
-
-[tools.java.options]
-shorthand_vendor = "openjdk"
 
 [tools.java."platforms.linux-arm64"]
 checksum = "sha256:b96b265a4a1a36c02454148891aa58ca63303cbc2d1b7979c33b4fe99e09117b"

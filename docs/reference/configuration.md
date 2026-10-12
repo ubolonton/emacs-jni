@@ -36,7 +36,7 @@ see [Lisp API reference](lisp-api.md#variables).
 | Emacs | 28 or later, with dynamic module support. Tested with 30.1. |
 | Rust | Stable toolchain. |
 | mise | Runs the tasks in `.config/mise/config.toml`; their scripts are in `.config/scripts/`. Installs the pinned JDK. |
-| JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `.config/mise/config.toml` pins Java 26. `.config/mise/mise.lock` locks 26.0.2.1. |
+| JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `.config/mise/config.toml` pins OpenJDK 26. `.config/mise/mise.lock` locks 26.0.2.1. |
 
 ## Prerequisites for Clojure
 

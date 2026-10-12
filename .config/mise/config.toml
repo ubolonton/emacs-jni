@@ -1,7 +1,7 @@
 [tools]
 babashka = { version = "latest", exe = "bb" }
 clojure = "latest"
-java = "26"
+java = "openjdk-26"
 
 [tasks.build]
 description = "Build the debug module"
