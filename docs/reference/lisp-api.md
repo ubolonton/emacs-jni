@@ -180,7 +180,7 @@ to get a Clojure symbol or keyword. See
 | `jvm-classpath` | `jvm` | list of strings | `nil` | Classpath entries for a new JVM. Ignored on resume from `paused`. |
 | `jvm-options` | `jvm` | list of strings | `("-Xrs")` | JVM options for a new JVM, for example `"-Xmx512m"`. Ignored on resume from `paused`. `"-Xrs"` stops the JVM from installing signal handlers. See [Architecture](../explanation/architecture.md). |
 | `jvm-status-hook` | `jvm` | hook | `nil` | Run with one argument, the new status symbol, on every transition, including `starting`, `pausing`, `stopping`. |
-| `jvm-module-directory` | `jvm` | string | directory of `jvm.el` | Directory of the dynamic module. Read once, at load time. Set it before `(require 'jvm)`. `dev-paths.el` sets it to `target/debug/` for a checkout. |
+| `jvm-module-directory` | `jvm` | string | `module/` beside `jvm.el` | Directory of the dynamic module. Read once, at load time. Set it before `(require 'jvm)`. `dev-paths.el` sets it to `target/debug/` for a checkout. |
 | `jvm-clj-classpath` | `jvm-clj` | list of strings | `nil` | Jars or directories that `jvm-clj-start` loads. If `nil`, `jvm-clj-start` uses `jvm-clj-ensure-jars`. `jvm-clj-start` also loads `clojure/`. |
 | `jvm-clj-dependencies` | `jvm-clj` | list of plists | The jars in [Prerequisites for Clojure](configuration.md#prerequisites-for-clojure) | Jars for `jvm-clj-ensure-jars`. Keys: `:group`, `:artifact`, `:version`, `:repository` (Maven repository URL), `:sha256`. |
 | `jvm-clj-maven-local-repo` | `jvm-clj` | string | `"~/.m2/repository"` | Local Maven repository for `jvm-clj-ensure-jars`. The default is shared with Maven and Clojure CLI. |

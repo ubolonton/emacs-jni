@@ -4,7 +4,7 @@
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`. If unset, the module uses the `java` executable on `PATH`. mise sets it in tasks. |
+| `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`, `libjvm.dylib`, or `jvm.dll`. If unset, the module uses the `java` executable on `PATH`. mise sets it in tasks. |
 | `EMACS_JNI_TEST_FEATURES` | `mise run test` | Cargo features for the debug test build. `test-support` enables `test/jvm-crash-test.el`. Without it, that test skips itself, as it does in `mise run test:package`. |
 | `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `mise run test` and `mise run test:package` set it. |
 
@@ -18,12 +18,15 @@ see [Lisp API reference](lisp-api.md#variables).
 
 | Path | Produced by | Contents |
 |---|---|---|
-| `target/debug/libemacs_jni.so` | `mise run build` | The debug dynamic module. `dev-paths.el` points `jvm-module-directory` at it. |
-| `target/release/libemacs_jni.so` | `mise run package` | The release dynamic module, copied into the archive. |
-| `target/package/jvm-<version>.tar` | `mise run package` | The package.el archive for the host platform: `jvm.el`, `jvm-clj.el`, `jvm-pkg.el`, the module, and the `src/`, `java/`, `clojure/` sources. Install it with `M-x package-install-file`. |
+| `target/debug/libemacs_jni.so` [^module] | `mise run build` | The debug dynamic module. `dev-paths.el` points `jvm-module-directory` at it. |
+| `target/release/libemacs_jni.so` [^module] | `mise run package` | The release dynamic module, copied into the archive. |
+| `target/package/jvm-<version>.tar` | `mise run package` | The package.el archive for the host platform: `jvm.el`, `jvm-clj.el`, `jvm-pkg.el`, the module in `module/`, and the `src/`, `java/`, `clojure/` sources. Install it with `M-x package-install-file`. |
 | `target/package-test-elpa/` | `mise run test:package` | Scratch `package-user-dir` that the archive is installed into for the ERT tests. |
 | `target/emacs-jni-shim-classes/` | `cargo build` (`build.rs` runs `javac`) | Compiled classes of package `emacs_jni.core`: `LispCallable`, `LispFunction`, `LispNonLocalExit`, `LispSignal`, `LispThrow`, `ReleaseNotifier`, `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Add this directory to the `javac` classpath to compile Java code that uses these types, as for `test/fixtures/Calc.java`. |
 | `target/test-fixtures/` | `mise run fixtures` | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
+
+[^module]: `libemacs_jni.dylib` on macOS, `emacs_jni.dll` on Windows. `jvm.el` uses the file name
+    that cargo gives on each platform.
 
 `clojure/` holds the `emacs-jni.clj` namespace. It is source, not a build output.
 `jvm-clj-start` adds it to the classpath.
@@ -32,11 +35,11 @@ see [Lisp API reference](lisp-api.md#variables).
 
 | Requirement | Version |
 |---|---|
-| Operating system | Linux. macOS and Windows are not tested. `jvm.el` uses the module file name that cargo gives on each platform. |
-| Emacs | 28 or later, with dynamic module support. Tested with 30.1. |
+| Operating system | Linux, macOS, or Windows. On Windows, build with Rust's GNU toolchain (`stable-gnu`) in an MSYS2 environment whose C runtime is the same as Emacs's: UCRT64 for MSYS2's Emacs and the official 31+ UCRT64 builds, MINGW64 for the other official builds. Run the scripts in `.config/scripts/` from that MSYS2 shell, not through mise. |
+| Emacs | 28 or later, with dynamic module support. CI tests 28.2 to 31.1. |
 | Rust | Stable toolchain. |
 | mise | Runs the tasks in `.config/mise/config.toml`; their scripts are in `.config/scripts/`. Installs the pinned JDK. |
-| JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `.config/mise/config.toml` pins Java 26. `.config/mise/mise.lock` locks 26.0.2.1. |
+| JDK | `javac` on `PATH` at build time. A JDK at run time (see `JAVA_HOME`). `.config/mise/config.toml` pins OpenJDK 26. `.config/mise/mise.lock` locks 26.0.2.1. |
 
 ## Prerequisites for Clojure
 

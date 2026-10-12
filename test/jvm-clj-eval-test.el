@@ -34,24 +34,32 @@ fails with `ExceptionInInitializerError'."
     (should (string-match-p "Divide by zero" (cadr err)))))
 
 (ert-deftest emacs-jni-jvm-clj-nrepl-test/start-serves-real-bencode-protocol ()
-  "An nREPL server answers a bencode `eval' from a separate process.
-The client is bash with /dev/tcp, as an external client would be."
+  "An nREPL server answers a bencode `eval' from a TCP client.
+The client is an Emacs network process, which runs on every platform."
   (jvm-clj-eval-test--ensure-ready)
   (let* ((start-result (jvm-clj-nrepl-start-await))
          (port (car start-result))
          (server (cdr start-result))
          (code "(+ 40 (* 2 1))")
-         (script (format
-                  "exec 3<>/dev/tcp/127.0.0.1/%d; printf '%%s' 'd2:op4:eval4:code%d:%s2:id1:1e' >&3; timeout 5 cat <&3; exec 3<&-; exec 3>&-"
-                  port (length code) code))
-         (response (with-temp-buffer
-                     (call-process "bash" nil t nil "-c" script)
-                     (buffer-string))))
-      ;; Bencode for the `value' key and the result "42".
-      (should (string-match-p "5:value2:42" response))
-      ;; FIX: No `unwind-protect', so a failing `should' leaves the server
-      ;; running until the batch process exits.
-      (jvm-clj-nrepl-stop-await server)))
+         (response "")
+         (client (make-network-process
+                  :name "jvm-clj-nrepl-test-client"
+                  :host "127.0.0.1"
+                  :service port
+                  :coding 'binary
+                  :filter (lambda (_process output)
+                            (setq response (concat response output))))))
+    (unwind-protect
+        (let ((deadline (+ (float-time) 5)))
+          (process-send-string
+           client (format "d2:op4:eval4:code%d:%s2:id1:1e" (length code) code))
+          ;; Bencode for the `value' key and the result "42".
+          (while (and (not (string-match-p "5:value2:42" response))
+                      (< (float-time) deadline))
+            (accept-process-output client 0.1))
+          (should (string-match-p "5:value2:42" response)))
+      (delete-process client)
+      (jvm-clj-nrepl-stop-await server))))
 
 (ert-deftest emacs-jni-jvm-clj-nrepl-test/bind-opens-the-server-beyond-loopback ()
   "With BIND, the server listens on that address, not loopback.

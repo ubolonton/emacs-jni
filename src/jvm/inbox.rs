@@ -2,6 +2,7 @@
 //! futures waiting for a Lisp reply. Reflective calls are in [`crate::jvm::invoke`].
 
 use std::collections::HashMap;
+use std::env::join_paths;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -79,8 +80,9 @@ pub(crate) fn submit(cmd: Cmd) -> Result<(), ()> {
     }
 }
 
-/// Called by the worker just before it exits (stop or panic), so the next `jvm-start` spawns a
-/// new thread.
+/// Called by the worker when it exits (start failure, stop, or panic), so the next `jvm-start`
+/// spawns a new thread. Call it before the worker publishes the terminal status; see
+/// [`handle_stop`].
 pub(crate) fn clear_sender() {
     *SENDER.lock().unwrap() = None;
 }
@@ -132,12 +134,13 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
             vm
         }
         Err(e) => {
+            // Before the status: see `handle_stop`.
+            clear_sender();
             STATUS.finish(Status::StartFailed);
             crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                 status: Status::StartFailed,
                 detail: Some(e),
             });
-            clear_sender();
             return;
         }
     };
@@ -194,12 +197,13 @@ pub(crate) fn run(receiver: Receiver<Cmd>, classpath: Vec<String>, options: Vec<
             Ok(false) => {}
             Err(payload) => {
                 let message = panic_message(&payload);
+                // Before the status: see `handle_stop`.
+                clear_sender();
                 STATUS.finish(Status::Crashed);
                 crate::lisp::inbox::submit(crate::lisp::inbox::Inbound::Status {
                     status: Status::Crashed,
                     detail: Some(message),
                 });
-                clear_sender();
                 return;
             }
         }
@@ -225,7 +229,9 @@ fn is_first_attempt(flag: &AtomicBool) -> bool {
 fn create_jvm(classpath: &[String], options: &[String]) -> Result<JavaVM, String> {
     let mut builder = InitArgsBuilder::new().version(JNIVersion::V1_8);
     if !classpath.is_empty() {
-        builder = builder.option(format!("-Djava.class.path={}", classpath.join(":")));
+        // The separator is `:` on Unix and `;` on Windows.
+        let joined = join_paths(classpath).map_err(|e| e.to_string())?;
+        builder = builder.option(format!("-Djava.class.path={}", joined.to_string_lossy()));
     }
     for opt in options {
         builder = builder.option(opt.clone());
@@ -297,6 +303,9 @@ fn handle_stop(vm: JavaVM) {
     let result = unsafe { vm.destroy() };
     // The `jvm--stop` defun already detached the main thread, so it cannot block `destroy`.
     crate::jvm::runtime::clear();
+    // Before the status. A terminal status lets `jvm-start` through, and a `jvm-start` that still
+    // finds this worker's sender sends `Resume` to an exiting thread, so it stays at `starting`.
+    clear_sender();
     match result {
         Ok(()) => {
             STATUS.finish(Status::Stopped);
@@ -313,7 +322,6 @@ fn handle_stop(vm: JavaVM) {
             });
         }
     }
-    clear_sender();
 }
 
 /// Handles [`Cmd::Resume`]: re-attaches the worker and reports [`Status::Ready`].

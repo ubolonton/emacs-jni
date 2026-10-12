@@ -14,7 +14,7 @@ Run this command from the repository root:
 mise run fixtures
 ```
 
-It builds the module, `target/debug/libemacs_jni.so`. Then it builds two test jars in
+It builds the module in `target/debug/`. Then it builds two test jars in
 `target/test-fixtures/`: `greeter.jar` and `calc.jar`. `test/fixtures/Greeter.java` is a small
 class:
 

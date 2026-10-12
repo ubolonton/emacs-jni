@@ -14,8 +14,11 @@ OUT_DIR=target/package
 PKG_DIR="$OUT_DIR/jvm-$VERSION"
 rm -rf "$PKG_DIR"
 rm -f "$OUT_DIR"/jvm-*.tar
-mkdir -p "$PKG_DIR"
-cp elisp/jvm.el elisp/jvm-clj.el target/release/*emacs_jni"$SUFFIX" "$PKG_DIR/"
+mkdir -p "$PKG_DIR/module"
+cp elisp/jvm.el elisp/jvm-clj.el "$PKG_DIR/"
+# In a subdirectory, which package.el does not scan for autoloads: Emacs 28 reads a .dylib there as
+# Lisp. `jvm-module-directory' points here.
+cp target/release/*emacs_jni"$SUFFIX" "$PKG_DIR/module/"
 # Sources, for browsing (e.g. `find-function' on a module function). They keep their checkout paths.
 cp -r src java clojure "$PKG_DIR/"
 cat > "$PKG_DIR/jvm-pkg.el" <<PKG

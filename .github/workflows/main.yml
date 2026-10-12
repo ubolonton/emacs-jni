@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      # For testing changes to CI.
+      - ci
+    paths-ignore:
+      - '*.md'
+      - docs/**
+      - .claude/**
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '*.md'
+      - docs/**
+      - .claude/**
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Keep every run on main, so that each commit there gets a result.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  lint:
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Set up Rust
+        run: |
+          rustup install stable
+          rustup component add clippy rustfmt
+          rustc -Vv
+          cargo -V
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # build.rs needs javac.
+      - uses: jdx/mise-action@v5
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: mise run lint
+
+  test:
+    name: ${{ matrix.os }} - ${{ matrix.emacs-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-15
+        emacs-version:
+          - '28.2'
+          - '29.4'
+          - '30.1'
+          - '31.1'
+    timeout-minutes: 30
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Set up Rust
+        run: |
+          rustup install stable
+          rustc -Vv
+          cargo -V
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@v5
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs-version }}
+
+      # TODO: Install Emacs another way, e.g. from the distribution or a build against the system
+      # libraries. A Nix Emacs loads Nix's libc and libraries, while the module and the JVM expect
+      # the system's, so they are likely to be incompatible. This step only works around one case.
+      #
+      # setup-emacs installs Emacs from Nix. Nix's dynamic loader does not search the system library
+      # directories, and Nix's Emacs 28 does not load zlib itself, so the JDK's libzip.so cannot find
+      # libz.so.1. Expose only the system zlib, not the whole directory, to keep Nix's other
+      # libraries.
+      - name: Expose the system zlib to Nix's Emacs
+        if: runner.os == 'Linux'
+        run: |
+          zlib_dir="$RUNNER_TEMP/zlib"
+          mkdir -p "$zlib_dir"
+          ln -sf "/usr/lib/$(uname -m)-linux-gnu/libz.so.1" "$zlib_dir/libz.so.1"
+          echo "LD_LIBRARY_PATH=$zlib_dir" >> "$GITHUB_ENV"
+
+      - run: mise run test
+
+      # Only a build with this feature has the panic trigger that the crash test needs.
+      - run: mise run test test/jvm-crash-test.el
+        env:
+          EMACS_JNI_TEST_FEATURES: test-support
+
+      - run: mise run test:package
+
+  windows:
+    name: ${{ matrix.os }} - ${{ matrix.emacs.name }} - ${{ matrix.emacs.msystem }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-2025
+        # The module must link the same C runtime (CRT) as Emacs, otherwise `Env::open_channel`
+        # crashes. gcc is the linker for Rust's GNU toolchain, so the MSYS2 environment selects the
+        # CRT: MINGW64 links MSVCRT, UCRT64 links UCRT.
+        emacs:
+          # MSYS2's Emacs package (UCRT). MSYS2 only has the latest version.
+          - name: msys2
+            msystem: UCRT64
+          # Official GNU builds (MSVCRT).
+          - name: '29.4'
+            msystem: MINGW64
+            zip: emacs-29/emacs-29.4.zip
+          - name: '30.1'
+            msystem: MINGW64
+            zip: emacs-30/emacs-30.1.zip
+          # Official GNU UCRT64 builds (Emacs 31+).
+          - name: '31.1'
+            msystem: UCRT64
+            zip: emacs-31/emacs-31.1-UCRT64.zip
+    timeout-minutes: 30
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Puts the selected environment's gcc ahead of the runner's pre-installed gcc in PATH.
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.emacs.msystem }}
+          update: true
+          # So we can use Rust, Java, and mise, which are not from MSYS2.
+          path-type: inherit
+          install: >-
+            base-devel
+            unzip
+          pacboy: >-
+            toolchain:p
+            ${{ !matrix.emacs.zip && 'emacs:p' || '' }}
+
+      - name: Set up Rust
+        run: |
+          rustup install stable-gnu
+          rustup default stable-gnu
+          rustc -Vv
+          cargo -V
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Only the JDK: the tests need no other mise tool.
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: java
+
+      # The steps below run the task scripts directly, not through mise: on Windows, mise runs
+      # tasks with cmd.exe, and the scripts need Bash.
+      - name: Put the JDK on PATH
+        run: |
+          java_home=$(mise where java)
+          echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
+          echo "$java_home\\bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install official GNU Emacs
+        if: matrix.emacs.zip
+        env:
+          EMACS_ZIP: ${{ matrix.emacs.zip }}
+        run: |
+          emacs_dir=$(cygpath -u "$RUNNER_TEMP")/emacs
+          curl -sSfL -o emacs.zip "https://ftp.gnu.org/gnu/emacs/windows/$EMACS_ZIP"
+          unzip -q emacs.zip -d "$emacs_dir"
+          # Some zips have a top-level directory (e.g. emacs-28.2/), some don't.
+          emacs_exe=$(find "$emacs_dir" -path '*/bin/emacs.exe')
+          cygpath -w "$(dirname "$emacs_exe")" >> "$GITHUB_PATH"
+
+      - run: .config/scripts/test.sh
+
+      - run: .config/scripts/test.sh test/jvm-crash-test.el
+        env:
+          EMACS_JNI_TEST_FEATURES: test-support
+
+      - run: |
+          .config/scripts/package.sh
+          .config/scripts/test.sh --package

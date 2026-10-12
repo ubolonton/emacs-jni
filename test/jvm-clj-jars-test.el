@@ -25,7 +25,11 @@ lists it with SHA256.  BODY can use `remote' and `local'."
           (jvm-clj-maven-local-repo local)
           (jvm-clj-dependencies
            (list (list :group "example" :artifact "demo" :version "1.0"
-                       :repository (concat "file://" remote)
+                       ;; file:///c:/foo on Windows.  file://c:/foo would make
+                       ;; "c:" the host, which `url-file' fetches through FTP.
+                       :repository (concat "file://"
+                                           (unless (string-prefix-p "/" remote) "/")
+                                           remote)
                        :sha256 ,sha256))))
      (unwind-protect
          (let ((jar (expand-file-name jvm-clj-jars-test--jar remote)))
