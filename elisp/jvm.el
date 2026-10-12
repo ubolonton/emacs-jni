@@ -19,11 +19,13 @@
 The default, the directory of this file, is the installed-package
 layout.  A source checkout sets it in dev-paths.el.")
 
-(defvar jvm-module-directory jvm--source-directory
+(defvar jvm-module-directory (expand-file-name "module/" jvm--source-directory)
   "Directory that holds the emacs-jni dynamic module.
-The default, the directory of this file, is the installed-package
-layout.  Set it before loading `jvm' to use another build, e.g. a
-checkout's \"target/debug/\" (see dev-paths.el).")
+The default, module/ beside this file, is the installed-package layout.
+The module is in a subdirectory because Emacs 28's package.el reads
+every .dylib file in the package directory as Lisp, to find autoloads.
+Set it before loading `jvm' to use another build, e.g. a checkout's
+\"target/debug/\" (see dev-paths.el).")
 
 (defun jvm--module-file ()
   "Return the path of the dynamic module in `jvm-module-directory'.
