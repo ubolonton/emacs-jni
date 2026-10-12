@@ -10,7 +10,7 @@ Documentation: [`docs/index.md`](docs/index.md).
 
 ## Prerequisites
 
-- Linux. Other platforms are not tested.
+- Linux, macOS, or Windows (MSYS2; see the configuration reference).
 - Emacs 28 or later.
 - A stable Rust toolchain.
 - A JDK, found through `JAVA_HOME` or `java` on `PATH`.
@@ -30,7 +30,7 @@ for the host platform only.
 ## Develop
 
 ```sh
-mise run build      # makes target/debug/libemacs_jni.so
+mise run build      # makes the module in target/debug/
 emacs -Q -l dev-paths.el
 ```
 
@@ -60,5 +60,8 @@ Each ERT file runs in its own `emacs --batch` process. `test` loads the checkout
 `dev-paths.el`. `test:package` builds the archive, installs it into a scratch package directory,
 and loads it through package.el. On the first run, the Clojure tests download the Clojure and
 nREPL jars into `~/.m2/repository`.
+
+CI (`.github/workflows/main.yml`) runs these tasks for pull requests and pushes to `main`, on Linux
+(x86-64, arm64), macOS (arm64), and Windows, with Emacs 28 to 31.
 
 For how the Rust side is built, see [Implementation](docs/explanation/implementation.md).
