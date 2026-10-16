@@ -4,7 +4,7 @@
 (require 'jvm)
 
 (defvar jvm-invoke-test--calc-jar
-  (expand-file-name "../target/test-fixtures/calc.jar"
+  (expand-file-name "../../target/test-fixtures/calc.jar"
                      (file-name-directory (or load-file-name buffer-file-name))))
 
 (defun jvm-invoke-test--ensure-ready ()

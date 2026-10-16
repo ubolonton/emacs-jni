@@ -555,13 +555,13 @@ mod tests {
         assert!(!is_first_attempt(&flag), "every call after that must keep reporting false");
     }
 
-    /// Builds `test/fixtures/Greeter.java` into `target/test-fixtures/greeter.jar`, so a plain
+    /// Builds `tests/fixtures/Greeter.java` into `target/test-fixtures/greeter.jar`, so a plain
     /// `cargo test` does not depend on `mise run fixtures`.
     fn build_greeter_jar() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let out_dir = manifest_dir.join("target/test-fixtures");
         std::fs::create_dir_all(&out_dir).expect("failed to create target/test-fixtures");
-        let source = manifest_dir.join("test/fixtures/Greeter.java");
+        let source = manifest_dir.join("tests/fixtures/Greeter.java");
 
         let status = Command::new("javac")
             .arg("-d")

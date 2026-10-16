@@ -15,7 +15,7 @@ mise run fixtures
 ```
 
 It builds the module in `target/debug/`. Then it builds two test jars in
-`target/test-fixtures/`: `greeter.jar` and `calc.jar`. `test/fixtures/Greeter.java` is a small
+`target/test-fixtures/`: `greeter.jar` and `calc.jar`. `tests/fixtures/Greeter.java` is a small
 class:
 
 ```java

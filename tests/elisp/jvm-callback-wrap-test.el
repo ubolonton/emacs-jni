@@ -4,7 +4,7 @@
 (require 'jvm)
 
 (defvar jvm-callback-wrap-test--calc-jar
-  (expand-file-name "../target/test-fixtures/calc.jar"
+  (expand-file-name "../../target/test-fixtures/calc.jar"
                      (file-name-directory (or load-file-name buffer-file-name))))
 
 (ert-deftest emacs-jni-jvm-callback-wrap-test/lisp-function-becomes-lispcallable ()

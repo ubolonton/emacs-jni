@@ -8,7 +8,7 @@
 # With --package, test the archive that `mise run package` built: install it into a scratch
 # `package-user-dir` and load it through package.el.
 #
-# Without ERT-FILE, run every test/*.el file.
+# Without ERT-FILE, run every tests/elisp/*.el file.
 set -euo pipefail
 
 MODE=dev
@@ -44,7 +44,7 @@ fi
 export EMACS_JNI_GREETER_JAR="$ROOT/target/test-fixtures/greeter.jar"
 
 if [ $# -eq 0 ]; then
-    set -- test/*.el
+    set -- tests/elisp/*.el
 fi
 
 # One Emacs process per file: the JVM and the Rust status are per-process singletons.

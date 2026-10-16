@@ -5,7 +5,7 @@ set -euo pipefail
 
 OUT_DIR=target/test-fixtures
 mkdir -p "$OUT_DIR"
-javac -d "$OUT_DIR" test/fixtures/Greeter.java
+javac -d "$OUT_DIR" tests/fixtures/Greeter.java
 jar cf "$OUT_DIR/greeter.jar" -C "$OUT_DIR" Greeter.class
-javac -cp target/emacs-jni-shim-classes -d "$OUT_DIR" test/fixtures/Calc.java
+javac -cp target/emacs-jni-shim-classes -d "$OUT_DIR" tests/fixtures/Calc.java
 jar cf "$OUT_DIR/calc.jar" -C "$OUT_DIR" Calc.class
