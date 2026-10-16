@@ -61,13 +61,15 @@
 
 (deftest lisp-error-is-thrown-as-lisp-signal
   (let [^LispSignal e (is (thrown? LispSignal (l/apply 'error "boom")))]
-    (is (= 'error (l/->clj (.-symbol e))))))
+    (is (= 'error (l/->clj (.-symbol e))))
+    (is (= "(error \"boom\")" (.getMessage e)))))
 
 (deftest lisp-throw-is-thrown-as-lisp-throw
   (let [form (l/apply 'read "(throw 'my-tag 42)")
         ^LispThrow e (is (thrown? LispThrow (l/apply 'eval form)))]
     (is (= 'my-tag (l/->clj (.-tag e))))
-    (is (= 42 (.-value e)))))
+    (is (= 42 (.-value e)))
+    (is (= "(throw my-tag 42)" (.getMessage e)))))
 
 (deftest type-of-returns-a-clojure-symbol
   (is (= 'string (l/type-of "hello"))))

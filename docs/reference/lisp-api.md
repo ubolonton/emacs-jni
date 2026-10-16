@@ -162,10 +162,10 @@ A Lisp `signal` or `throw` during `apply` throws a typed exception. `apply-async
 future exceptionally with the same exception. `deref` and `.get` wrap it in
 `java.util.concurrent.ExecutionException`. Use `(.getCause e)`.
 
-| Lisp exit | Class | Fields |
-|---|---|---|
-| `signal` | `emacs_jni.core.LispSignal` | `symbol`, `data` |
-| `throw` | `emacs_jni.core.LispThrow` | `tag`, `value` |
+| Lisp exit | Class | Fields | Message (`getMessage`) |
+|---|---|---|---|
+| `signal` | `emacs_jni.core.LispSignal` | `symbol`, `data` | The condition, for example `(error "boom")` |
+| `throw` | `emacs_jni.core.LispThrow` | `tag`, `value` | For example `(throw my-tag 42)` |
 
 Both classes extend `emacs_jni.core.LispNonLocalExit` (a `RuntimeException`), with fields `kind`
 (0 = signal, 1 = throw), `symbolOrTag`, and `dataOrValue`. Field values are not converted to

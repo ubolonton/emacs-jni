@@ -26,6 +26,13 @@ Every test calls this: ERT does not run tests in definition order."
                                  (list (lambda (_n) (signal 'wrong-type-argument '(numberp "x"))) 1))
                  "wrong-type-argument")))
 
+(ert-deftest emacs-jni-jvm-invoke-test/lisp-callback-error-message-is-the-condition ()
+  "The message of the `LispSignal' from a failed callback is the condition."
+  (jvm-invoke-test--ensure-ready)
+  (should (equal (jvm-call-await "Calc" "callbackErrorMessage"
+                                 (list (lambda (_n) (signal 'wrong-type-argument '(numberp "x"))) 1))
+                 "(wrong-type-argument numberp \"x\")")))
+
 (ert-deftest emacs-jni-jvm-invoke-test/java-calls-lisp-with-a-real-object-argument ()
   "A Java object passed to a Lisp callback arrives as a `user-ptr'."
   (jvm-invoke-test--ensure-ready)

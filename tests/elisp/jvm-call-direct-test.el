@@ -78,6 +78,13 @@ is the same for two separate calls."
                                         1))
                  "wrong-type-argument")))
 
+(ert-deftest emacs-jni-jvm-call-direct-test/lisp-callback-error-message-is-the-condition ()
+  "The message of the `LispSignal' from a failed callback is the condition."
+  (jvm-call-direct-test--ensure-ready)
+  (should (equal (jvm-call-direct "Calc" "callbackErrorMessage"
+                                  (list (lambda (_n) (signal 'wrong-type-argument '(numberp "x"))) 1))
+                 "(wrong-type-argument numberp \"x\")")))
+
 (ert-deftest emacs-jni-jvm-call-direct-test/callback-receives-a-java-object ()
   "A Java object passed to a callback inside a direct call arrives wrapped."
   (jvm-call-direct-test--ensure-ready)

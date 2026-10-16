@@ -35,12 +35,16 @@ public class LispNonLocalExit extends RuntimeException {
      * Creates an exit of the given kind. Use the {@link LispSignal} or {@link LispThrow}
      * constructor instead.
      *
+     * <p>Lisp prints {@code message} on the Emacs main thread, while the values are live. A
+     * message built later in Java would need a call back into Lisp, which can block.
+     *
      * @param kind {@link #SIGNAL} or {@link #THROW}
      * @param symbolOrTag the error symbol or the catch tag
      * @param dataOrValue the error data or the thrown value
+     * @param message the exit, printed by Lisp, or {@code null}
      */
-    public LispNonLocalExit(int kind, Object symbolOrTag, Object dataOrValue) {
-        super();
+    public LispNonLocalExit(int kind, Object symbolOrTag, Object dataOrValue, String message) {
+        super(message);
         this.kind = kind;
         this.symbolOrTag = symbolOrTag;
         this.dataOrValue = dataOrValue;

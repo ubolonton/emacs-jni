@@ -15,7 +15,9 @@ use std::sync::Mutex;
 use emacs::{Env, GlobalRef, Result as EmacsResult, Value};
 
 use crate::jvm::inbox::{self, Cmd};
-use crate::lisp::convert::{from_bridge, from_input, to_bridge, to_outcome};
+use crate::lisp::convert::{
+    from_bridge, from_input, signal_message, throw_message, to_bridge, to_outcome,
+};
 use crate::protocol::{BridgeValue, LispInput, LispOutcome, Status};
 
 /// One JVM→Emacs message. The first seven variants are Lisp-access requests; all except
@@ -135,10 +137,11 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispOutcome {
             let symbol = unsafe { symbol.value(env) };
             // SAFETY: as for `symbol`.
             let data = unsafe { data.value(env) };
+            let message = signal_message(env, symbol, data);
             let s = boxed(to_outcome(env, symbol));
             let d = boxed(to_outcome(env, data));
             match (s, d) {
-                (Some(symbol), Some(data)) => LispOutcome::Signal { symbol, data },
+                (Some(symbol), Some(data)) => LispOutcome::Signal { symbol, data, message },
                 // If only one side converted, it may hold a boxed `GlobalRef`. Free it.
                 (s, d) => {
                     free_reply_ptr(env, s);
@@ -152,10 +155,11 @@ fn error_to_reply(env: &Env, e: emacs::Error) -> LispOutcome {
             let tag = unsafe { tag.value(env) };
             // SAFETY: as for `Signal` above.
             let value = unsafe { value.value(env) };
+            let message = throw_message(env, tag, value);
             let t = boxed(to_outcome(env, tag));
             let v = boxed(to_outcome(env, value));
             match (t, v) {
-                (Some(tag), Some(value)) => LispOutcome::Throw { tag, value },
+                (Some(tag), Some(value)) => LispOutcome::Throw { tag, value, message },
                 (t, v) => {
                     free_reply_ptr(env, t);
                     free_reply_ptr(env, v);
@@ -180,7 +184,8 @@ fn free_reply_ptr(env: &Env, v: Option<Box<LispOutcome>>) {
 }
 
 /// A [`LispOutcome::Signal`] reply for a Rust-internal error: symbol `error`, data the message.
-/// `data` is a string, not a list, because this path has no [`Env`] to build a list.
+/// `data` is a string, not a list, because this path has no [`Env`] to build a list. The Java
+/// message is `message` itself.
 fn fallback_signal(message: &str) -> LispOutcome {
     LispOutcome::Signal {
         symbol: Box::new(LispOutcome::Value(BridgeValue::Symbol {
@@ -188,6 +193,7 @@ fn fallback_signal(message: &str) -> LispOutcome {
             keyword: false,
         })),
         data: Box::new(LispOutcome::Value(BridgeValue::Str(message.to_string()))),
+        message: Some(message.to_string()),
     }
 }
 
@@ -384,7 +390,7 @@ mod tests {
     #[test]
     fn fallback_signal_is_error_symbol_with_message() {
         match fallback_signal("boom") {
-            LispOutcome::Signal { symbol, data } => {
+            LispOutcome::Signal { symbol, data, message } => {
                 assert!(matches!(
                     *symbol,
                     LispOutcome::Value(BridgeValue::Symbol { ref name, keyword: false }) if name == "error"
@@ -392,6 +398,7 @@ mod tests {
                 assert!(
                     matches!(*data, LispOutcome::Value(BridgeValue::Str(ref s)) if s == "boom")
                 );
+                assert_eq!(message.as_deref(), Some("boom"));
             }
             _ => panic!("expected Signal"),
         }

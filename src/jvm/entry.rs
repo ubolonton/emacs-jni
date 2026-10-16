@@ -339,20 +339,22 @@ fn service_lisp_request_direct<'local>(
     .ok_or_else(|| crate::jvm::convert::marshal_error("reentrant Lisp call lost its Env scope"))?;
 
     match reply {
-        crate::protocol::LispOutcome::Signal { symbol, data } => {
+        crate::protocol::LispOutcome::Signal { symbol, data, message } => {
             Err(crate::jvm::invoke::throw_non_local_exit(
                 env,
                 crate::protocol::NON_LOCAL_EXIT_SIGNAL,
                 *symbol,
                 *data,
+                message,
             ))
         }
-        crate::protocol::LispOutcome::Throw { tag, value } => {
+        crate::protocol::LispOutcome::Throw { tag, value, message } => {
             Err(crate::jvm::invoke::throw_non_local_exit(
                 env,
                 crate::protocol::NON_LOCAL_EXIT_THROW,
                 *tag,
                 *value,
+                message,
             ))
         }
         other => crate::jvm::invoke::build_lisp_reply_object(env, other),

@@ -218,6 +218,7 @@ fn jvm_invoke_reply(env: &Env, id: u64, ok: Value, value: Value) -> Result<()> {
         crate::protocol::LispOutcome::Signal {
             symbol: Box::new(crate::lisp::convert::to_outcome(env, symbol)?),
             data: Box::new(crate::lisp::convert::to_outcome(env, data)?),
+            message: crate::lisp::convert::signal_message(env, symbol, data),
         }
     };
     let _ = crate::jvm::inbox::submit(crate::jvm::inbox::Cmd::InvokeReply { id, outcome });
