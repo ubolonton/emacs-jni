@@ -235,7 +235,7 @@ run the same files:
 
 | Runner | Entry | Report |
 |---|---|---|
-| Clojure-owned | `mise run test:clj` (`test.sh --clojure`). `jvm-clj-test-runner-run-batch-and-exit` calls `clojure.test/run-tests` once for each path. | The `clojure.test` report. Exit status 1 if a test fails. |
+| Clojure-owned | `mise run test:clj` (`test.sh --clojure`). `jvm-clj-test-runner-run-batch-and-exit` runs the suite once for each path, with the `clojure.test` reporter. | One line for each test, as in `cargo test`, then the `clojure.test` summary. Exit status 1 if a test fails. |
 | ERT bridge | `tests/elisp/jvm-clj-suite-test.el`, in `mise run test`. It defines one ERT test for each test var and path, for example `emacs-jni-clojure-test/emacs-jni.clj-test/eq-is-true-for-the-same-symbol/await`. | ERT. A failed test prints its `clojure.test` report. |
 
 Both runners use `tests/jvm-clj-test-runner.el` and the namespace `emacs-jni.test-runner`. Each

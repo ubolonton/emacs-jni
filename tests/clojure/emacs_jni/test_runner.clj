@@ -40,13 +40,53 @@
     (clojure.core/apply require namespaces)
     namespaces))
 
+(defn- failure-count
+  "Returns the count of failures and errors in `clojure.test/*report-counters*`."
+  []
+  (let [{:keys [fail error]} @t/*report-counters*]
+    (+ fail error)))
+
+(defn- report-each-test
+  "Wraps the `clojure.test/report` function `report`, so that it also prints
+  one line for each test var, as `cargo test` does."
+  [report]
+  (let [failures-before (atom 0)]
+    (fn [m]
+      (report m)
+      (case (:type m)
+        :begin-test-var (reset! failures-before (failure-count))
+        :end-test-var (t/with-test-out
+                        (println "test" (symbol (:var m)) "..."
+                                 (if (= @failures-before (failure-count)) "ok" "FAILED")))
+        nil))))
+
+(defn- test-vars-of
+  "Returns the test vars of `namespace` in definition order.
+
+  `clojure.test/run-tests` runs them in hash-map order, which changes when a
+  test is added."
+  [namespace]
+  (->> (vals (ns-interns namespace))
+       (filter (comp :test meta))
+       (sort-by (comp :line meta))))
+
 (defn run-all
   "Runs the test namespaces `ns-names`, or every one under `root`, and prints
-  the report. Returns the count of failures and errors."
+  the report. Returns the count of failures and errors.
+
+  Like `clojure.test/run-tests`, but the vars run in definition order, and a
+  line for each var shows its result. It ignores `test-ns-hook`."
   [root & ns-names]
-  (let [{:keys [fail error]} (clojure.core/apply t/run-tests (load-namespaces root ns-names))]
-    (flush)
-    (+ fail error)))
+  (let [namespaces (load-namespaces root ns-names)]
+    (binding [t/report (report-each-test t/report)
+              t/*report-counters* (ref t/*initial-report-counters*)]
+      (doseq [namespace namespaces]
+        (t/do-report {:type :begin-test-ns :ns (the-ns namespace)})
+        (t/test-vars (test-vars-of namespace))
+        (t/do-report {:type :end-test-ns :ns (the-ns namespace)}))
+      (t/do-report (assoc @t/*report-counters* :type :summary))
+      (flush)
+      (failure-count))))
 
 (defn test-var-names
   "Returns the qualified names of the test vars under `root`, one per line.
@@ -54,10 +94,7 @@
   The order is by namespace, then by definition."
   [root]
   (->> (load-namespaces root nil)
-       (mapcat (fn [namespace]
-                 (->> (vals (ns-interns namespace))
-                      (filter (comp :test meta))
-                      (sort-by (comp :line meta)))))
+       (mapcat test-vars-of)
        (map #(str (symbol %)))
        (str/join "\n")))
 
