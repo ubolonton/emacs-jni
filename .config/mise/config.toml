@@ -23,6 +23,10 @@ file = ".config/scripts/build-fixtures.sh"
 description = "Test the checkout: Rust unit tests and every ERT file, or only the given ERT files"
 file = ".config/scripts/test.sh"
 
+[tasks."test:clj"]
+description = "Run the Clojure tests with the clojure.test runner: every namespace, or only the given ones"
+run = ".config/scripts/test.sh --clojure"
+
 [tasks."test:package"]
 description = "Install the package archive, then run every ERT file, or only the given ones, against it"
 depends = ["package"]

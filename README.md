@@ -53,6 +53,8 @@ mise run test                                          # Rust unit tests, then e
 mise run test tests/elisp/jvm-call-test.el             # only the given ERT files
 EMACS_JNI_TEST_FEATURES=test-support mise run test tests/elisp/jvm-crash-test.el
 mise run test:package                                  # every ERT file, against the installed archive
+mise run test:clj                                      # Clojure tests, with the clojure.test runner
+mise run test:clj emacs-jni.clj-test                   # only the given Clojure test namespaces
 mise run lint                                          # rustfmt and clippy checks
 ```
 
@@ -60,6 +62,10 @@ Each ERT file runs in its own `emacs --batch` process. `test` loads the checkout
 `dev-paths.el`. `test:package` builds the archive, installs it into a scratch package directory,
 and loads it through package.el. On the first run, the Clojure tests download the Clojure and
 nREPL jars into `~/.m2/repository`.
+
+Clojure tests are `clojure.test` namespaces in `tests/clojure/`, in files named `*_test.clj`. They
+run in two ways: `test:clj` runs them with the `clojure.test` runner, and `test` runs them through
+ERT, with `tests/elisp/jvm-clj-suite-test.el`.
 
 CI (`.github/workflows/main.yml`) runs these tasks for pull requests and pushes to `main`, on Linux
 (x86-64, arm64), macOS (arm64), and Windows, with Emacs 28 to 31.

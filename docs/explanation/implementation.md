@@ -227,6 +227,28 @@ The script has two modes, which load different code:
 
 The Clojure tests get their jars from `jvm-clj-ensure-jars`. The first run downloads them.
 
+### Clojure tests
+
+The `clojure.test` namespaces in `tests/clojure/` test Clojure calls into Lisp from the Clojure
+side. They must run in the JVM of an Emacs, because only that JVM can call into Lisp. Two runners
+run the same files:
+
+| Runner | Entry | Report |
+|---|---|---|
+| Clojure-owned | `mise run test:clj` (`test.sh --clojure`). `jvm-clj-test-runner-run-batch-and-exit` calls `clojure.test/run-tests` once for each path. | The `clojure.test` report. Exit status 1 if a test fails. |
+| ERT bridge | `tests/elisp/jvm-clj-suite-test.el`, in `mise run test`. It defines one ERT test for each test var and path, for example `emacs-jni-clojure-test/emacs-jni.clj-test/eq-is-true-for-the-same-symbol/await`. | ERT. A failed test prints its `clojure.test` report. |
+
+Both runners use `tests/jvm-clj-test-runner.el` and the namespace `emacs-jni.test-runner`. Each
+test runs on two paths, so the same test covers both ways that a call into Lisp can run:
+
+- `await`: a JVM thread runs the test, through `jvm-clj-eval-string-await`. Calls into Lisp go
+  through the queue.
+- `direct`: the Emacs main thread runs the test, through `jvm-clj-eval-string-direct`. Calls into
+  Lisp run at once.
+
+The bridge calls `clojure.test/test-vars` for each var. So it runs `:once` fixtures for each var,
+not once for each namespace. A test must not depend on state from another test.
+
 | Variable | Effect |
 |---|---|
 | `EMACS_JNI_TEST_FEATURES` | Cargo features for the build. `test-support` adds `jvm--test-panic`, which `tests/elisp/jvm-crash-test.el` needs. Without it, the test skips itself. |

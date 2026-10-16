@@ -99,6 +99,8 @@ jobs:
 
       - run: mise run test
 
+      - run: mise run test:clj
+
       # Only a build with this feature has the panic trigger that the crash test needs.
       - run: mise run test tests/elisp/jvm-crash-test.el
         env:
@@ -190,6 +192,8 @@ jobs:
           cygpath -w "$(dirname "$emacs_exe")" >> "$GITHUB_PATH"
 
       - run: .config/scripts/test.sh
+
+      - run: .config/scripts/test.sh --clojure
 
       - run: .config/scripts/test.sh tests/elisp/jvm-crash-test.el
         env:
