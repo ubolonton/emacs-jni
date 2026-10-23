@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# Drive a disposable Emacs daemon that loads this checkout's `jvm' package and debug module.
+#
+# Usage: verify-emacs COMMAND [ARGS...]
+#
+#   launch            Build the module and fixtures, start the daemon, wait until it is usable.
+#   doctor            Read-only health check of the daemon of this run.
+#   eval FORM         Evaluate the Lisp FORM in the daemon. Print the value; exit 1 on a signal.
+#   nrepl PORT CODE   Evaluate Clojure CODE through the nREPL server on PORT. Print the replies.
+#   log               Print the *jvm-log* buffer of the daemon.
+#   cleanup           Stop the daemon of this run and delete its state. Keep the evidence.
+#
+# The run ID comes from VERIFY_RUN_ID (default: `default'). Each run has its own socket and state
+# directory, so two runs with different IDs do not share an Emacs. Every eval and nrepl command
+# appends the command, its output, and its exit code to the evidence transcript.
+set -euo pipefail
+
+ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+RUN_ID="${VERIFY_RUN_ID:-default}"
+STATE_DIR="$ROOT/target/verify/$RUN_ID"
+EVIDENCE_DIR="$ROOT/target/verify-evidence/$RUN_ID"
+# The socket cannot live in target/: some checkouts sit on file systems (virtiofs) that do not
+# support Unix sockets. Emacs also requires the socket directory to be private (mode 700).
+SOCKET_DIR="${XDG_RUNTIME_DIR:-$HOME/.cache}/emacs-jni-verify/$RUN_ID"
+SOCKET="$SOCKET_DIR/server"
+PID_FILE="$STATE_DIR/emacs.pid"
+TRANSCRIPT="$EVIDENCE_DIR/transcript.txt"
+READY_TIMEOUT_SECONDS=30
+
+die() {
+    echo "verify-emacs: $*" >&2
+    exit 1
+}
+
+# Evaluates FORM in the daemon, with no transcript entry.
+client_eval() {
+    emacsclient --socket-name="$SOCKET" --eval "$1"
+}
+
+# Appends one transcript entry: the command, its output, and its exit code.
+record() {
+    local command="$1" output="$2" status="$3"
+    mkdir -p "$EVIDENCE_DIR"
+    {
+        echo "### $(date -u +%Y-%m-%dT%H:%M:%SZ) $command"
+        echo "$output"
+        echo "### exit $status"
+        echo
+    } >>"$TRANSCRIPT"
+}
+
+daemon_alive() {
+    [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+cmd_launch() {
+    if daemon_alive; then
+        die "run '$RUN_ID' already has a daemon (pid $(cat "$PID_FILE")). Use another VERIFY_RUN_ID, or cleanup."
+    fi
+    cd "$ROOT"
+    # `mise run fixtures` builds the module first: the fixture jars need its shim classes.
+    mise run fixtures
+    rm -rf "$STATE_DIR" "$SOCKET_DIR"
+    mkdir -p "$STATE_DIR" "$EVIDENCE_DIR" "$SOCKET_DIR"
+    chmod 700 "$SOCKET_DIR"
+    # `--daemon=PATH` with an absolute path puts the server socket at PATH. The daemon detaches;
+    # its stdout and stderr go to emacs.log.
+    emacs -Q --daemon="$SOCKET" -l "$ROOT/dev-paths.el" \
+        --eval "(setq server-raise-frame nil)" \
+        >"$STATE_DIR/emacs.log" 2>&1
+    local deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
+    until client_eval "(progn (require 'jvm) (require 'jvm-clj) (featurep 'emacs-jni))" 2>/dev/null \
+        | grep -qx t; do
+        [ $SECONDS -lt $deadline ] || die "daemon not usable after ${READY_TIMEOUT_SECONDS}s; see $STATE_DIR/emacs.log"
+        sleep 0.5
+    done
+    client_eval "(emacs-pid)" >"$PID_FILE"
+    echo "launched run '$RUN_ID': pid $(cat "$PID_FILE"), socket $SOCKET"
+    echo "fixtures: $ROOT/target/test-fixtures/{greeter,calc}.jar"
+    echo "evidence: $EVIDENCE_DIR"
+}
+
+cmd_doctor() {
+    daemon_alive || die "no live daemon for run '$RUN_ID' (pid file: $PID_FILE)"
+    local pid
+    pid="$(cat "$PID_FILE")"
+    [ "$(client_eval "(emacs-pid)")" = "$pid" ] || die "socket $SOCKET does not belong to pid $pid"
+    [ "$(client_eval "(jvm-ping)")" = t ] || die "module does not answer jvm-ping"
+    local module
+    module="$(client_eval "(jvm--module-file)")"
+    [ "$module" = "\"$ROOT/target/debug/libemacs_jni.so\"" ] \
+        || [ "$module" = "\"$ROOT/target/debug/libemacs_jni.dylib\"" ] \
+        || die "daemon loaded module $module, not this checkout's target/debug/"
+    local library
+    library="$(client_eval "(locate-library \"jvm\")")"
+    case "$library" in
+        "\"$ROOT/elisp/"*) ;;
+        *) die "daemon loads jvm.el from $library, not $ROOT/elisp/" ;;
+    esac
+    echo "run:        $RUN_ID (pid $pid)"
+    echo "checkout:   $ROOT @ $(git -C "$ROOT" rev-parse --short HEAD)$(git -C "$ROOT" diff --quiet HEAD -- src elisp java clojure || echo ' +uncommitted')"
+    echo "module:     $module"
+    echo "jvm.el:     $library"
+    echo "emacs:      $(client_eval "emacs-version")"
+    echo "jvm-status: $(client_eval "(jvm-status)")"
+}
+
+cmd_eval() {
+    [ $# -eq 1 ] || die "usage: verify-emacs eval FORM"
+    daemon_alive || die "no live daemon for run '$RUN_ID'"
+    local output status=0
+    output="$(client_eval "$1" 2>&1)" || status=$?
+    record "eval $1" "$output" "$status"
+    echo "$output"
+    return "$status"
+}
+
+cmd_nrepl() {
+    [ $# -eq 2 ] || die "usage: verify-emacs nrepl PORT CODE"
+    local output status=0
+    output="$(bb "$(dirname "$0")/nrepl-eval.clj" "$1" "$2" 2>&1)" || status=$?
+    record "nrepl $1 $2" "$output" "$status"
+    echo "$output"
+    return "$status"
+}
+
+cmd_log() {
+    daemon_alive || die "no live daemon for run '$RUN_ID'"
+    # `emacsclient --eval' prints values with `prin1'. Write the buffer to a file to get raw text.
+    local file="$STATE_DIR/jvm-log.txt"
+    client_eval "(with-current-buffer (get-buffer-create jvm--log-buffer-name)
+                   (write-region nil nil \"$file\" nil 0))" >/dev/null
+    cat "$file"
+}
+
+cmd_cleanup() {
+    if daemon_alive; then
+        local pid
+        pid="$(cat "$PID_FILE")"
+        client_eval "(kill-emacs)" >/dev/null 2>&1 || true
+        local deadline=$((SECONDS + 10))
+        while kill -0 "$pid" 2>/dev/null && [ $SECONDS -lt $deadline ]; do
+            sleep 0.2
+        done
+        # Kill only the process that this run started, by its recorded pid.
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid"
+        fi
+    fi
+    rm -rf "$STATE_DIR" "$SOCKET_DIR"
+    echo "cleaned up run '$RUN_ID'; evidence kept in $EVIDENCE_DIR"
+}
+
+command="${1:-}"
+[ -n "$command" ] || die "usage: verify-emacs launch|doctor|eval|nrepl|log|cleanup"
+shift
+case "$command" in
+    launch) cmd_launch "$@" ;;
+    doctor) cmd_doctor "$@" ;;
+    eval) cmd_eval "$@" ;;
+    nrepl) cmd_nrepl "$@" ;;
+    log) cmd_log "$@" ;;
+    cleanup) cmd_cleanup "$@" ;;
+    *) die "unknown command: $command" ;;
+esac
