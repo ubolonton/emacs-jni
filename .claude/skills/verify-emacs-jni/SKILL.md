@@ -1,15 +1,19 @@
 ---
 name: verify-emacs-jni
-description: Drive emacs-jni the way a user does — a real interactive Emacs daemon that loads this checkout's `jvm`/`jvm-clj` package and debug module — and capture proof. Use to prove a change to the Lisp API, the Rust module, the Java shim, or the Clojure bridge works end to end (JVM lifecycle, Java calls, jar loading, Lisp callbacks, Clojure eval, nREPL), beyond what the batch ERT tests show.
+description: Drive emacs-jni the way a user does — a real interactive Emacs daemon that loads this checkout's `jvm`/`jvm-clj` package and debug module — and capture proof. Use to explore new behavior of the Lisp API, the Rust module, the Java shim, or the Clojure bridge without writing a test first (JVM lifecycle, Java calls, jar loading, Lisp callbacks, Clojure eval, nREPL), or to check a change to the wakeup pipe on an idle Emacs. It does not replace the ERT tests: it has no assertions and does not detect regressions.
 ---
 
 # Verify emacs-jni
 
 The user surface is the Lisp API (`elisp/jvm.el`, `elisp/jvm-clj.el`) inside a running Emacs, plus
-an nREPL client that connects to the embedded JVM. ERT tests run in `emacs --batch`, where Emacs
-never goes idle. This harness runs a real Emacs daemon: between commands the daemon is idle, so
-the wakeup pipe drains the inbound queue as it does for a user. `-async` callbacks and Clojure→Lisp
-requests from nREPL threads take that path.
+an nREPL client that connects to the embedded JVM. ERT tests run in `emacs --batch` and service the
+inbound queue while Lisp waits in `accept-process-output`. This harness runs a real Emacs daemon:
+between commands the daemon is idle, so the same process filter runs from the idle command loop, as
+it does for a user. The daemon also keeps its state between commands, so an agent can probe behavior
+that no test covers yet.
+
+A behavior that must keep working needs an ERT test. A transcript from this harness is evidence for
+one run only.
 
 All commands go through one helper. Run it from the repo root:
 
