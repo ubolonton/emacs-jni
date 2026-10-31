@@ -59,8 +59,8 @@ pub(crate) fn complete_future_with_reply<'local>(
     value: crate::protocol::LispOutcome,
 ) -> jni::errors::Result<()> {
     match value {
-        crate::protocol::LispOutcome::Signal { symbol, data } => {
-            let ex = build_non_local_exit(env, NON_LOCAL_EXIT_SIGNAL, *symbol, *data)?;
+        crate::protocol::LispOutcome::Signal { symbol, data, message } => {
+            let ex = build_non_local_exit(env, NON_LOCAL_EXIT_SIGNAL, *symbol, *data, message)?;
             env.call_method(
                 future,
                 jni::jni_str!("completeExceptionally"),
@@ -68,8 +68,8 @@ pub(crate) fn complete_future_with_reply<'local>(
                 &[jni::objects::JValueOwned::Object(ex).borrow()],
             )?;
         }
-        crate::protocol::LispOutcome::Throw { tag, value } => {
-            let ex = build_non_local_exit(env, NON_LOCAL_EXIT_THROW, *tag, *value)?;
+        crate::protocol::LispOutcome::Throw { tag, value, message } => {
+            let ex = build_non_local_exit(env, NON_LOCAL_EXIT_THROW, *tag, *value, message)?;
             env.call_method(
                 future,
                 jni::jni_str!("completeExceptionally"),
@@ -91,15 +91,20 @@ pub(crate) fn complete_future_with_reply<'local>(
 }
 
 /// Builds a `LispSignal` ([`NON_LOCAL_EXIT_SIGNAL`]) or `LispThrow` ([`NON_LOCAL_EXIT_THROW`])
-/// from two classified values: symbol/data or tag/value.
+/// from two classified values (symbol/data or tag/value) and the Java message.
 fn build_non_local_exit<'local>(
     env: &mut jni::Env<'local>,
     kind: i32,
     a: crate::protocol::LispOutcome,
     b: crate::protocol::LispOutcome,
+    message: Option<String>,
 ) -> jni::errors::Result<jni::objects::JObject<'local>> {
     let a_obj = build_lisp_reply_object(env, a)?;
     let b_obj = build_lisp_reply_object(env, b)?;
+    let message_obj = match message {
+        Some(message) => jni::objects::JObject::from(env.new_string(message)?),
+        None => jni::objects::JObject::null(),
+    };
     let class = if kind == NON_LOCAL_EXIT_SIGNAL {
         env.find_class(jni::jni_str!("emacs_jni/core/LispSignal"))?
     } else {
@@ -107,8 +112,12 @@ fn build_non_local_exit<'local>(
     };
     env.new_object(
         &class,
-        jni::jni_sig!((a: java.lang.Object, b: java.lang.Object) -> void),
-        &[jni::objects::JValue::Object(&a_obj), jni::objects::JValue::Object(&b_obj)],
+        jni::jni_sig!((a: java.lang.Object, b: java.lang.Object, message: java.lang.String) -> void),
+        &[
+            jni::objects::JValue::Object(&a_obj),
+            jni::objects::JValue::Object(&b_obj),
+            jni::objects::JValue::Object(&message_obj),
+        ],
     )
 }
 
@@ -121,8 +130,9 @@ pub(crate) fn throw_non_local_exit(
     kind: i32,
     a: crate::protocol::LispOutcome,
     b: crate::protocol::LispOutcome,
+    message: Option<String>,
 ) -> jni::errors::Error {
-    let thrown = build_non_local_exit(env, kind, a, b)
+    let thrown = build_non_local_exit(env, kind, a, b, message)
         .and_then(|ex| env.cast_local::<jni::objects::JThrowable>(ex))
         .and_then(|ex| env.throw(&ex));
     match thrown {

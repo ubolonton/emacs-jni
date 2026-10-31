@@ -213,20 +213,42 @@ The check for an existing VM has no lock. So parallel unit tests can race, and t
 finds `libjvm` through `JAVA_HOME`. Unit tests cover the parts that need no Emacs, for example the
 status state machine, queue order, and JNI conversion.
 
-`.config/scripts/test.sh` runs the ERT integration tests in `test/*.el`. It builds the fixture
-jars and runs each test file in a separate `emacs -Q --batch` process. Each file needs a separate
-process because the JVM and the module status are per-process singletons, and a restart reuses the
-destroyed VM. Give file paths as arguments to run only those files.
+`.config/scripts/test.sh` runs the ERT integration tests in `tests/elisp/*.el`. It builds the
+fixture jars and runs each test file in a separate `emacs -Q --batch` process. Each file needs a
+separate process because the JVM and the module status are per-process singletons, and a restart
+reuses the destroyed VM. Give file paths as arguments to run only those files.
 
 The script has two modes, which load different code:
 
 | Task | Loads | Also |
 |---|---|---|
 | `mise run test` | The checkout, through `dev-paths.el`: `elisp/`, `target/debug/`, and the sources at the root. | Builds the debug module. Without file arguments, runs the Rust unit tests first. |
-| `mise run test:package` | The archive from `mise run package`, installed into `target/package-test-elpa/` and loaded through package.el (byte-compiled). | `test/jvm-crash-test.el` skips itself: the release module has no `test-support`. |
+| `mise run test:package` | The archive from `mise run package`, installed into `target/package-test-elpa/` and loaded through package.el (byte-compiled). | `tests/elisp/jvm-crash-test.el` skips itself: the release module has no `test-support`. |
 
 The Clojure tests get their jars from `jvm-clj-ensure-jars`. The first run downloads them.
 
+### Clojure tests
+
+The `clojure.test` namespaces in `tests/clojure/` test Clojure calls into Lisp from the Clojure
+side. They must run in the JVM of an Emacs, because only that JVM can call into Lisp. Two runners
+run the same files:
+
+| Runner | Entry | Report |
+|---|---|---|
+| Clojure-owned | `mise run test:clj` (`test.sh --clojure`). `jvm-clj-test-runner-run-batch-and-exit` runs the suite once for each path, with the `clojure.test` reporter. | One line for each test, as in `cargo test`, then the `clojure.test` summary. Exit status 1 if a test fails. |
+| ERT bridge | `tests/elisp/jvm-clj-suite-test.el`, in `mise run test`. It defines one ERT test for each test var and path, for example `emacs-jni-clojure-test/emacs-jni.clj-test/eq-is-true-for-the-same-symbol/await`. | ERT. A failed test prints its `clojure.test` report. |
+
+Both runners use `tests/jvm-clj-test-runner.el` and the namespace `emacs-jni.test-runner`. Each
+test runs on two paths, so the same test covers both ways that a call into Lisp can run:
+
+- `await`: a JVM thread runs the test, through `jvm-clj-eval-string-await`. Calls into Lisp go
+  through the queue.
+- `direct`: the Emacs main thread runs the test, through `jvm-clj-eval-string-direct`. Calls into
+  Lisp run at once.
+
+The bridge calls `clojure.test/test-vars` for each var. So it runs `:once` fixtures for each var,
+not once for each namespace. A test must not depend on state from another test.
+
 | Variable | Effect |
 |---|---|
-| `EMACS_JNI_TEST_FEATURES` | Cargo features for the build. `test-support` adds `jvm--test-panic`, which `test/jvm-crash-test.el` needs. Without it, the test skips itself. |
+| `EMACS_JNI_TEST_FEATURES` | Cargo features for the build. `test-support` adds `jvm--test-panic`, which `tests/elisp/jvm-crash-test.el` needs. Without it, the test skips itself. |

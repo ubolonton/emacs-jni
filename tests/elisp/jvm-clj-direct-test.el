@@ -4,6 +4,10 @@
 ;; is blocked in the JVM, so it cannot drain the async queue; the `Lisp.*'
 ;; natives run the request directly (`lisp::runtime'). If that breaks,
 ;; these tests deadlock instead of failing.
+;;
+;; These tests check how a Lisp non-local exit leaves the direct call.  The
+;; Clojure tests in tests/clojure/ cover the callbacks themselves, on the
+;; `direct' path of jvm-clj-suite-test.el.
 
 (require 'ert)
 (require 'jvm)
@@ -19,27 +23,6 @@
                                  (list "clojure.core" "eval")))
         (form (jvm-call-direct "clojure.java.api.Clojure" "read" (list code))))
     (jvm-call-direct evalfn "invoke" (list form))))
-
-(ert-deftest emacs-jni-jvm-clj-direct-test/reentrant-sync-natives-do-not-deadlock ()
-  "intern + is-not-nil? called back from Clojure, inside a direct call."
-  (jvm-clj-direct-test--ensure-ready)
-  (should (eq (jvm-clj-direct-test--eval
-               "(let [sym (emacs-jni.clj/intern \"car\")]
-                  (emacs-jni.clj/is-not-nil? sym))")
-              t)))
-
-(ert-deftest emacs-jni-jvm-clj-direct-test/reentrant-apply-returns-a-value ()
-  "apply (applyAsync + deref) back into Lisp resolves synchronously."
-  (jvm-clj-direct-test--ensure-ready)
-  (should (equal (jvm-clj-direct-test--eval
-                  "(emacs-jni.clj/apply (symbol \"concat\") \"a\" \"b\")")
-                 "ab")))
-
-(ert-deftest emacs-jni-jvm-clj-direct-test/reentrant-require-symbol-is-callable ()
-  (jvm-clj-direct-test--ensure-ready)
-  (should (= (jvm-clj-direct-test--eval
-              "((emacs-jni.clj/require-symbol (quote +)) 1 2 3)")
-             6)))
 
 (ert-deftest emacs-jni-jvm-clj-direct-test/reentrant-lisp-signal-propagates-out ()
   "A Lisp signal in a reentrant callback is re-raised as itself,

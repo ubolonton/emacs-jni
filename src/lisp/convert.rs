@@ -100,6 +100,22 @@ pub(crate) fn from_input<'e>(env: &'e Env, arg: &LispInput) -> EmacsResult<Value
     }
 }
 
+/// Returns the Java message for a Lisp `signal` that crosses to the JVM: the condition
+/// `(SYMBOL . DATA)` printed with `%S`, as in `(error "boom")`. Returns `None` if printing fails.
+///
+/// Call it on the main thread, while the values are live. A message built later in Java would
+/// need a call back into Lisp, which can block.
+pub(crate) fn signal_message(env: &Env, symbol: Value, data: Value) -> Option<String> {
+    let condition = env.cons(symbol, data).ok()?;
+    env.call("format", ("%S", condition)).and_then(Value::into_rust).ok()
+}
+
+/// Returns the Java message for a Lisp `throw` that crosses to the JVM, as in
+/// `(throw my-tag 42)`. Returns `None` if printing fails. Call it as [`signal_message`].
+pub(crate) fn throw_message(env: &Env, tag: Value, value: Value) -> Option<String> {
+    env.call("format", ("(throw %S %S)", tag, value)).and_then(Value::into_rust).ok()
+}
+
 /// Classifies a Lisp value for return to Clojure. Scalars, strings, and interned symbols convert
 /// to Clojure values; anything else becomes [`LispOutcome::Ptr`], an opaque `LispObject`. `nil`
 /// becomes `nil` and `t` becomes `true`, so a Lisp predicate result works in a Clojure

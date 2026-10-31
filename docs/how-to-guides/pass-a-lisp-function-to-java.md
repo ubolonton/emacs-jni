@@ -3,7 +3,7 @@
 This guide passes a Lisp function as an argument, so that Java can call it. It assumes that you
 can call a Java method. See [How to call Java from Lisp](call-java-from-lisp.md).
 
-The examples use `Calc` from `test/fixtures/Calc.java`. Java receives the function as an
+The examples use `Calc` from `tests/fixtures/Calc.java`. Java receives the function as an
 `emacs_jni.core.LispCallable`. Its `call` method returns a `CompletableFuture`.
 
 ## Pass a lambda

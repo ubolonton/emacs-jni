@@ -52,10 +52,12 @@ pub enum LispOutcome {
     Bool(bool),
     /// A boxed `emacs::GlobalRef` pointer: an opaque `LispObject`.
     Ptr(i64),
-    /// A Lisp `signal`: completes the Java future exceptionally with a `LispSignal`.
-    Signal { symbol: Box<LispOutcome>, data: Box<LispOutcome> },
-    /// A Lisp `throw`: completes the Java future exceptionally with a `LispThrow`.
-    Throw { tag: Box<LispOutcome>, value: Box<LispOutcome> },
+    /// A Lisp `signal`: completes the Java future exceptionally with a `LispSignal`. `message`
+    /// becomes its Java message (see [`crate::lisp::convert::signal_message`]).
+    Signal { symbol: Box<LispOutcome>, data: Box<LispOutcome>, message: Option<String> },
+    /// A Lisp `throw`: completes the Java future exceptionally with a `LispThrow`. `message`
+    /// becomes its Java message (see [`crate::lisp::convert::throw_message`]).
+    Throw { tag: Box<LispOutcome>, value: Box<LispOutcome>, message: Option<String> },
 }
 
 /// One value crossing Clojure → Lisp: an `apply` function or argument, or the operand of

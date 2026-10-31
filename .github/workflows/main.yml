@@ -99,8 +99,10 @@ jobs:
 
       - run: mise run test
 
+      - run: mise run test:clj
+
       # Only a build with this feature has the panic trigger that the crash test needs.
-      - run: mise run test test/jvm-crash-test.el
+      - run: mise run test tests/elisp/jvm-crash-test.el
         env:
           EMACS_JNI_TEST_FEATURES: test-support
 
@@ -191,7 +193,9 @@ jobs:
 
       - run: .config/scripts/test.sh
 
-      - run: .config/scripts/test.sh test/jvm-crash-test.el
+      - run: .config/scripts/test.sh --clojure
+
+      - run: .config/scripts/test.sh tests/elisp/jvm-crash-test.el
         env:
           EMACS_JNI_TEST_FEATURES: test-support
 

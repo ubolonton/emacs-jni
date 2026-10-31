@@ -5,8 +5,8 @@
 | Variable | Read by | Effect |
 |---|---|---|
 | `JAVA_HOME` | the module, when it creates the JVM | JDK used to find `libjvm.so`, `libjvm.dylib`, or `jvm.dll`. If unset, the module uses the `java` executable on `PATH`. mise sets it in tasks. |
-| `EMACS_JNI_TEST_FEATURES` | `mise run test` | Cargo features for the debug test build. `test-support` enables `test/jvm-crash-test.el`. Without it, that test skips itself, as it does in `mise run test:package`. |
-| `EMACS_JNI_GREETER_JAR` | `test/jvm-load-jar-test.el` | Path of the test fixture jar. `mise run test` and `mise run test:package` set it. |
+| `EMACS_JNI_TEST_FEATURES` | `mise run test` | Cargo features for the debug test build. `test-support` enables `tests/elisp/jvm-crash-test.el`. Without it, that test skips itself, as it does in `mise run test:package`. |
+| `EMACS_JNI_GREETER_JAR` | `tests/elisp/jvm-load-jar-test.el` | Path of the test fixture jar. `mise run test` and `mise run test:package` set it. |
 
 ## Configuration variables
 
@@ -22,8 +22,8 @@ see [Lisp API reference](lisp-api.md#variables).
 | `target/release/libemacs_jni.so` [^module] | `mise run package` | The release dynamic module, copied into the archive. |
 | `target/package/jvm-<version>.tar` | `mise run package` | The package.el archive for the host platform: `jvm.el`, `jvm-clj.el`, `jvm-pkg.el`, the module in `module/`, and the `src/`, `java/`, `clojure/` sources. Install it with `M-x package-install-file`. |
 | `target/package-test-elpa/` | `mise run test:package` | Scratch `package-user-dir` that the archive is installed into for the ERT tests. |
-| `target/emacs-jni-shim-classes/` | `cargo build` (`build.rs` runs `javac`) | Compiled classes of package `emacs_jni.core`: `LispCallable`, `LispFunction`, `LispNonLocalExit`, `LispSignal`, `LispThrow`, `ReleaseNotifier`, `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Add this directory to the `javac` classpath to compile Java code that uses these types, as for `test/fixtures/Calc.java`. |
-| `target/test-fixtures/` | `mise run fixtures` | `greeter.jar` and `calc.jar`, from `test/fixtures/`. |
+| `target/emacs-jni-shim-classes/` | `cargo build` (`build.rs` runs `javac`) | Compiled classes of package `emacs_jni.core`: `LispCallable`, `LispFunction`, `LispNonLocalExit`, `LispSignal`, `LispThrow`, `ReleaseNotifier`, `LispObject`, `Lisp`, `LispRefReleaseNotifier`, `LispSymbol`. Add this directory to the `javac` classpath to compile Java code that uses these types, as for `tests/fixtures/Calc.java`. |
+| `target/test-fixtures/` | `mise run fixtures` | `greeter.jar` and `calc.jar`, from `tests/fixtures/`. |
 
 [^module]: `libemacs_jni.dylib` on macOS, `emacs_jni.dll` on Windows. `jvm.el` uses the file name
     that cargo gives on each platform.

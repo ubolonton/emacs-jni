@@ -66,4 +66,14 @@ public class Calc {
             return "not-a-lisp-signal:" + cause;
         }
     }
+
+    /** Returns the message of the exception from a failure of {@code fn}. */
+    public static String callbackErrorMessage(emacs_jni.core.LispCallable fn, long n) throws Exception {
+        try {
+            fn.call(n).get(10, java.util.concurrent.TimeUnit.SECONDS);
+            return "no-exception";
+        } catch (java.util.concurrent.ExecutionException e) {
+            return e.getCause().getMessage();
+        }
+    }
 }

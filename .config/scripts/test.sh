@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Usage: test.sh [--package] [ERT-FILE...]
+#        test.sh [--package] --clojure [NAMESPACE...]
 #
 # Without --package, test the checkout: build the debug module (with the cargo features in
 # EMACS_JNI_TEST_FEATURES) and load it through dev-paths.el. With no ERT-FILE, also run the Rust
@@ -8,12 +9,20 @@
 # With --package, test the archive that `mise run package` built: install it into a scratch
 # `package-user-dir` and load it through package.el.
 #
-# Without ERT-FILE, run every test/*.el file.
+# Without ERT-FILE, run every tests/elisp/*.el file.
+#
+# With --clojure, run the Clojure tests in tests/clojure/ with the `clojure.test' runner instead,
+# on each path. Without NAMESPACE, run every test namespace.
 set -euo pipefail
 
 MODE=dev
 if [ "${1:-}" = --package ]; then
     MODE=package
+    shift
+fi
+CLOJURE=
+if [ "${1:-}" = --clojure ]; then
+    CLOJURE=1
     shift
 fi
 
@@ -28,7 +37,7 @@ fi
 if [ "$MODE" = dev ]; then
     # The fixtures need the shim classes that build.rs compiles.
     cargo build ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
-    if [ $# -eq 0 ]; then
+    if [ $# -eq 0 ] && [ -z "$CLOJURE" ]; then
         cargo test --lib
     fi
     EMACS_SETUP=(-l dev-paths.el)
@@ -43,8 +52,13 @@ fi
 .config/scripts/build-fixtures.sh
 export EMACS_JNI_GREETER_JAR="$ROOT/target/test-fixtures/greeter.jar"
 
+if [ -n "$CLOJURE" ]; then
+    exec emacs -Q --batch "${EMACS_SETUP[@]}" -l tests/jvm-clj-test-runner.el \
+        -f jvm-clj-test-runner-run-batch-and-exit "$@"
+fi
+
 if [ $# -eq 0 ]; then
-    set -- test/*.el
+    set -- tests/elisp/*.el
 fi
 
 # One Emacs process per file: the JVM and the Rust status are per-process singletons.

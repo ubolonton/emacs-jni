@@ -169,6 +169,9 @@ A field that holds a symbol contains a `LispSymbol`. Use `l/->clj` to get a Cloj
 Here, `.data` is the Lisp list `("boom")`, so it is a `LispObject`. Read it with
 `(.prin1ToString (.-data e))`.
 
+The exception message is the condition that Lisp printed, so `(.getMessage e)` is
+`(error "boom")`. A stack trace or a `clojure.test` report shows it with no extra code.
+
 To catch both kinds of exit, catch `LispNonLocalExit`:
 
 ```clojure
