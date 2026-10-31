@@ -33,32 +33,66 @@ fails with `ExceptionInInitializerError'."
   (let ((err (should-error (jvm-clj-eval-string-await "(/ 1 0)") :type 'jvm-error)))
     (should (string-match-p "Divide by zero" (cadr err)))))
 
-(ert-deftest emacs-jni-jvm-clj-nrepl-test/start-serves-real-bencode-protocol ()
-  "An nREPL server answers a bencode `eval' from a TCP client.
+(defun jvm-clj-eval-test--nrepl-eval (port code expected)
+  "Send CODE as a bencode `eval' to the nREPL server on PORT.
+Return the raw replies once they match the regexp EXPECTED, or after 5 s.
 The client is an Emacs network process, which runs on every platform."
-  (jvm-clj-eval-test--ensure-ready)
-  (let* ((start-result (jvm-clj-nrepl-start-await))
-         (port (car start-result))
-         (server (cdr start-result))
-         (code "(+ 40 (* 2 1))")
-         (response "")
+  (let* ((response "")
          (client (make-network-process
                   :name "jvm-clj-nrepl-test-client"
                   :host "127.0.0.1"
                   :service port
                   :coding 'binary
                   :filter (lambda (_process output)
-                            (setq response (concat response output))))))
+                            (setq response (concat response output)))))
+         (deadline (+ (float-time) 5)))
     (unwind-protect
-        (let ((deadline (+ (float-time) 5)))
+        (progn
           (process-send-string
-           client (format "d2:op4:eval4:code%d:%s2:id1:1e" (length code) code))
-          ;; Bencode for the `value' key and the result "42".
-          (while (and (not (string-match-p "5:value2:42" response))
+           client (format "d2:op4:eval4:code%d:%s2:id1:1e" (string-bytes code) code))
+          ;; This also runs the pipe process filter, which services the inbound queue.
+          (while (and (not (string-match-p expected response))
                       (< (float-time) deadline))
             (accept-process-output client 0.1))
-          (should (string-match-p "5:value2:42" response)))
-      (delete-process client)
+          response)
+      (delete-process client))))
+
+(ert-deftest emacs-jni-jvm-clj-nrepl-test/start-serves-real-bencode-protocol ()
+  "An nREPL server answers a bencode `eval' from a TCP client."
+  (jvm-clj-eval-test--ensure-ready)
+  (let* ((start-result (jvm-clj-nrepl-start-await))
+         (port (car start-result))
+         (server (cdr start-result))
+         ;; Bencode for the `value' key and the result "42".
+         (expected "5:value2:42"))
+    (unwind-protect
+        (should (string-match-p
+                 expected
+                 (jvm-clj-eval-test--nrepl-eval port "(+ 40 (* 2 1))" expected)))
+      (jvm-clj-nrepl-stop-await server))))
+
+(defvar jvm-clj-eval-test--set-from-nrepl nil
+  "Set by Clojure code that an nREPL client sends.")
+
+(ert-deftest emacs-jni-jvm-clj-nrepl-test/client-changes-lisp-state ()
+  "Code from an nREPL client calls Lisp, and the change is visible in Lisp.
+The nREPL thread is not the Emacs main thread, so the call goes through the
+inbound queue."
+  (jvm-clj-eval-test--ensure-ready)
+  (setq jvm-clj-eval-test--set-from-nrepl nil)
+  (let* ((start-result (jvm-clj-nrepl-start-await))
+         (port (car start-result))
+         (server (cdr start-result))
+         (expected "5:value2:42"))
+    (unwind-protect
+        (progn
+          (should (string-match-p
+                   expected
+                   (jvm-clj-eval-test--nrepl-eval
+                    port
+                    "(emacs-jni.clj/apply 'set 'jvm-clj-eval-test--set-from-nrepl 42)"
+                    expected)))
+          (should (equal jvm-clj-eval-test--set-from-nrepl 42)))
       (jvm-clj-nrepl-stop-await server))))
 
 (ert-deftest emacs-jni-jvm-clj-nrepl-test/bind-opens-the-server-beyond-loopback ()
