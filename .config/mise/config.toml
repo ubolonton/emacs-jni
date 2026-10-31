@@ -1,5 +1,5 @@
 [tools]
-babashka = { version = "latest", exe = "bb" }
+babashka = "latest"
 clojure = "latest"
 java = "openjdk-26"
 
